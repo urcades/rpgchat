@@ -15,6 +15,8 @@
 
 ## Log line
 
+![A screenshot of the current game interface, as of June 13th 2024](game-jun13.png)
+
 A multi-user messaging interface that facilitates roguelike-like interaction with the environment.
 
 > [!CAUTION]
