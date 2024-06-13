@@ -1,0 +1,26 @@
+# Node.js dependencies
+node_modules/
+
+# SQLite database file
+database.sqlite
+
+# Package lock file
+package-lock.json
+
+# Log files
+*.log
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# Temporary files
+*.swp
+*.swo
+*~
