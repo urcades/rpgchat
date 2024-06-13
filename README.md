@@ -32,7 +32,13 @@ A multi-user messaging interface that facilitates roguelike-like interaction wit
 
 ## Why?
 
-Basically I wanted to write up a really simple html-only chat interface where each member of the chat has RPG stats which are affected by certain types of posting. I have MMO-specific insights into the mechanics of "pre-social media" social internet, and have a sense that MMOs were really popular due to their being chatrooms with activities attached. As soon as chatrooms (and later, chat platforms... and later, social networks) and online text-based communication massively proliferated, one did not need to install a heavy game to get their socialization fix.
+Basically I wanted to write up a really simple html-only chat interface where each member of the chat has RPG stats which are affected by certain types of posting. I have MMO-specific insights into the mechanics of "pre-social media" social internet, and have a sense that MMOs were really popular due to their being chatrooms with activities attached. 
+
+As soon as chatrooms (and later, chat platforms... and later, social networks) and online text-based communication massively proliferated, one did not need to install a heavy game to get their socialization fix, and in-chat activities (including entire games) were shed over time. 
+
+Most people are content with simple chat interfaces for communicating with people, but I've been missing communication environments where I can actively interact with other people besides speaking to them, and I'm not in the mood to install heavy multiplayer games just to communicate with people (and fight them).
+
+Thus RPGchat!
 
 ## Details
 
