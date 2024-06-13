@@ -13,6 +13,14 @@
 - [ ] Design per-class clicker interface
 - [ ] Migrate to saner(?) development stack
 
+## Development
+
+0. Install npm if you don't have it already
+1. Build dependencies with `npm install`
+2. To run locally, just pull contents of repo and run `node app.js`, server will run on `localhost:3333`
+3. The server will run in the terminal and certain app updates (such as attacks and gold aquisition) will be shown in the terminal
+4. `Ctrl + C` to end server 
+
 ## Log line
 
 ![A screenshot of the current game interface, as of June 13th 2024](game-jun13.png)
