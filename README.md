@@ -1,3 +1,18 @@
+## News
+
+> [!NOTE]
+> Actively seeking contributors or PRs from interested parties
+
+## High Priority
+
+- [ ] Design basic class system/objects/database and class switching system
+- [ ] Improve on global timekeeping (tick) system
+- [ ] Figure out how to make stat allocation work
+- [ ] Improve on chat input so attacks feel easier to perform
+- [ ] Design basic items and figure out how to populate game with items
+- [ ] Design per-class clicker interface
+- [ ] Migrate to saner(?) development stack
+
 ## Log line
 
 A multi-user messaging interface that facilitates roguelike-like interaction with the environment.
