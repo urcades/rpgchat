@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Cemetery</title>
+    <script>
+        // Function to fetch and display killed players
+        function loadCemetery() {
+            fetch('/cemetery')
+                .then(response => response.json())
+                .then(data => {
+                    const cemeteryDiv = document.getElementById('cemetery');
+                    cemeteryDiv.innerHTML = '';
+                    data.forEach(player => {
+                        const playerElement = document.createElement('div');
+                        playerElement.textContent = `${player.username} - Level: ${player.level}, Gold: ${player.gold}`;
+                        cemeteryDiv.appendChild(playerElement);
+                    });
+                });
+        }
+
+        // Load killed players when the page loads
+        window.onload = function() {
+            loadCemetery();
+        };
+    </script>
+</head>
+<body>
+    <h1>Cemetery</h1>
+    <div id="cemetery"></div>
+    <p><a href="/chat">Back to Chat</a></p>
+</body>
+</html>

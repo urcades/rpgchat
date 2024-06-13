@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Chat</title>
+    <script>
+        let socket;
+        let phase = 'Day';
+
+        // Function to fetch and display messages
+        function loadMessages() {
+            fetch('/messages')
+                .then(response => response.json())
+                .then(data => {
+                    const messagesDiv = document.getElementById('messages');
+                    messagesDiv.innerHTML = '';
+                    data.forEach(msg => {
+                        const messageElement = document.createElement('div');
+                        messageElement.textContent = `${msg.timestamp} - ${msg.username}: ${msg.message}`;
+                        messagesDiv.appendChild(messageElement);
+                    });
+                    // Scroll the last message into view
+                    scrollToBottom();
+                });
+        }
+
+        // Function to fetch and display user attributes
+        function loadUserAttributes() {
+            fetch('/user-attributes')
+                .then(response => response.json())
+                .then(data => {
+                    const attributesDiv = document.getElementById('attributes');
+                    attributesDiv.innerHTML = `
+                        <p>Health: ${data.health}</p>
+                        <p>Stamina: ${data.stamina}</p>
+                        <p>Speed: ${data.speed}</p>
+                        <p>Strength: ${data.strength}</p>
+                        <p>Intelligence: ${data.intelligence}</p>
+                        <p>Level: ${data.level}</p>
+                        <p>Gold: ${data.gold !== undefined ? data.gold : 0}</p>
+                    `;
+                });
+        }
+
+        // Function to fetch and display the global tick value
+        function loadTick() {
+            fetch('/tick')
+                .then(response => response.json())
+                .then(data => {
+                    const tickDiv = document.getElementById('tick');
+                    const tickValue = data.tick;
+                    const phaseDiv = document.getElementById('phase');
+
+                    // Update the phase based on the tick value
+                    phase = tickValue % 100 < 50 ? 'Day' : 'Night';
+
+                    tickDiv.textContent = `Global Tick: ${tickValue}`;
+                    phaseDiv.textContent = `Phase: ${phase}`;
+                });
+        }
+
+        // Load messages, user attributes, and tick when the page loads
+        window.onload = function() {
+            loadMessages();
+            loadUserAttributes();
+            loadTick();
+
+            // Set up WebSocket connection
+            socket = new WebSocket('ws://' + window.location.host);
+
+            socket.onmessage = function(event) {
+                const message = JSON.parse(event.data);
+                const messagesDiv = document.getElementById('messages');
+                const messageElement = document.createElement('div');
+                messageElement.textContent = `${new Date().toLocaleTimeString()} - ${message.username}: ${message.message}`;
+                messagesDiv.appendChild(messageElement);
+                scrollToBottom();
+            };
+        };
+
+        // Function to handle the "Action" button click
+        function handleActionClick() {
+            fetch('/action', {
+                method: 'POST',
+            })
+            .then(() => {
+                // Reload user attributes to reflect the updated click count
+                loadUserAttributes();
+            });
+        }
+
+        // Function to submit a new message
+        function submitMessage(event, attack = false) {
+            event.preventDefault();
+            const messageInput = document.getElementById('message');
+            const message = messageInput.value;
+            const endpoint = attack ? '/attack' : '/chat';
+            fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `message=${encodeURIComponent(message)}`,
+            })
+            .then(() => {
+                messageInput.value = '';
+                loadMessages();
+                loadUserAttributes(); // Reload attributes to reflect new level
+                loadTick(); // Reload the tick value
+            });
+        }
+
+        // Function to scroll to the bottom of the messages
+        function scrollToBottom() {
+            const messagesDiv = document.getElementById('messages');
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+    </script>
+    <style>
+        body {
+            margin: 0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .hud {
+            display: flex;
+            flex-direction: row;
+            gap: 1em;
+            background-color: #ffffff;
+            padding: 0 1em;
+        }
+
+        form {
+            display: flex;
+            padding: 1em 0;
+            gap: .5em;
+            width: 100%;
+        }
+
+        #attributes {
+            display: flex;
+            flex-direction: row;
+            gap: 1em;
+            padding: 1em 0;
+        }
+
+        #attributes > p {
+            margin: 0;
+        }
+
+        .chat {
+            flex: 1;
+            display: flex;
+            flex-direction: column-reverse;
+            overflow-y: auto;
+            padding: 1em;
+            background-color: #e0e0e0;
+        }
+        input {
+            width: 100%;
+        }
+    </style>
+</head>
+<body>
+    <div class="hud">
+        <div id="attributes"></div>
+        <p><a href="/character">Character Sheet</a></p>
+        <p><a href="/leaderboard">Leaderboard</a></p>
+        <p id="tick"></p>
+        <p id="phase"></p>
+        <p><a href="/logout">Logout</a></p>
+    </div>
+    <div class="chat">
+        <div id="messages"></div>
+    </div>
+    <div class="hud">
+        <form onsubmit="submitMessage(event)">
+            <button type="button" onclick="handleActionClick()">Action</button>
+            <div class="dropdown">
+                <select id="legs" name="Action Name">Action</select>
+            </div>
+            <input type="text" id="message" name="message" required>
+            <button type="submit" onclick="submitMessage(event, false)">Send</button>
+            <button type="submit" onclick="submitMessage(event, true)">Attack</button>
+        </form>
+    </div>
+</body>
+</html>

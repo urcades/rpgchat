@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Leaderboard</title>
+    <script>
+        // Function to fetch and display the leaderboard
+        function loadLeaderboard() {
+            fetch('/leaderboard-data')
+                .then(response => response.json())
+                .then(data => {
+                    const leaderboardDiv = document.getElementById('leaderboard');
+                    leaderboardDiv.innerHTML = '';
+                    data.forEach((player, index) => {
+                        const playerElement = document.createElement('div');
+                        playerElement.textContent = `${index + 1}. ${player.username} - Gold: ${player.gold}`;
+                        leaderboardDiv.appendChild(playerElement);
+                    });
+                });
+        }
+
+        // Load the leaderboard when the page loads
+        window.onload = function() {
+            loadLeaderboard();
+        };
+    </script>
+</head>
+<body>
+    <h1>Leaderboard</h1>
+    <div id="leaderboard"></div>
+    <p><a href="/chat">Back to Chat</a></p>
+</body>
+</html>

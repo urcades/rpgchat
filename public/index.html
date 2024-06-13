@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Login</title>
+</head>
+<body>
+    <p>PVP Messenger</p>
+    <p>Warning: Please do not use "real" passwords in this app. The database of player info is unencrypted plaintext, and will remain so until this game is "real".</p>
+    <form method="POST" action="/login">
+        <label for="username">Username:</label>
+        <input type="text" id="username" name="username" required><br>
+        <label for="password">Password:</label>
+        <input type="password" id="password" name="password" required><br>
+        <button type="submit">Login</button>
+    </form>
+    <p><a href="/signup">Sign Up</a></p>
+    <p><a href="/cemetery">Dead players</a></p>
+</body>
+</html>

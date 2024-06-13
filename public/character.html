@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Character</title>
+    <script>
+        // Function to fetch and display user attributes
+        function loadUserAttributes() {
+            fetch('/user-attributes')
+                .then(response => response.json())
+                .then(data => {
+                    const attributesDiv = document.getElementById('attributes');
+                    attributesDiv.innerHTML = `
+                        <p>Health: ${data.health ?? 0}</p>
+                        <p>Stamina: ${data.stamina ?? 0}</p>
+                        <p>Speed: ${data.speed ?? 0}</p>
+                        <p>Strength: ${data.strength ?? 0}</p>
+                        <p>Intelligence: ${data.intelligence ?? 0}</p>
+                        <p>Level: ${data.level}</p>
+                        <p>Gold: ${data.gold !== undefined ? data.gold : 0}</p>
+                        <p>Attribute Points: ${data.attributePoints || 0}</p>
+                    `;
+                });
+        }
+
+        // Load user attributes when the page loads
+        window.onload = function() {
+            loadUserAttributes();
+        };
+    </script>
+    <style>
+    </style>
+</head>
+<body>
+    <div class="container">
+        <p>Character Information</p>
+        <p><a href="/chat">Back to chat</a></p>
+        <div id="attributes"></div>
+
+        <div class="dropdown">
+            <label for="job">Job:</label>
+            <select id="job" name="job">
+                <option value="Novice">Novice</option>
+                <option value="Cleric">Cleric</option>
+                <option value="Paladin">Paladin</option>
+                <option value="Dungeoneer">Dungeoneer</option>
+                <option value="Chef">Chef</option>
+            </select>
+        </div>
+
+        <div class="dropdown">
+            <label for="head">Head:</label>
+            <select id="head" name="head"></select>
+        </div>
+
+        <div class="dropdown">
+            <label for="body">Body:</label>
+            <select id="body" name="body"></select>
+        </div>
+
+        <div class="dropdown">
+            <label for="legs">Legs:</label>
+            <select id="legs" name="legs"></select>
+        </div>
+
+        <div class="dropdown">
+            <label for="accessory">Accessory:</label>
+            <select id="accessory" name="accessory"></select>
+        </div>
+
+        <div class="dropdown">
+            <label for="weapon">Weapon:</label>
+            <select id="weapon" name="weapon"></select>
+        </div>
+    </div>
+</body>
+</html>
