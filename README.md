@@ -15,11 +15,19 @@
 
 ## Development
 
-0. Install npm if you don't have it already
-1. Build dependencies with `npm install`
-2. To run locally, just pull contents of repo and run `node app.js`, server will run on `localhost:3333`
-3. The server will run in the terminal and certain app updates (such as attacks and gold aquisition) will be shown in the terminal
-4. `Ctrl + C` to end server 
+0. Install `npm` if you don't have it already
+1. Clone this repo, `cd` into it
+2. Build dependencies with `npm install`
+3. Run game via `node app.js` – server will run on `localhost:3333` by default
+4. The server will run in the terminal and certain app updates (such as attacks and gold aquisition) will be shown in the terminal
+5. `Ctrl + C` to end server
+
+## Production Notes:
+
+1. I'm keeping my node.js server up with PM2 for now
+2. The computer I'm serving the game off of now is a Raspberry Pi 5, which is on a private Tailscale network
+3. The computer/Tailscale node is using `tailscale funnel` to serve localhost:3333 to `https://oleaceae.saga-owl.ts.net/`
+4. The server's hardware can probable handle a decent number of people, but if the link is offline, you have a good idea why
 
 ## Log line
 
