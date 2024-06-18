@@ -5,7 +5,7 @@
     <script>
         // Function to fetch and display killed players
         function loadCemetery() {
-            fetch('/cemetery')
+            fetch('/cemetery-data')
                 .then(response => response.json())
                 .then(data => {
                     const cemeteryDiv = document.getElementById('cemetery');
@@ -25,8 +25,8 @@
     </script>
 </head>
 <body>
-    <h1>Cemetery</h1>
+    <p>Graveyard</p>
     <div id="cemetery"></div>
-    <p><a href="/chat">Back to Chat</a></p>
+    <p><a href="/success">Back to World Map</a></p>
 </body>
 </html>

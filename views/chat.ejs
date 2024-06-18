@@ -8,17 +8,19 @@
 
         // Function to fetch and display messages
         function loadMessages() {
-            const urlParts = window.location.pathname.split('/');
-            const row = urlParts[2];
-            const col = urlParts[3];
+      const row = '<%= row %>';
+      const col = '<%= col %>';
 
-            fetch(`/messages/${row}/${col}`)
-                .then(response => response.json())
-                .then(data => {
+      fetch(`/messages/${row}/${col}`)
+        .then(response => response.json())
+        .then(data => {
                 const messagesDiv = document.getElementById('messages');
                 messagesDiv.innerHTML = '';
                 data.forEach(msg => {
                     const messageElement = document.createElement('div');
+                    if (msg.username === 'System') {
+                        messageElement.classList.add('system-message');
+                    }
                     messageElement.textContent = `${msg.timestamp} - ${msg.username}: ${msg.message}`;
                     messagesDiv.appendChild(messageElement);
                 });
@@ -96,21 +98,37 @@
             event.preventDefault();
             const messageInput = document.getElementById('message');
             const message = messageInput.value;
-            const endpoint = attack ? '/attack' : '/chat';
+            const row = '<%= row %>';
+            const col = '<%= col %>';
+
+            if (message.trim() === '/dig') {
+            // ... (existing code)
+            } else {
+            const endpoint = attack ? `/attack/${row}/${col}` : `/chat/${row}/${col}`;
             fetch(endpoint, {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
+                'Content-Type': 'application/x-www-form-urlencoded',
                 },
                 body: `message=${encodeURIComponent(message)}`,
             })
             .then(() => {
                 messageInput.value = '';
                 loadMessages();
-                loadUserAttributes(); // Reload attributes to reflect new level
-                loadTick(); // Reload the tick value
+                loadUserAttributes();
+                loadTick();
             });
+            }
         }
+
+        document.addEventListener('DOMContentLoaded', function() { 
+        // Add event listener for keydown event
+        document.getElementById('message').addEventListener('keydown', function(event) {
+            if ((event.altKey || event.metaKey) && event.key === 'Enter') {
+                submitMessage(event, true); // Send message as an attack
+            }
+        });
+        });
 
         // Function to scroll to the bottom of the messages
         function scrollToBottom() {
@@ -131,7 +149,7 @@
             flex-direction: row;
             gap: 1em;
             background-color: #ffffff;
-            padding: 0 1em;
+            padding: 0 .5em;
         }
 
         form {
@@ -167,12 +185,11 @@
 </head>
 <body>
     <div class="hud">
+        <p><a href="/success">World Map</a></p>
+        <p><a href="/character">Status</a></p>
         <div id="attributes"></div>
-        <p><a href="/character">Character Sheet</a></p>
-        <p><a href="/leaderboard">Leaderboard</a></p>
         <p id="tick"></p>
         <p id="phase"></p>
-        <p><a href="/logout">Logout</a></p>
     </div>
     <div class="chat">
         <div id="messages"></div>

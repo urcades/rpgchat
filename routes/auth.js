@@ -25,7 +25,7 @@ router.post('/signup', (req, res) => {
   const username = req.body.username;
   const password = req.body.password;
 
-  db.run("INSERT INTO users (username, password, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold) VALUES (?, ?, 100, 100, 100, 100, 1, 1, 1, 0, 0)", [username, password], (err) => {
+  db.run("INSERT INTO users (username, password, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold) VALUES (?, ?, 10, 10, 100, 100, 1, 1, 1, 0, 0)", [username, password], (err) => {
     if (err) {
       return res.status(500).send("Internal Server Error");
     }

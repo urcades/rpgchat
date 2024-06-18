@@ -1,10 +1,65 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Success</title>
+  <title>Grid Design</title>
+  <style>
+    :root {
+      --grid-size: 16; /* Change this value to adjust the grid size */
+    }
+    .grid-container {
+      display: grid;
+      grid-template-columns: repeat(var(--grid-size), 1fr);
+      grid-template-rows: repeat(var(--grid-size), 1fr);
+      gap: 0px;
+      width: 800px;
+      height: 800px;
+      border: 1px solid black;
+    }
+    .grid-item {
+      background-color: white;
+      border: 1px solid black;
+      cursor: pointer;
+      text-align: center;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      font-size: 14px;
+      text-decoration: none;
+      color: black;
+    }
+    .grid-item:hover {
+      color: white;
+      background-color: black;
+    }
+    nav {
+      display: flex;
+      gap: 1em;
+    }
+  </style>
 </head>
 <body>
-    <h2>Login Successful</h2>
-    <p>Go to <a href="/chat">chat</a></p>
+  <p>World Map</p>
+  <div class="grid-container">
+    <!-- Grid items will be generated dynamically using JavaScript -->
+  </div>
+  <nav>
+    <p><a href="/leaderboard">Leaderboard</a></p>
+    <p><a href="/cemetery">Graveyard</a></p>
+    <p><a href="/logout">Logout</a></p>
+    <p>Source</p>
+  </nav>
+  <script>
+    const gridContainer = document.querySelector('.grid-container');
+    const gridSize = getComputedStyle(document.documentElement).getPropertyValue('--grid-size');
+    for (let i = 0; i < gridSize; i++) {
+      for (let j = 0; j < gridSize; j++) {
+        const gridItem = document.createElement('a');
+        gridItem.classList.add('grid-item');
+        gridItem.href = `/chat/${i+1}/${j+1}`; // Updated URL pattern
+        gridItem.textContent = `${i+1}, ${j+1}`;
+        gridContainer.appendChild(gridItem);
+      }
+    }
+  </script>
 </body>
 </html>

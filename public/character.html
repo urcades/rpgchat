@@ -10,14 +10,17 @@
                 .then(data => {
                     const attributesDiv = document.getElementById('attributes');
                     attributesDiv.innerHTML = `
+                        <p>Level: ${data.level}</p>
+                        <p>Attribute Points: ${data.attributePoints || 0}</p>
+                        <img src="orb-black.png"/>
+                        <p>Gold: ${data.gold !== undefined ? data.gold : 0}</p>
+                        <img src="orb-black.png"/>
                         <p>Health: ${data.health ?? 0}</p>
                         <p>Stamina: ${data.stamina ?? 0}</p>
+                        <img src="orb-black.png"/>
                         <p>Speed: ${data.speed ?? 0}</p>
                         <p>Strength: ${data.strength ?? 0}</p>
                         <p>Intelligence: ${data.intelligence ?? 0}</p>
-                        <p>Level: ${data.level}</p>
-                        <p>Gold: ${data.gold !== undefined ? data.gold : 0}</p>
-                        <p>Attribute Points: ${data.attributePoints || 0}</p>
                     `;
                 });
         }
@@ -26,6 +29,11 @@
         window.onload = function() {
             loadUserAttributes();
         };
+
+        // Function to handle the "Back to chat" link click
+        function goBackToChat() {
+            history.back();
+        }
     </script>
     <style>
     </style>
@@ -33,8 +41,13 @@
 <body>
     <div class="container">
         <p>Character Information</p>
-        <p><a href="/chat">Back to chat</a></p>
+        <p><a href="#" onclick="goBackToChat(); return false;">Back to chat</a></p>
+
+        <img src="orb-black.png"/>
+
         <div id="attributes"></div>
+
+        <img src="orb-black.png"/>
 
         <div class="dropdown">
             <label for="job">Job:</label>

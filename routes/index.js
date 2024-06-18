@@ -37,8 +37,10 @@ router.get('/logout', (req, res) => {
   });
 });
 
-router.get('/chat', require('../middleware/auth'), (req, res) => {
-  res.sendFile(path.join(__dirname, '../public', 'chat.html'));
+router.get('/chat/:row/:col', require('../middleware/auth'), (req, res) => {
+  const row = req.params.row;
+  const col = req.params.col;
+  res.render('chat', { row, col });
 });
 
 router.get('/character', require('../middleware/auth'), (req, res) => {
@@ -46,7 +48,11 @@ router.get('/character', require('../middleware/auth'), (req, res) => {
 });
 
 router.get('/cemetery', (req, res) => {
-  db.all("SELECT * FROM cemetery", (err, players) => {
+  res.sendFile(path.join(__dirname, '../public', 'cemetery.html'));
+});
+
+router.get('/cemetery-data', (req, res) => {
+  db.all("SELECT username, level, gold FROM cemetery", (err, players) => {
     if (err) {
       return res.status(500).send("Internal Server Error");
     }
@@ -65,6 +71,12 @@ router.get('/leaderboard-data', (req, res) => {
     }
     res.json(players);
   });
+});
+
+router.get('/chat/:row/:col', require('../middleware/auth'), (req, res) => {
+  const row = parseInt(req.params.row);
+  const col = parseInt(req.params.col);
+  res.sendFile(path.join(__dirname, '../public', 'chat.html'));
 });
 
 module.exports = router;

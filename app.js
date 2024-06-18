@@ -2,12 +2,15 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const path = require('path');
 const session = require('express-session');
-const db = require('./db/setup'); // Ensure this runs and initializes the DB
+const db = require('./db/setup');
 const routes = require('./routes/index');
 const WebSocket = require('ws');
-const eventBus = require('./eventBus'); // Import the event bus
+const eventBus = require('./eventBus');
 
 const app = express();
+
+app.set('view engine', 'ejs');
+app.set('views', path.join(__dirname, 'views'));
 
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
