@@ -93,6 +93,39 @@ router.post('/update-class', authMiddleware, (req, res) => {
   });
 });
 
+router.get('/latest-news', (req, res) => {
+  const query = `
+    SELECT m.username, m.message, m.timestamp, m.rowid, m.colid
+    FROM (
+      ${Array.from({length: 16}, (_, i) => 
+        Array.from({length: 16}, (_, j) => 
+          `SELECT username, message, timestamp, '${i+1}' as rowid, '${j+1}' as colid FROM messages_${i+1}_${j+1}`
+        ).join(' UNION ALL ')
+      ).join(' UNION ALL ')}
+    ) m
+    ORDER BY m.timestamp DESC
+    LIMIT 1
+  `;
+
+  db.get(query, [], (err, row) => {
+    if (err) {
+      console.error('Error fetching latest news:', err);
+      return res.status(500).json({ error: 'Internal Server Error' });
+    }
+    if (row) {
+      res.json({
+        username: row.username,
+        message: row.message,
+        timestamp: row.timestamp,
+        row: row.rowid,
+        col: row.colid
+      });
+    } else {
+      res.json({ message: null });
+    }
+  });
+});
+
 router.post('/train/:row/:col', authMiddleware, (req, res) => {
   const username = req.session.user.username;
   const row = req.params.row;
