@@ -29,14 +29,17 @@
       text-decoration: none;
       color: black;
     }
+
     .grid-item:hover {
       color: white;
       background-color: black;
     }
+
     nav {
       display: flex;
       gap: 1em;
     }
+
     .hud {
       display: flex;
       flex-direction: row;
@@ -46,17 +49,48 @@
 
     .hud > p {
       padding: 0 ;
-      margin: .5em 0;
+      width: 120px;
+    }
+
+    .map-container {
+      width: 800px; /* Match the width of your grid */
+    }
+
+    .marquee {
+      width: 100%;
+      overflow: hidden;
+      white-space: pre;
+    }
+
+    .marquee p {
+      display: inline-block;
+      animation: marquee 10s linear infinite;
+      margin: 0;
+      padding: 0 0 0 100%;
+    }
+
+    @keyframes marquee {
+      0% {
+        transform: translate(0, 0);
+      }
+      100% {
+        transform: translate(-100%, 0);
+      }
     }
   </style>
 </head>
 <body>
-  <div class="hud">
-    <p>World Map</p>
-    <p>World News: Chatter in 1,1</p>
-  </div>
-  <div class="grid-container">
-    <!-- Grid items will be generated dynamically using JavaScript -->
+  <div class="map-container">
+    <div class="hud">
+      <p>World Map</p>
+      <p>World News:</p>
+      <div class="marquee">
+        <p id="worldNews">Loading latest news...</p>
+      </div>
+    </div>
+    <div class="grid-container">
+      <!-- Grid items will be generated dynamically using JavaScript -->
+    </div>
   </div>
   <nav>
     <p><a href="/leaderboard">Leaderboard</a></p>
@@ -76,6 +110,25 @@
         gridContainer.appendChild(gridItem);
       }
     }
+    function fetchLatestNews() {
+    fetch('/latest-news')
+      .then(response => response.json())
+      .then(data => {
+        const worldNewsElement = document.getElementById('worldNews');
+        if (data.message) {
+          worldNewsElement.textContent = `(${data.row},${data.col}): ${data.timestamp} - ${data.username}: ${data.message}`;
+        } else {
+          worldNewsElement.textContent = 'No recent news.';
+        }
+      })
+      .catch(error => {
+        console.error('Error fetching latest news:', error);
+      });
+  }
+
+  // Fetch news immediately and then every 30 seconds
+  fetchLatestNews();
+  setInterval(fetchLatestNews, 30000);
   </script>
 </body>
 </html>

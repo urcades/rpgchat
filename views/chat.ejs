@@ -237,12 +237,8 @@
         <form onsubmit="submitMessage(event)">
             <% if (user.class === 'Novice') { %>
                 <button type="button" onclick="trainAction()">Train</button>
-                <button type="button" onclick="treasureHuntAction()">Treasure Hunt</button>
-              <% } %>
-            <button type="button" onclick="handleActionClick()">Action</button>
-            <div class="dropdown">
-                <select id="legs" name="Action Name">Action</select>
-            </div>
+                <button type="button" onclick="treasureHuntAction()">Treasure</button>
+            <% } %>
             <input type="text" id="message" name="message" required>
             <button type="submit" onclick="submitMessage(event, false)">Send</button>
             <button type="submit" onclick="submitMessage(event, true)">Attack</button>
