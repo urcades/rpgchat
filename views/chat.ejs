@@ -35,13 +35,19 @@
                 .then(data => {
                     const attributesDiv = document.getElementById('attributes');
                     attributesDiv.innerHTML = `
+                        <p>—</p>
+                        <p>Level: ${data.level}</p>
+                        <p>Experience: ${data.ExperienceCount}/${data.ExperienceRequired}</p>
+                        <p>—</p>
                         <p>Health: ${data.health}</p>
                         <p>Stamina: ${data.stamina}</p>
+                        <p>—</p>
+                        <p>Gold: ${data.gold !== undefined ? data.gold : 0}</p>
+                        <p>—</p>
                         <p>Speed: ${data.speed}</p>
                         <p>Strength: ${data.strength}</p>
                         <p>Intelligence: ${data.intelligence}</p>
-                        <p>Level: ${data.level}</p>
-                        <p>Gold: ${data.gold !== undefined ? data.gold : 0}</p>
+                        <p>—</p>
                     `;
                 });
         }

@@ -6,7 +6,7 @@ const authMiddleware = require('../middleware/auth');
 router.get('/user-attributes', authMiddleware, (req, res) => {
   const username = req.session.user.username;
 
-  db.get("SELECT health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold, attributePoints, ExperienceCount, ExperienceRequired FROM users WHERE username = ?", [username], (err, user) => {
+  db.get("SELECT level, ExperienceCount, ExperienceRequired, health, stamina, gold, speed, strength, intelligence FROM users WHERE username = ?", [username], (err, user) => {
     if (err) {
       console.error("Database error: ", err);
       return res.status(500).json({ error: "Internal Server Error" });
