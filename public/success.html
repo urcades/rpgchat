@@ -14,9 +14,11 @@
       width: 800px;
       height: 800px;
       border: 1px solid black;
+      background-image: url(logo2.png);
+      background-position: center;
+      background-repeat: no-repeat;
     }
     .grid-item {
-      background-color: white;
       border: 1px solid black;
       cursor: pointer;
       text-align: center;
@@ -35,10 +37,24 @@
       display: flex;
       gap: 1em;
     }
+    .hud {
+      display: flex;
+      flex-direction: row;
+      gap: 1em;
+      background-color: #ffffff;
+    }
+
+    .hud > p {
+      padding: 0 ;
+      margin: .5em 0;
+    }
   </style>
 </head>
 <body>
-  <p>World Map</p>
+  <div class="hud">
+    <p>World Map</p>
+    <p>World News: Chatter in 1,1</p>
+  </div>
   <div class="grid-container">
     <!-- Grid items will be generated dynamically using JavaScript -->
   </div>

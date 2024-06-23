@@ -11,6 +11,7 @@
                     const attributesDiv = document.getElementById('attributes');
                     attributesDiv.innerHTML = `
                         <p>Level: ${data.level}</p>
+                        <p>Experience: ${data.ExperienceCount ?? 0} / ${data.ExperienceRequired ?? 100}</p>
                         <p>Attribute Points: ${data.attributePoints || 0}</p>
                         <img src="orb-black.png"/>
                         <p>Gold: ${data.gold !== undefined ? data.gold : 0}</p>
@@ -24,12 +25,27 @@
                     `;
                 });
         }
-
+        function updateClass(selectedClass) {
+            fetch('/update-class', {
+                method: 'POST',
+                headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `class=${encodeURIComponent(selectedClass)}`,
+            })
+                .then(response => {
+                if (response.ok) {
+                    console.log('Class updated successfully');
+                    loadUserAttributes(); // Reload attributes after class update
+                } else {
+                    console.error('Failed to update class');
+                }
+                });
+        }
         // Load user attributes when the page loads
         window.onload = function() {
             loadUserAttributes();
         };
-
         // Function to handle the "Back to chat" link click
         function goBackToChat() {
             history.back();
@@ -41,17 +57,14 @@
 <body>
     <div class="container">
         <p>Character Information</p>
+        <img src="char.png"/>
         <p><a href="#" onclick="goBackToChat(); return false;">Back to chat</a></p>
-
         <img src="orb-black.png"/>
-
         <div id="attributes"></div>
-
         <img src="orb-black.png"/>
-
         <div class="dropdown">
             <label for="job">Job:</label>
-            <select id="job" name="job">
+            <select id="job" name="job" onchange="updateClass(this.value)">
                 <option value="Novice">Novice</option>
                 <option value="Cleric">Cleric</option>
                 <option value="Paladin">Paladin</option>
@@ -59,27 +72,22 @@
                 <option value="Chef">Chef</option>
             </select>
         </div>
-
         <div class="dropdown">
             <label for="head">Head:</label>
             <select id="head" name="head"></select>
         </div>
-
         <div class="dropdown">
             <label for="body">Body:</label>
             <select id="body" name="body"></select>
         </div>
-
         <div class="dropdown">
             <label for="legs">Legs:</label>
             <select id="legs" name="legs"></select>
         </div>
-
         <div class="dropdown">
             <label for="accessory">Accessory:</label>
             <select id="accessory" name="accessory"></select>
         </div>
-
         <div class="dropdown">
             <label for="weapon">Weapon:</label>
             <select id="weapon" name="weapon"></select>

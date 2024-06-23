@@ -31,6 +31,13 @@ function handlePlayerKilled(playerName, attackerName, row, col) {
       }
     });
   }
+
+  // Grant 50 experience points to the attacker
+  db.run("UPDATE users SET ExperienceCount = ExperienceCount + 50 WHERE username = ?", [attackerName], (err) => {
+    if (err) {
+      console.error('Error updating experience count for attacker:', err);
+    }
+  });
 }
 
 function handleAttack(username, message, row, col, callback) {

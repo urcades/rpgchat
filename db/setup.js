@@ -14,9 +14,12 @@ db.serialize(() => {
     strength INTEGER DEFAULT 1, 
     intelligence INTEGER DEFAULT 1,
     level INTEGER DEFAULT 0, 
+    ExperienceCount INTEGER DEFAULT 0,
+    ExperienceRequired INTEGER DEFAULT 100,
     gold INTEGER DEFAULT 0,
     inventory TEXT DEFAULT '[]',
-    attributePoints INTEGER DEFAULT 0
+    attributePoints INTEGER DEFAULT 0,
+    class TEXT DEFAULT 'Novice'
   )`);
 
   db.run(`INSERT OR IGNORE INTO users (username, password, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold)

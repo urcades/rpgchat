@@ -1,7 +1,48 @@
 const db = require('../db/setup');
-const { calculateLevel } = require('../utils/leveling');
+const { calculateLevel, calculateExperienceRequired } = require('../utils/leveling');
 const eventBus = require('../eventBus');
 const { awardGold } = require('../utils/goldUtils');
+
+function updateExperienceAndLevel(username, experienceGained, callback) {
+  db.get('SELECT * FROM users WHERE username = ?', [username], (err, user) => {
+    if (err) {
+      console.error('Error fetching user:', err);
+      return callback(err);
+    }
+
+    const { ExperienceCount, ExperienceRequired, level } = user;
+    const newExperienceCount = ExperienceCount + experienceGained;
+    const levelsGained = Math.floor(newExperienceCount / ExperienceRequired);
+
+    if (levelsGained > 0) {
+      const newLevel = level + levelsGained;
+      const newExperienceRequired = calculateExperienceRequired(newLevel);
+      const remainingExperience = newExperienceCount % ExperienceRequired;
+
+      db.run('UPDATE users SET level = ?, ExperienceRequired = ?, ExperienceCount = ?, attributePoints = attributePoints + ? WHERE username = ?', 
+        [newLevel, newExperienceRequired, remainingExperience, levelsGained * 10, username], 
+        (err) => {
+          if (err) {
+            console.error('Error updating level and experience:', err);
+            return callback(err);
+          }
+          callback(null, { leveledUp: true, newLevel, experienceGained });
+        }
+      );
+    } else {
+      db.run('UPDATE users SET ExperienceCount = ? WHERE username = ?', 
+        [newExperienceCount, username], 
+        (err) => {
+          if (err) {
+            console.error('Error updating experience count:', err);
+            return callback(err);
+          }
+          callback(null, { leveledUp: false, experienceGained });
+        }
+      );
+    }
+  });
+}
 
 module.exports = {
   handleChat: (req, res) => {
@@ -30,33 +71,23 @@ module.exports = {
             return res.status(500).send('Internal Server Error');
           }
 
-          db.get(`SELECT COUNT(*) AS messageCount FROM messages_${row}_${col} WHERE username = ?`, [username], (err, row) => {
+          updateExperienceAndLevel(username, 1, (err, result) => {
             if (err) {
-              console.error('Error getting message count:', err);
               return res.status(500).send('Internal Server Error');
             }
 
-            const newLevel = calculateLevel(row.messageCount);
-            db.get('SELECT level FROM users WHERE username = ?', [username], (err, user) => {
+            let systemMessage = `${username} gained 1 experience point.`;
+            if (result.leveledUp) {
+              systemMessage += ` ${username} leveled up to level ${result.newLevel}!`;
+            }
+
+            db.run(`INSERT INTO messages_${row}_${col} (username, message) VALUES (?, ?)`, ['System', systemMessage], (err) => {
               if (err) {
-                console.error('Error getting user level:', err);
-                return res.status(500).send('Internal Server Error');
+                console.error('Error inserting system message:', err);
               }
 
-              if (newLevel > user.level) {
-                db.run('UPDATE users SET level = ?, attributePoints = attributePoints + 10 WHERE username = ?', [newLevel, username], (err) => {
-                  if (err) {
-                    console.error('Error updating user level:', err);
-                    return res.status(500).send('Internal Server Error');
-                  }
-
-                  eventBus.emit('newMessage', { username, message });
-                  res.redirect(`/chat/${row}/${col}`);
-                });
-              } else {
-                eventBus.emit('newMessage', { username, message });
-                res.redirect(`/chat/${row}/${col}`);
-              }
+              eventBus.emit('newMessage', { username, message });
+              res.redirect(`/chat/${row}/${col}`);
             });
           });
         });
