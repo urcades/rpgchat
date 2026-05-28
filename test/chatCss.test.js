@@ -29,4 +29,5 @@ test('death interstitial is a full red screen with a proceed action', () => {
   assert.match(css, /\.death-interstitial\s*\{[^}]*background:\s*#ff0000/s);
   assert.match(css, /\.death-interstitial\s*\{[^}]*min-height:\s*100vh/s);
   assert.match(css, /\.death-interstitial\s*\{[^}]*display:\s*grid/s);
+  assert.doesNotMatch(css, /\.death-interstitial-content p\s*\{[^}]*font-size/s);
 });
