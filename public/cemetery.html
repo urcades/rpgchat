@@ -12,7 +12,9 @@
                     cemeteryDiv.innerHTML = '';
                     data.forEach(player => {
                         const playerElement = document.createElement('div');
-                        playerElement.textContent = `${player.username} - Level: ${player.level}, Gold: ${player.gold}`;
+                        const room = player.roomRow && player.roomCol ? `, Room: ${player.roomRow}, ${player.roomCol}` : '';
+                        const cause = player.cause ? `, Cause: ${player.cause}` : '';
+                        playerElement.textContent = `${player.username} - Job: ${player.job || 'Novice'}, Level: ${player.level}, Gold: ${player.gold}${room}${cause}`;
                         cemeteryDiv.appendChild(playerElement);
                     });
                 });

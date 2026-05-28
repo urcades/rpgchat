@@ -1,121 +1,148 @@
 const db = require('../db/setup');
+const {
+  getWorldDay,
+  cleanupOldTraces,
+  createTrace,
+  getAttackTrace
+} = require('./roomEcology');
+const { dbGet, dbAll, dbRun } = require('./dbAsync');
+const { getEffectiveUser } = require('./jobs');
+const { moveUserToCemetery } = require('./deathUtils');
+const { createActionError } = require('./playerActions');
 
-function handlePlayerKilled(playerName, attackerName, row, col) {
-  const systemMessage = `${playerName} has been killed by ${attackerName}`;
-
-  db.get("SELECT * FROM users WHERE username = 'System'", (err, systemUser) => {
-    if (err) {
-      console.error('Error checking for System user:', err);
-      return;
-    }
-
-    if (!systemUser) {
-      // If the System user doesn't exist, create it
-      db.run(`INSERT INTO users (username, password, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold)
-              VALUES ('System', 'system', 9999, 9999, 9999, 9999, 9999, 9999, 9999, 0, 9999)`, (err) => {
-        if (err) {
-          console.error('Error creating System user:', err);
-          return;
-        }
-        insertSystemMessage();
-      });
-    } else {
-      insertSystemMessage();
-    }
-  });
-
-  function insertSystemMessage() {
-    db.run(`INSERT INTO messages_${row}_${col} (username, message) VALUES ('System', ?)`, [systemMessage], (err) => {
+function cleanupOldTracesAsync(worldDay) {
+  return new Promise((resolve, reject) => {
+    cleanupOldTraces(db, worldDay, (err) => {
       if (err) {
-        console.error('Error inserting system message:', err);
+        reject(err);
+        return;
       }
+      resolve();
     });
+  });
+}
+
+function createTraceAsync(trace) {
+  return new Promise((resolve, reject) => {
+    createTrace(db, trace, (err) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+async function consumeStatusModifier(targetUsername, effectType, currentTick) {
+  const effect = await dbGet(
+    db,
+    `SELECT id, magnitude
+     FROM statusEffects
+     WHERE username = ?
+       AND effectType = ?
+       AND expiryTick > ?
+     ORDER BY expiryTick ASC, id ASC
+     LIMIT 1`,
+    [targetUsername, effectType, currentTick]
+  ).catch(() => null);
+
+  if (!effect) {
+    return 0;
   }
+
+  await dbRun(db, 'DELETE FROM statusEffects WHERE id = ?', [effect.id]);
+  return effect.magnitude || 0;
+}
+
+async function calculateAttackDamage(attacker, targetUsername, currentTick) {
+  const effectiveAttacker = getEffectiveUser(attacker);
+  const isCriticalAttack = Math.random() < 0.01;
+  const markedBonus = await consumeStatusModifier(targetUsername, 'marked', currentTick);
+  const wardReduction = await consumeStatusModifier(targetUsername, 'ward', currentTick);
+  const baseDamage = 1 + Math.floor(effectiveAttacker.strength / 4);
+  const criticalDamage = isCriticalAttack ? baseDamage + 1 : baseDamage;
+  const damage = Math.max(0, criticalDamage + markedBonus - wardReduction);
+
+  return {
+    damage,
+    isCriticalAttack
+  };
+}
+
+async function validateAttackTargets(database, username, message) {
+  const users = await dbAll(database, 'SELECT username FROM users');
+  const targets = users.filter(user => message.includes(user.username));
+
+  if (targets.length === 0) {
+    throw createActionError('Attack needs a target name.', 400);
+  }
+
+  return targets;
+}
+
+async function handleAttackCore(username, message, row, col) {
+  const tickRow = await dbGet(db, 'SELECT value FROM tick WHERE rowid = 1');
+  const currentTick = tickRow ? tickRow.value : 0;
+  const worldDay = getWorldDay();
+  const createdTick = currentTick + 1;
+  const roomRow = Number.parseInt(row, 10);
+  const roomCol = Number.parseInt(col, 10);
+  const attacker = await dbGet(db, 'SELECT * FROM users WHERE username = ?', [username]);
+  const targets = await validateAttackTargets(db, username, message);
+
+  await cleanupOldTracesAsync(worldDay);
+
+  const attackMessages = [];
+
+  for (const user of targets) {
+    const { damage, isCriticalAttack } = await calculateAttackDamage(attacker, user.username, createdTick);
+    await dbRun(
+      db,
+      'UPDATE users SET health = MAX(health - ?, 0) WHERE username = ? AND health > 0',
+      [damage, user.username]
+    );
+
+    const attackedUser = await dbGet(db, 'SELECT * FROM users WHERE username = ?', [user.username]);
+    const remainingHealth = attackedUser ? attackedUser.health : 0;
+    const wasKilled = attackedUser && attackedUser.health <= 0;
+    const attackMessage = isCriticalAttack
+      ? `${username} landed a critical hit on ${user.username} for ${damage} damage!`
+      : `${username} attacked ${user.username} for ${damage} damage`;
+
+    attackMessages.push(attackMessage);
+
+    const trace = getAttackTrace({
+      row: roomRow,
+      col: roomCol,
+      attacker: username,
+      target: user.username,
+      damage,
+      isCritical: isCriticalAttack,
+      remainingHealth,
+      wasKilled,
+      createdTick,
+      worldDay
+    });
+
+    if (wasKilled) {
+      await moveUserToCemetery(db, user.username, `attack by ${username}`, roomRow, roomCol);
+    }
+
+    await createTraceAsync(trace);
+  }
+
+  return `${message} (${attackMessages.join(', ')})`;
 }
 
 function handleAttack(username, message, row, col, callback) {
-  db.all("SELECT username FROM users", (err, users) => {
-    if (err) {
-      console.error("Database error: ", err);
-      return callback(err);
-    }
-
-    let attackMessages = [];
-    let userAttacked = false;
-    let tasksRemaining = users.length;
-
-    users.forEach(user => {
-      if (message.includes(user.username)) {
-        userAttacked = true;
-
-        // Check for critical attack (1% chance)
-        const isCriticalAttack = Math.random() < 0.01;
-        const damage = isCriticalAttack ? 2 : 1;
-
-        db.run("UPDATE users SET health = health - ? WHERE username = ? AND health > 0", [damage, user.username], (err) => {
-          if (err) {
-            console.error("Error decrementing health:", err);
-            return callback(err);
-          }
-          console.log(`${user.username} was attacked and lost ${damage} health.`);
-          
-          const attackMessage = isCriticalAttack ? 
-            `${username} landed a critical hit on ${user.username} for ${damage} damage!` :
-            `${username} attacked ${user.username} for ${damage} damage`;
-          attackMessages.push(attackMessage);
-
-          db.get("SELECT * FROM users WHERE username = ?", [user.username], (err, attackedUser) => {
-            if (err) {
-              console.error("Error retrieving user:", err);
-              return callback(err);
-            }
-
-            if (attackedUser && attackedUser.health <= 0) {
-              db.run("INSERT INTO cemetery (username, password, level, gold) SELECT username, '', level, gold FROM users WHERE username = ?", [user.username], (err) => {
-                if (err) {
-                  console.error("Error moving user to cemetery:", err);
-                  return callback(err);
-                }
-
-                db.run("DELETE FROM users WHERE username = ?", [user.username], (err) => {
-                  if (err) {
-                    console.error("Error deleting user:", err);
-                    return callback(err);
-                  }
-
-                  console.log(`${user.username} has been moved to the cemetery.`);
-                  handlePlayerKilled(user.username, username, row, col);
-                  tasksRemaining -= 1;
-                  if (tasksRemaining === 0) {
-                    const updatedMessage = `${message} (${attackMessages.join(', ')})`;
-                    callback(null, updatedMessage);
-                  }
-                });
-              });
-            } else {
-              tasksRemaining -= 1;
-              if (tasksRemaining === 0) {
-                const updatedMessage = `${message} (${attackMessages.join(', ')})`;
-                callback(null, updatedMessage);
-              }
-            }
-          });
-        });
-      } else {
-        tasksRemaining -= 1;
-        if (tasksRemaining === 0) {
-          if (attackMessages.length > 0) {
-            const updatedMessage = `${message} (${attackMessages.join(', ')})`;
-            callback(null, updatedMessage);
-          } else {
-            callback(null, message);
-          }
-        }
-      }
-    });
-  });
+  handleAttackCore(username, message, row, col)
+    .then(updatedMessage => callback(null, updatedMessage))
+    .catch(callback);
 }
 
 module.exports = {
-  handleAttack
+  handleAttack,
+  handleAttackCore,
+  validateAttackTargets
 };

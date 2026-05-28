@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Inn</title>
+    <style>
+        body {
+            margin: 0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .hud {
+            display: flex;
+            flex-direction: row;
+            gap: 1em;
+            background-color: #ffffff;
+            padding: 0 .5em;
+        }
+
+        main {
+            padding: 1em;
+        }
+
+        form {
+            display: flex;
+            gap: .5em;
+        }
+    </style>
+</head>
+<body>
+    <div class="hud">
+        <p><a href="/success">World Map</a></p>
+        <p><a href="/character">Status</a></p>
+        <p>Room: <%= row %>, <%= col %></p>
+    </div>
+    <main>
+        <p>This room is an inn today. Entry costs <%= innAccess.fee %> gold and lasts until the next UTC reset.</p>
+        <p>Your gold: <%= innAccess.gold ?? 0 %></p>
+        <form method="POST" action="/room-access/<%= row %>/<%= col %>/pay">
+            <button type="submit" <%= innAccess.canPay ? '' : 'disabled' %>>Pay inn fee</button>
+        </form>
+    </main>
+</body>
+</html>
