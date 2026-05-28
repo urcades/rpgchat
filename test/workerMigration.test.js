@@ -70,6 +70,32 @@ async function createMigratedDb() {
   return db;
 }
 
+async function withMockedRandom(values, callback) {
+  const originalRandom = Math.random;
+  let index = 0;
+  Math.random = () => {
+    const value = values[Math.min(index, values.length - 1)];
+    index += 1;
+    return value;
+  };
+
+  try {
+    return await callback();
+  } finally {
+    Math.random = originalRandom;
+  }
+}
+
+test('Speed hit chance uses a clamped contested curve', async () => {
+  const { calculateSpeedHitChance } = await import('../worker/game.mjs');
+
+  assert.equal(calculateSpeedHitChance({ speed: 3 }, { speed: 3 }), 0.7);
+  assert.equal(calculateSpeedHitChance({ speed: 5 }, { speed: 3 }), 0.8);
+  assert.equal(calculateSpeedHitChance({ speed: 3 }, { speed: 5 }), 0.6);
+  assert.equal(calculateSpeedHitChance({ speed: 20 }, { speed: 1 }), 0.95);
+  assert.equal(calculateSpeedHitChance({ speed: 1 }, { speed: 20 }), 0.25);
+});
+
 test('Worker D1 migration creates a fresh normalized world schema', async () => {
   const db = await createMigratedDb();
   try {
@@ -82,6 +108,65 @@ test('Worker D1 migration creates a fresh normalized world schema', async () => 
     assert.deepEqual(system, { username: 'System', job: 'Novice' });
     assert.equal(messageTable.name, 'messages');
     assert.equal(oldRoomTable, null);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Worker attacks can miss through speed contest without damaging the target', async () => {
+  const db = await createMigratedDb();
+  const { getCurrentTickValue, getMessages, handleAttackAction } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
+       VALUES ('slow', 'pw', 'Novice', 12, 12, 100, 100, 1, 12, 1)`
+    ).run();
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
+       VALUES ('quick', 'pw', 'Novice', 12, 12, 100, 100, 20, 1, 1)`
+    ).run();
+
+    await withMockedRandom([0.99, 0.99], () => handleAttackAction(db, 'slow', 1, 1, '@quick'));
+
+    const attacker = await db.prepare("SELECT stamina FROM users WHERE username = 'slow'").first();
+    const target = await db.prepare("SELECT health FROM users WHERE username = 'quick'").first();
+    const messages = await getMessages(db, 1, 1);
+    const traces = await db.prepare('SELECT traceType FROM roomTraces').all();
+
+    assert.equal(await getCurrentTickValue(db), 1);
+    assert.equal(attacker.stamina, 99);
+    assert.equal(target.health, 12);
+    assert.match(messages.at(-1).message, /quick dodged slow/);
+    assert.deepEqual(traces.results, []);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Worker attacks that pass speed contest still use strength damage', async () => {
+  const db = await createMigratedDb();
+  const { handleAttackAction } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
+       VALUES ('fast', 'pw', 'Novice', 12, 12, 100, 100, 20, 12, 1)`
+    ).run();
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
+       VALUES ('slow_target', 'pw', 'Novice', 12, 12, 100, 100, 1, 1, 1)`
+    ).run();
+
+    await withMockedRandom([0.1, 0.99, 0.99], () => handleAttackAction(db, 'fast', 1, 1, '@slow_target'));
+
+    const target = await db.prepare("SELECT health FROM users WHERE username = 'slow_target'").first();
+
+    assert.equal(target.health, 8);
   } finally {
     await db.close();
   }
@@ -184,6 +269,128 @@ test('Worker class skills write system messages and advance through the shared a
   }
 });
 
+test('Worker harmful class skills can miss without applying damage or status effects', async () => {
+  const db = await createMigratedDb();
+  const { getMessages, handleSkillAction } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, gold)
+       VALUES
+        ('fighter', 'pw', 'Fighter', 12, 12, 100, 100, 1, 12, 1, 0),
+        ('chemist', 'pw', 'Chemist', 12, 12, 100, 100, 1, 1, 4, 0),
+        ('mage', 'pw', 'Mage', 12, 12, 100, 100, 1, 1, 4, 0),
+        ('assassin', 'pw', 'Assassin', 12, 12, 100, 100, 1, 1, 1, 0),
+        ('quick_target', 'pw', 'Novice', 20, 20, 100, 100, 20, 1, 1, 0)`
+    ).run();
+
+    await withMockedRandom([0.99], () => handleSkillAction(db, 'fighter', 1, 1, 'power_strike', 'quick_target', 1));
+    await withMockedRandom([0.99], () => handleSkillAction(db, 'chemist', 1, 1, 'dose', 'quick_target', 51));
+    await withMockedRandom([0.99], () => handleSkillAction(db, 'mage', 1, 1, 'arcane_pin', 'quick_target', 1));
+    await withMockedRandom([0.99], () => handleSkillAction(db, 'assassin', 1, 1, 'mark', 'quick_target', 1));
+
+    const target = await db.prepare("SELECT health, stamina FROM users WHERE username = 'quick_target'").first();
+    const statusEffects = await db.prepare("SELECT effectType FROM statusEffects WHERE username = 'quick_target'").all();
+    const messages = await getMessages(db, 1, 1);
+
+    assert.deepEqual(target, { health: 20, stamina: 100 });
+    assert.deepEqual(statusEffects.results, []);
+    assert.match(messages.at(-4).message, /quick_target dodged fighter's Power Strike/);
+    assert.match(messages.at(-3).message, /quick_target dodged chemist's Dose/);
+    assert.match(messages.at(-2).message, /quick_target dodged mage's Arcane Pin/);
+    assert.match(messages.at(-1).message, /quick_target dodged assassin's Mark/);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Worker helpful and neutral class skills bypass speed contests', async () => {
+  const db = await createMigratedDb();
+  const { handleSkillAction } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, gold)
+       VALUES
+        ('novice', 'pw', 'Novice', 12, 12, 100, 100, 1, 1, 4, 0),
+        ('paladin', 'pw', 'Paladin', 12, 12, 100, 100, 1, 1, 1, 0),
+        ('chemist', 'pw', 'Chemist', 12, 12, 100, 100, 1, 1, 4, 0),
+        ('dungeoneer', 'pw', 'Dungeoneer', 12, 12, 100, 100, 1, 1, 1, 0),
+        ('cleric', 'pw', 'Cleric', 12, 12, 100, 100, 1, 1, 4, 0),
+        ('quick_target', 'pw', 'Novice', 10, 20, 100, 100, 20, 1, 1, 0)`
+    ).run();
+    await db.prepare(
+      `INSERT INTO statusEffects
+        (username, source, effectType, magnitude, createdTick, expiryTick, roomRow, roomCol, sourceUsername)
+       VALUES ('quick_target', 'assassin', 'marked', 2, 1, 10, 1, 1, 'assassin')`
+    ).run();
+
+    await withMockedRandom([0.99], async () => {
+      await handleSkillAction(db, 'novice', 1, 1, 'scrounge', '', 1);
+      await handleSkillAction(db, 'paladin', 1, 1, 'ward', 'quick_target', 1);
+      await handleSkillAction(db, 'chemist', 1, 1, 'dose', 'quick_target', 1);
+      await handleSkillAction(db, 'dungeoneer', 1, 1, 'survey', '', 1);
+      await handleSkillAction(db, 'cleric', 1, 1, 'bless', 'quick_target', 1);
+    });
+
+    const novice = await db.prepare("SELECT gold FROM users WHERE username = 'novice'").first();
+    const dungeoneer = await db.prepare("SELECT gold FROM users WHERE username = 'dungeoneer'").first();
+    const target = await db.prepare("SELECT health FROM users WHERE username = 'quick_target'").first();
+    const effects = await db.prepare(
+      "SELECT effectType FROM statusEffects WHERE username = 'quick_target' ORDER BY effectType"
+    ).all();
+    const traces = await db.prepare("SELECT traceType FROM roomTraces WHERE attacker = 'dungeoneer'").all();
+
+    assert.equal(novice.gold, 3);
+    assert.equal(dungeoneer.gold, 1);
+    assert.equal(target.health, 14);
+    assert.deepEqual(effects.results.map(effect => effect.effectType), ['bless', 'ward']);
+    assert.deepEqual(traces.results.map(trace => trace.traceType), ['survey']);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Worker missed attacks do not consume mark or ward until a later hit', async () => {
+  const db = await createMigratedDb();
+  const { handleAttackAction } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
+       VALUES
+        ('attacker', 'pw', 'Novice', 12, 12, 100, 100, 1, 4, 1),
+        ('target', 'pw', 'Novice', 12, 12, 100, 100, 20, 1, 1)`
+    ).run();
+    await db.prepare(
+      `INSERT INTO statusEffects
+        (username, source, effectType, magnitude, createdTick, expiryTick, roomRow, roomCol, sourceUsername)
+       VALUES
+        ('target', 'assassin', 'marked', 2, 0, 10, 1, 1, 'assassin'),
+        ('target', 'paladin', 'ward', 2, 0, 10, 1, 1, 'paladin')`
+    ).run();
+
+    await withMockedRandom([0.99], () => handleAttackAction(db, 'attacker', 1, 1, '@target'));
+
+    const afterMiss = await db.prepare(
+      "SELECT effectType FROM statusEffects WHERE username = 'target' ORDER BY effectType"
+    ).all();
+    assert.deepEqual(afterMiss.results.map(effect => effect.effectType), ['marked', 'ward']);
+
+    await withMockedRandom([0.1, 0.99, 0.99], () => handleAttackAction(db, 'attacker', 1, 1, '@target'));
+
+    const afterHit = await db.prepare(
+      "SELECT effectType FROM statusEffects WHERE username = 'target' ORDER BY effectType"
+    ).all();
+    assert.deepEqual(afterHit.results, []);
+  } finally {
+    await db.close();
+  }
+});
+
 test('Worker skill deaths record the skill and source in the cemetery cause', async () => {
   const db = await createMigratedDb();
   const { handleSkillAction, processStatusEffects } = await import('../worker/game.mjs');
@@ -200,7 +407,7 @@ test('Worker skill deaths record the skill and source in the cemetery cause', as
        VALUES ('target', 'pw', 'Novice', 1, 10, 100, 100, 1, 1, 1, 0)`
     ).run();
 
-    await handleSkillAction(db, 'fighter', 1, 1, 'power_strike', 'target', 1);
+    await withMockedRandom([0.1], () => handleSkillAction(db, 'fighter', 1, 1, 'power_strike', 'target', 1));
     const powerStrikeGrave = await db.prepare(
       "SELECT cause FROM cemetery WHERE username = 'target'"
     ).first();

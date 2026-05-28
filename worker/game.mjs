@@ -35,6 +35,10 @@ const { calculateLevel } = levelingModule;
 
 const PRESENCE_MAX_AGE_SECONDS = 45;
 const INN_ACCESS_TYPE = 'inn';
+const SPEED_HIT_BASE_CHANCE = 0.7;
+const SPEED_HIT_STEP = 0.05;
+const SPEED_HIT_MIN_CHANCE = 0.25;
+const SPEED_HIT_MAX_CHANCE = 0.95;
 const HARMFUL_EFFECTS = new Set(['poison', 'arcane_pin', 'marked']);
 const PASSIVE_EFFECT_TYPES = new Set([
   'pub',
@@ -67,6 +71,31 @@ function assertAction(condition, message, statusCode = 400) {
   if (!condition) {
     throw new ActionError(message, statusCode);
   }
+}
+
+function clampNumber(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+export function calculateSpeedHitChance(attacker, target) {
+  const effectiveAttacker = getEffectiveUser(attacker);
+  const effectiveTarget = getEffectiveUser(target);
+  const speedDifference = effectiveAttacker.speed - effectiveTarget.speed;
+  const hitChance = clampNumber(
+    SPEED_HIT_BASE_CHANCE + speedDifference * SPEED_HIT_STEP,
+    SPEED_HIT_MIN_CHANCE,
+    SPEED_HIT_MAX_CHANCE
+  );
+
+  return Math.round(hitChance * 100) / 100;
+}
+
+function rollSpeedContest(attacker, target) {
+  const hitChance = calculateSpeedHitChance(attacker, target);
+  return {
+    hit: Math.random() < hitChance,
+    hitChance
+  };
 }
 
 export async function getCurrentTickValue(db) {
@@ -967,6 +996,13 @@ export async function handleAttack(db, username, message, row, col) {
   await cleanupOldWorldDayData(db, worldDay);
 
   for (const user of targets) {
+    const target = await getUser(db, user.username, 'Target');
+    const speedContest = rollSpeedContest(attacker, target);
+    if (!speedContest.hit) {
+      attackMessages.push(`${user.username} dodged ${username}'s attack`);
+      continue;
+    }
+
     const { damage, isCriticalAttack } = await calculateAttackDamage(db, attacker, user.username, createdTick);
     await dbRun(
       db,
@@ -1027,6 +1063,18 @@ export async function validateClassSkillUse(db, { username, skillId, targetUsern
   return { actor, effectiveActor, target };
 }
 
+async function tryHarmfulSkillHit(db, { effectiveActor, target, skillLabel, row, col }) {
+  const targetUser = await getUser(db, target, 'Target');
+  const speedContest = rollSpeedContest(effectiveActor, targetUser);
+  if (speedContest.hit) {
+    return true;
+  }
+
+  const message = `${target} dodged ${effectiveActor.username}'s ${skillLabel}.`;
+  await insertSystemMessage(db, row, col, message);
+  return false;
+}
+
 export async function useClassSkill(db, { username, skillId, targetUsername, row, col, currentTick, phase }) {
   const { effectiveActor, target } = await validateClassSkillUse(db, { username, skillId, targetUsername });
 
@@ -1054,6 +1102,17 @@ export async function useClassSkill(db, { username, skillId, targetUsername, row
       return { message };
     }
     case 'power_strike': {
+      const hit = await tryHarmfulSkillHit(db, {
+        effectiveActor,
+        target,
+        skillLabel: 'Power Strike',
+        row,
+        col
+      });
+      if (!hit) {
+        return { message: `${target} dodged ${username}'s Power Strike.`, missed: true };
+      }
+
       const marked = await dbFirst(
         db,
         'SELECT id, magnitude FROM statusEffects WHERE username = ? AND effectType = ? AND expiryTick > ? ORDER BY expiryTick ASC LIMIT 1',
@@ -1082,6 +1141,17 @@ export async function useClassSkill(db, { username, skillId, targetUsername, row
     }
     case 'dose': {
       if (phase === 'Night') {
+        const hit = await tryHarmfulSkillHit(db, {
+          effectiveActor,
+          target,
+          skillLabel: 'Dose',
+          row,
+          col
+        });
+        if (!hit) {
+          return { message: `${target} dodged ${username}'s Dose.`, missed: true };
+        }
+
         await addStatusEffect(db, {
           username: target,
           source: username,
@@ -1121,6 +1191,17 @@ export async function useClassSkill(db, { username, skillId, targetUsername, row
       return { message };
     }
     case 'arcane_pin': {
+      const hit = await tryHarmfulSkillHit(db, {
+        effectiveActor,
+        target,
+        skillLabel: 'Arcane Pin',
+        row,
+        col
+      });
+      if (!hit) {
+        return { message: `${target} dodged ${username}'s Arcane Pin.`, missed: true };
+      }
+
       await addStatusEffect(db, {
         username: target,
         source: username,
@@ -1136,6 +1217,17 @@ export async function useClassSkill(db, { username, skillId, targetUsername, row
       return { message };
     }
     case 'mark': {
+      const hit = await tryHarmfulSkillHit(db, {
+        effectiveActor,
+        target,
+        skillLabel: 'Mark',
+        row,
+        col
+      });
+      if (!hit) {
+        return { message: `${target} dodged ${username}'s Mark.`, missed: true };
+      }
+
       await addStatusEffect(db, {
         username: target,
         source: username,
