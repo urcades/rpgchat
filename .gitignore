@@ -3,6 +3,7 @@ node_modules/
 
 # SQLite database file
 database.sqlite
+.wrangler/
 
 # Package lock file
 package-lock.json

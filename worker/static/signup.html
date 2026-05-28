@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Sign Up</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="page">
+    <h2>Sign Up</h2>
+    <form method="POST" action="/signup">
+      <label for="username">Username:</label>
+      <input type="text" id="username" name="username" required><br>
+      <label for="password">Password:</label>
+      <input type="password" id="password" name="password" required><br>
+      <label for="job">Job:</label>
+      <select id="job" name="job" required>
+        <option value="Novice">Novice</option>
+        <option value="Paladin">Paladin</option>
+        <option value="Fighter">Fighter</option>
+        <option value="Chemist">Chemist</option>
+        <option value="Dungeoneer">Dungeoneer</option>
+        <option value="Mage">Mage</option>
+        <option value="Assassin">Assassin</option>
+        <option value="Cleric">Cleric</option>
+      </select><br>
+      <p>Starting Stats: spend exactly 12 points.</p>
+      <label for="health">Health:</label>
+      <input type="number" id="health" name="health" min="0" max="12" value="2" required><br>
+      <label for="stamina">Stamina:</label>
+      <input type="number" id="stamina" name="stamina" min="0" max="12" value="3" required><br>
+      <label for="speed">Speed:</label>
+      <input type="number" id="speed" name="speed" min="0" max="12" value="2" required><br>
+      <label for="strength">Strength:</label>
+      <input type="number" id="strength" name="strength" min="0" max="12" value="3" required><br>
+      <label for="intelligence">Intelligence:</label>
+      <input type="number" id="intelligence" name="intelligence" min="0" max="12" value="2" required><br>
+      <p id="stat-total">12 / 12</p>
+      <button type="submit">Sign Up</button>
+    </form>
+  </main>
+  <script>
+    const statIds = ['health', 'stamina', 'speed', 'strength', 'intelligence'];
+    const pointBudget = 12;
+
+    function input(id) {
+      return document.getElementById(id);
+    }
+
+    function value(id) {
+      return Number.parseInt(input(id).value || '0', 10);
+    }
+
+    function total() {
+      return statIds.reduce((sum, id) => sum + value(id), 0);
+    }
+
+    function clampChangedStat(changedId) {
+      const otherTotal = statIds
+        .filter(id => id !== changedId)
+        .reduce((sum, id) => sum + value(id), 0);
+      const maxAllowed = Math.max(0, pointBudget - otherTotal);
+      input(changedId).value = Math.min(Math.max(value(changedId), 0), maxAllowed);
+    }
+
+    function updateStatLimits() {
+      statIds.forEach(id => {
+        const remaining = pointBudget - (total() - value(id));
+        input(id).max = Math.max(0, remaining);
+      });
+    }
+
+    function updateStatTotal() {
+      document.getElementById('stat-total').textContent = `${total()} / ${pointBudget}`;
+      updateStatLimits();
+    }
+
+    statIds.forEach(id => {
+      input(id).addEventListener('input', () => {
+        clampChangedStat(id);
+        updateStatTotal();
+      });
+    });
+    updateStatTotal();
+  </script>
+</body>
+</html>

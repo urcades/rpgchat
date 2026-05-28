@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Character</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="page">
+    <p>Character Information</p>
+    <p><a href="#" onclick="history.back(); return false;">Back to chat</a></p>
+    <div id="attributes"></div>
+  </main>
+  <script>
+    fetch('/user-attributes')
+      .then(response => response.json())
+      .then(data => {
+        const effective = data.effectiveStats || data;
+        const base = data.baseStats || data;
+        const bonuses = data.jobBonuses || {};
+        const skill = data.skill || {};
+        document.getElementById('attributes').innerHTML = `
+          <p>Job: ${data.job || 'Novice'}</p>
+          <p>Skill: ${skill.label || 'Scrounge'}</p>
+          <p>Level: ${data.level}</p>
+          <p>Attribute Points: ${data.attributePoints || 0}</p>
+          <p>Gold: ${data.gold !== undefined ? data.gold : 0}</p>
+          <p>Health: ${effective.health ?? 0}/${effective.maxHealth ?? 0}</p>
+          <p>Stamina: ${effective.stamina ?? 0}/${effective.maxStamina ?? 0}</p>
+          <p>Speed: ${effective.speed ?? 0}</p>
+          <p>Strength: ${effective.strength ?? 0}</p>
+          <p>Intelligence: ${effective.intelligence ?? 0}</p>
+          <p>Base: HP ${base.maxHealth ?? 0}, ST ${base.maxStamina ?? 0}, SPD ${base.speed ?? 0}, STR ${base.strength ?? 0}, INT ${base.intelligence ?? 0}</p>
+          <p>Job Bonus: HP +${bonuses.maxHealth || 0}, ST +${bonuses.maxStamina || 0}, SPD +${bonuses.speed || 0}, STR +${bonuses.strength || 0}, INT +${bonuses.intelligence || 0}</p>
+        `;
+      });
+  </script>
+</body>
+</html>

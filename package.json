@@ -1,20 +1,27 @@
 {
   "name": "gate",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "RPGChat Cloudflare Worker",
+  "main": "worker/index.mjs",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test",
+    "dev": "wrangler dev --local --ip 0.0.0.0 --port 8787",
+    "check": "wrangler deploy --dry-run",
+    "deploy": "wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
+    "worker:dev": "npm run dev",
+    "worker:migrate": "npm run db:migrate:local",
+    "worker:check": "npm run check"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "body-parser": "^1.20.2",
-    "ejs": "^3.1.10",
-    "express": "^4.19.2",
-    "express-session": "^1.18.0",
+    "hono": "^4.12.23"
+  },
+  "devDependencies": {
     "sqlite3": "^5.1.7",
-    "ws": "^8.17.0"
+    "wrangler": "^4.95.0"
   }
 }

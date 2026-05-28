@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>World Map</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="page">
+    <p>World Map</p>
+    <div class="grid-container"></div>
+    <nav class="actions">
+      <p><a href="/leaderboard">Leaderboard</a></p>
+      <p><a href="/cemetery">Graveyard</a></p>
+      <p><a href="/character">Status</a></p>
+      <p><a href="/logout">Logout</a></p>
+    </nav>
+  </main>
+  <script>
+    const gridContainer = document.querySelector('.grid-container');
+    for (let row = 1; row <= 16; row += 1) {
+      for (let col = 1; col <= 16; col += 1) {
+        const gridItem = document.createElement('a');
+        gridItem.classList.add('grid-item');
+        gridItem.href = `/chat/${row}/${col}`;
+        gridItem.textContent = `${row}, ${col}`;
+        gridContainer.appendChild(gridItem);
+      }
+    }
+  </script>
+</body>
+</html>

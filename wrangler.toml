@@ -1,0 +1,28 @@
+name = "rpgchat-worker"
+main = "worker/index.mjs"
+compatibility_date = "2026-05-28"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = "./worker/static"
+binding = "ASSETS"
+run_worker_first = true
+html_handling = "none"
+not_found_handling = "none"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "rpgchat-worker"
+database_id = "ad332000-0e5e-473b-bcfb-0e1339bd3df0"
+migrations_dir = "migrations"
+
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "RoomObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RoomObject"]
+
+[observability]
+enabled = true
