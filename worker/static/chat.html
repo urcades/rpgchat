@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Chat</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="chat-page">
+  <div class="hud">
+    <p><a href="/success">World Map</a></p>
+    <p><a href="/character">Status</a></p>
+    <div id="attributes"></div>
+    <p id="tick"></p>
+    <p id="phase"></p>
+  </div>
+  <div class="hud" id="room-ecology-toolbar"></div>
+  <div class="hud" id="job-controls" style="display: none;">
+    <select id="job-select" name="job">
+      <option value="Novice">Novice</option>
+      <option value="Paladin">Paladin</option>
+      <option value="Fighter">Fighter</option>
+      <option value="Chemist">Chemist</option>
+      <option value="Dungeoneer">Dungeoneer</option>
+      <option value="Mage">Mage</option>
+      <option value="Assassin">Assassin</option>
+      <option value="Cleric">Cleric</option>
+    </select>
+    <button type="button" id="job-button">Change Job</button>
+  </div>
+  <div class="chat">
+    <div id="messages"></div>
+  </div>
+  <div class="hud">
+    <form class="chat-form" id="chat-form">
+      <input type="text" id="message" name="message">
+      <button type="button" id="clear-target" style="display: none;">Untarget</button>
+      <button type="submit" id="send-button">Send</button>
+      <button type="button" id="attack-button">Attack</button>
+      <button type="button" id="skill-button">Skill</button>
+      <select id="skill-id" name="skillId"></select>
+    </form>
+  </div>
+
+  <script>
+    let socket;
+    let phase = 'Day';
+    let heartbeatTimer;
+    let currentSkill = null;
+    let currentJob = 'Novice';
+    let selectedTarget = '';
+
+    const pathParts = window.location.pathname.split('/');
+    const row = pathParts[2];
+    const col = pathParts[3];
+
+    const harmfulStatusLabels = {
+      poison: 'poisoned',
+      arcane_pin: 'pinned',
+      marked: 'marked'
+    };
+
+    const helpfulStatusLabels = {
+      ward: 'warded',
+      bless: 'blessed'
+    };
+
+    function getStatusLabel(effectType) {
+      return harmfulStatusLabels[effectType] || helpfulStatusLabels[effectType] || effectType;
+    }
+
+    function isSkillSystemMessage(message) {
+      return /\b(scrounges|wards|power strikes|doses|patches up|surveys|pins|marks|blesses)\b/i.test(message);
+    }
+
+    function setText(parent, text) {
+      const span = document.createElement('span');
+      span.textContent = text;
+      parent.appendChild(span);
+      return span;
+    }
+
+    function redirectIfDead(response) {
+      if (response.status === 410) {
+        response.json()
+          .then(data => {
+            window.location.href = data.redirect || '/death';
+          })
+          .catch(() => {
+            window.location.href = '/death';
+          });
+        return true;
+      }
+      return false;
+    }
+
+    function redirectIfResponseLandedOnDeath(response) {
+      if (response.redirected && new URL(response.url).pathname === '/death') {
+        window.location.href = '/death';
+        return true;
+      }
+      return false;
+    }
+
+    function renderMessage(msg) {
+      const messageElement = document.createElement('div');
+      const isSystem = msg.username === 'System';
+      if (isSystem) {
+        messageElement.classList.add('system-message');
+        if (isSkillSystemMessage(msg.message)) {
+          messageElement.classList.add('skill-message');
+        }
+        messageElement.textContent = `${msg.timestamp} - system: ${msg.message}`;
+        return messageElement;
+      }
+
+      const activeStatuses = (msg.statusEffects || []).map(getStatusLabel);
+      setText(messageElement, `${msg.timestamp} - `);
+      const username = document.createElement('button');
+      username.type = 'button';
+      username.className = 'message-username';
+      username.textContent = msg.username;
+      username.addEventListener('click', () => selectTarget(msg.username));
+      messageElement.appendChild(username);
+      if (msg.job) {
+        setText(messageElement, ` [${String(msg.job).toLowerCase()}]`);
+      }
+      activeStatuses.forEach(status => {
+        setText(messageElement, ` [${status}]`);
+      });
+      setText(messageElement, `: ${msg.message}`);
+      return messageElement;
+    }
+
+    function loadMessages() {
+      fetch(`/messages/${row}/${col}`)
+        .then(response => {
+          if (redirectIfDead(response)) {
+            throw new Error('You died');
+          }
+          if (!response.ok) {
+            throw new Error('Messages unavailable');
+          }
+          return response.json();
+        })
+        .then(data => {
+          const messagesDiv = document.getElementById('messages');
+          messagesDiv.innerHTML = '';
+          data.forEach(msg => {
+            messagesDiv.appendChild(renderMessage(msg));
+          });
+          scrollToBottom();
+        })
+        .catch(() => {
+          document.getElementById('messages').textContent = 'Messages are unavailable in this room right now.';
+        });
+    }
+
+    function loadUserAttributes() {
+      fetch('/user-attributes')
+        .then(response => {
+          if (redirectIfDead(response)) {
+            throw new Error('You died');
+          }
+          return response.json();
+        })
+        .then(data => {
+          const attributesDiv = document.getElementById('attributes');
+          const effective = data.effectiveStats || data;
+          currentSkill = data.skill || null;
+          currentJob = data.job || 'Novice';
+          attributesDiv.innerHTML = `
+            <p>Job: ${data.job || 'Novice'}</p>
+            <p>Health: ${effective.health}/${effective.maxHealth}</p>
+            <p>Stamina: ${effective.stamina}/${effective.maxStamina}</p>
+            <p>Speed: ${effective.speed}</p>
+            <p>Strength: ${effective.strength}</p>
+            <p>Intelligence: ${effective.intelligence}</p>
+            <p>Level: ${data.level}</p>
+            <p>Gold: ${data.gold !== undefined ? data.gold : 0}</p>
+          `;
+          const skillSelect = document.getElementById('skill-id');
+          if (skillSelect && currentSkill) {
+            skillSelect.innerHTML = '';
+            const option = document.createElement('option');
+            option.value = currentSkill.id;
+            option.textContent = currentSkill.label;
+            skillSelect.appendChild(option);
+          }
+          const jobSelect = document.getElementById('job-select');
+          if (jobSelect) {
+            Array.from(jobSelect.options).forEach(option => {
+              option.selected = option.value === currentJob;
+            });
+          }
+        });
+    }
+
+    function loadTick() {
+      fetch('/tick')
+        .then(response => response.json())
+        .then(data => {
+          const tickValue = data.tick;
+          phase = tickValue % 100 < 50 ? 'Day' : 'Night';
+          document.getElementById('tick').textContent = `Global Tick: ${tickValue}`;
+          document.getElementById('phase').textContent = `Phase: ${phase}`;
+        });
+    }
+
+    function setParagraph(parent, text) {
+      const paragraph = document.createElement('p');
+      paragraph.textContent = text;
+      parent.appendChild(paragraph);
+    }
+
+    function loadRoomEcology() {
+      fetch(`/room-ecology/${row}/${col}`)
+        .then(response => {
+          if (redirectIfDead(response)) {
+            throw new Error('You died');
+          }
+          return response.json();
+        })
+        .then(data => {
+          const toolbar = document.getElementById('room-ecology-toolbar');
+          const featureLabels = data.features.map(feature => feature.active === false ? `${feature.label} (dormant)` : feature.label);
+          const traceLabels = data.traceSummary.labels.length > 0 ? data.traceSummary.labels : ['none'];
+          const effectLabels = data.effects && data.effects.length > 0
+            ? data.effects.map(effect => effect.label || effect.type)
+            : ['none'];
+
+          toolbar.innerHTML = '';
+          setParagraph(toolbar, `Room: ${data.room.row}, ${data.room.col}`);
+          setParagraph(toolbar, `Features: ${featureLabels.join(', ')}`);
+          setParagraph(toolbar, `Systems: ${effectLabels.join(', ')}`);
+          setParagraph(toolbar, `Traces: ${traceLabels.join(', ')}`);
+          if (data.stock && data.stock.length > 0) {
+            setParagraph(toolbar, `Stock: ${data.stock.map(item => `${item.name} ${item.price}g`).join(', ')}`);
+          }
+          if (data.commands && data.commands.length > 0) {
+            setParagraph(toolbar, `Commands: ${data.commands.join(', ')}`);
+          }
+          if (data.innAccess && data.innAccess.required) {
+            setParagraph(toolbar, `Inn: ${data.innAccess.paid ? 'paid' : `${data.innAccess.fee}g`}`);
+          }
+          if (data.activeRound) {
+            setParagraph(toolbar, `Dice pool: ${data.activeRound.pool}g, closes in ${data.activeRound.remainingTicks} ticks`);
+          }
+          setParagraph(toolbar, `Reset: ${new Date(data.nextResetAt).toUTCString()}`);
+          const roomDescription = document.createElement('p');
+          roomDescription.className = 'room-description';
+          roomDescription.textContent = data.description;
+          toolbar.appendChild(roomDescription);
+          const isGuild = data.effects && data.effects.some(effect => effect.type === 'guild');
+          document.getElementById('job-controls').style.display = isGuild ? 'flex' : 'none';
+        });
+    }
+
+    function heartbeatRoom() {
+      fetch(`/room-presence/${row}/${col}`, { method: 'POST' }).catch(() => {});
+    }
+
+    function updateAll() {
+      heartbeatRoom();
+      loadMessages();
+      loadUserAttributes();
+      loadTick();
+      loadRoomEcology();
+    }
+
+    function updateTargetHint() {
+      const messageInput = document.getElementById('message');
+      const clearTargetButton = document.getElementById('clear-target');
+      messageInput.placeholder = selectedTarget ? `Currently targeting ${selectedTarget}` : 'Message';
+      clearTargetButton.style.display = selectedTarget ? 'inline-block' : 'none';
+      clearTargetButton.textContent = selectedTarget ? `Untarget ${selectedTarget}` : 'Untarget';
+    }
+
+    function selectTarget(username) {
+      selectedTarget = username;
+      updateTargetHint();
+      document.getElementById('message').focus();
+    }
+
+    function clearTarget() {
+      selectedTarget = '';
+      updateTargetHint();
+      document.getElementById('message').focus();
+    }
+
+    function getMentionTarget(message) {
+      const match = message.match(/@([A-Za-z0-9_-]+)/);
+      return match ? match[1] : '';
+    }
+
+    function getActionMessage(message, attack) {
+      const trimmed = message.trim();
+      if (!attack) {
+        return message;
+      }
+      const target = getMentionTarget(trimmed) || selectedTarget;
+      if (!target) {
+        return message;
+      }
+      if (trimmed.includes(target)) {
+        return message;
+      }
+      return trimmed ? `${trimmed} @${target}` : `@${target}`;
+    }
+
+    function postForm(endpoint, body, onSuccess) {
+      fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body
+      })
+        .then(response => {
+          if (redirectIfResponseLandedOnDeath(response)) {
+            return;
+          }
+          if (!response.ok) {
+            return response.text().then(message => {
+              throw new Error(message);
+            });
+          }
+          if (onSuccess) {
+            onSuccess();
+          }
+          updateAll();
+        })
+        .catch(error => {
+          window.alert(error.message);
+        });
+    }
+
+    function submitMessage(event, attack = false) {
+      event.preventDefault();
+      const messageInput = document.getElementById('message');
+      const message = messageInput.value;
+      const actionMessage = getActionMessage(message, attack);
+      if (!actionMessage.trim()) {
+        return;
+      }
+      const endpoint = attack ? `/attack/${row}/${col}` : `/chat/${row}/${col}`;
+      postForm(endpoint, `message=${encodeURIComponent(actionMessage)}`, () => {
+        messageInput.value = '';
+        updateTargetHint();
+      });
+    }
+
+    function submitSkill(event) {
+      event.preventDefault();
+      const skillId = document.getElementById('skill-id').value;
+      const messageInput = document.getElementById('message');
+      const targetUsername = getMentionTarget(messageInput.value) || selectedTarget;
+      postForm(
+        `/skill/${row}/${col}`,
+        `skillId=${encodeURIComponent(skillId)}&targetUsername=${encodeURIComponent(targetUsername)}`,
+        updateTargetHint
+      );
+    }
+
+    function submitJobChange(event) {
+      event.preventDefault();
+      const job = document.getElementById('job-select').value;
+      postForm(`/job/${row}/${col}`, `job=${encodeURIComponent(job)}`);
+    }
+
+    function scrollToBottom() {
+      const messagesDiv = document.getElementById('messages');
+      messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+      document.getElementById('chat-form').addEventListener('submit', event => submitMessage(event, false));
+      document.getElementById('attack-button').addEventListener('click', event => submitMessage(event, true));
+      document.getElementById('skill-button').addEventListener('click', submitSkill);
+      document.getElementById('job-button').addEventListener('click', submitJobChange);
+      document.getElementById('clear-target').addEventListener('click', clearTarget);
+      document.getElementById('message').addEventListener('keydown', function(event) {
+        if ((event.altKey || event.metaKey) && event.key === 'Enter') {
+          submitMessage(event, true);
+        }
+      });
+      document.addEventListener('keydown', function(event) {
+        if (event.key === 'Escape' && selectedTarget) {
+          clearTarget();
+        }
+      });
+
+      updateTargetHint();
+      updateAll();
+      heartbeatTimer = setInterval(heartbeatRoom, 15000);
+
+      const socketProtocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+      socket = new WebSocket(`${socketProtocol}${window.location.host}/ws/${row}/${col}`);
+      socket.onmessage = function() {
+        loadMessages();
+        loadRoomEcology();
+        loadUserAttributes();
+        loadTick();
+      };
+    });
+  </script>
+</body>
+</html>

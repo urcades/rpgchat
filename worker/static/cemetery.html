@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Graveyard</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="page">
+    <p>Dead players</p>
+    <div id="cemetery"></div>
+    <p><a href="/">Home</a></p>
+  </main>
+  <script>
+    fetch('/cemetery-data')
+      .then(response => response.json())
+      .then(players => {
+        const root = document.getElementById('cemetery');
+        if (players.length === 0) {
+          root.textContent = 'No dead players yet.';
+          return;
+        }
+        players.forEach(player => {
+          const div = document.createElement('div');
+          div.textContent = `${player.username} [${player.job || 'Novice'}] level ${player.level || 0}, ${player.gold || 0} gold, ${player.cause || 'unknown cause'}`;
+          root.appendChild(div);
+        });
+      });
+  </script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Leaderboard</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="page">
+    <p>Leaderboard</p>
+    <div id="leaderboard"></div>
+    <p><a href="/success">World Map</a></p>
+  </main>
+  <script>
+    fetch('/leaderboard-data')
+      .then(response => response.json())
+      .then(players => {
+        const root = document.getElementById('leaderboard');
+        players.forEach(player => {
+          const div = document.createElement('div');
+          div.textContent = `${player.username}: ${player.gold} gold`;
+          root.appendChild(div);
+        });
+      });
+  </script>
+</body>
+</html>

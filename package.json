@@ -4,7 +4,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "worker:dev": "wrangler dev --local --ip 0.0.0.0 --port 8787",
+    "worker:migrate": "wrangler d1 migrations apply DB --local",
+    "worker:check": "wrangler deploy --dry-run"
   },
   "keywords": [],
   "author": "",
@@ -14,7 +17,11 @@
     "ejs": "^3.1.10",
     "express": "^4.19.2",
     "express-session": "^1.18.0",
+    "hono": "^4.12.23",
     "sqlite3": "^5.1.7",
     "ws": "^8.17.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.95.0"
   }
 }

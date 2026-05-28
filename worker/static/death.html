@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>You Died</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="page">
+    <p id="grave-name">You died.</p>
+    <div id="grave">
+      <p>Job: <span id="grave-job">...</span></p>
+      <p>Level reached: <span id="grave-level">...</span></p>
+      <p>Gold accumulated: <span id="grave-gold">...</span></p>
+      <p>Final room: <span id="grave-room">...</span></p>
+      <p>Cause: <span id="grave-cause">...</span></p>
+      <p>Died at: <span id="grave-died-at">...</span></p>
+      <p>Kills: <span id="grave-kills">...</span></p>
+      <p>Achievements: <span id="grave-achievements">...</span></p>
+    </div>
+    <div class="actions">
+      <a href="/logout">Return home</a>
+      <a href="/signup">Create new player</a>
+      <button type="button" onclick="window.alert('Resurrection is not available yet. This will eventually become a paid revive or guild service.')">Pay to resurrect</button>
+    </div>
+  </main>
+  <script>
+    function setText(id, text) {
+      document.getElementById(id).textContent = text;
+    }
+
+    function formatRoom(grave) {
+      if (grave.roomRow === null || grave.roomRow === undefined || grave.roomCol === null || grave.roomCol === undefined) {
+        return 'Unknown';
+      }
+      return `${grave.roomRow}, ${grave.roomCol}`;
+    }
+
+    fetch('/death-data')
+      .then(response => {
+        if (!response.ok) {
+          throw new Error('No grave found for this session.');
+        }
+        return response.json();
+      })
+      .then(grave => {
+        setText('grave-name', `${grave.username} died.`);
+        setText('grave-job', grave.job || 'Novice');
+        setText('grave-level', grave.level ?? 0);
+        setText('grave-gold', grave.gold ?? 0);
+        setText('grave-room', formatRoom(grave));
+        setText('grave-cause', grave.cause || 'Unknown');
+        setText('grave-died-at', grave.diedAt || 'Unknown');
+        setText('grave-kills', grave.kills ?? 0);
+        setText('grave-achievements', grave.achievements && grave.achievements.length > 0 ? grave.achievements.join(', ') : 'None recorded');
+      })
+      .catch(error => {
+        setText('grave-name', error.message);
+      });
+  </script>
+</body>
+</html>
