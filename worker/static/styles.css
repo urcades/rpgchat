@@ -13,6 +13,13 @@ a, button, input, select {
   padding: 1rem;
 }
 
+.brand-logo {
+  display: block;
+  max-width: min(460px, 100%);
+  height: auto;
+  margin-bottom: 1rem;
+}
+
 .hud {
   display: flex;
   flex-direction: row;
