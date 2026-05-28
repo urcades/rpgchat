@@ -5,12 +5,17 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body class="chat-page">
-  <div class="hud">
-    <p><a href="/success">World Map</a></p>
-    <p><a href="/character">Status</a></p>
-    <div id="attributes"></div>
-    <p id="tick"></p>
-    <p id="phase"></p>
+  <div class="hud top-hud">
+    <div class="hud-primary">
+      <p><a href="/success">World Map</a></p>
+      <p><a href="/character">Status</a></p>
+      <div id="attributes"></div>
+    </div>
+    <div id="hud-status">
+      <p id="gold"></p>
+      <p id="tick"></p>
+      <p id="phase"></p>
+    </div>
   </div>
   <div class="hud" id="room-ecology-toolbar"></div>
   <div class="hud" id="job-controls" style="display: none;">
@@ -29,7 +34,7 @@
   <div class="chat">
     <div id="messages"></div>
   </div>
-  <div class="hud">
+  <div class="hud chat-input-toolbar">
     <form class="chat-form" id="chat-form">
       <input type="text" id="message" name="message">
       <button type="button" id="clear-target" style="display: none;">Untarget</button>
@@ -82,10 +87,10 @@
       if (response.status === 410) {
         response.json()
           .then(data => {
-            window.location.href = data.redirect || '/death';
+            window.location.href = data.redirect || '/you-died';
           })
           .catch(() => {
-            window.location.href = '/death';
+            window.location.href = '/you-died';
           });
         return true;
       }
@@ -93,8 +98,8 @@
     }
 
     function redirectIfResponseLandedOnDeath(response) {
-      if (response.redirected && new URL(response.url).pathname === '/death') {
-        window.location.href = '/death';
+      if (response.redirected && ['/death', '/you-died'].includes(new URL(response.url).pathname)) {
+        window.location.href = new URL(response.url).pathname;
         return true;
       }
       return false;
@@ -168,15 +173,14 @@
           currentSkill = data.skill || null;
           currentJob = data.job || 'Novice';
           attributesDiv.innerHTML = `
-            <p>Job: ${data.job || 'Novice'}</p>
+            <p>Job: ${data.job || 'Novice'} • Level ${data.level}</p>
             <p>Health: ${effective.health}/${effective.maxHealth}</p>
             <p>Stamina: ${effective.stamina}/${effective.maxStamina}</p>
             <p>Speed: ${effective.speed}</p>
             <p>Strength: ${effective.strength}</p>
             <p>Intelligence: ${effective.intelligence}</p>
-            <p>Level: ${data.level}</p>
-            <p>Gold: ${data.gold !== undefined ? data.gold : 0}</p>
           `;
+          document.getElementById('gold').textContent = `Gold: ${data.gold !== undefined ? data.gold : 0}`;
           const skillSelect = document.getElementById('skill-id');
           if (skillSelect && currentSkill) {
             skillSelect.innerHTML = '';
@@ -209,6 +213,10 @@
       const paragraph = document.createElement('p');
       paragraph.textContent = text;
       parent.appendChild(paragraph);
+    }
+
+    function getRoomDescriptionWithoutLocation(description, rowValue, colValue) {
+      return String(description || '').replace(new RegExp(`^Room\\s+${rowValue},\\s*${colValue}\\.\\s*`, 'i'), '');
     }
 
     function loadRoomEcology() {
@@ -244,11 +252,8 @@
           if (data.activeRound) {
             setParagraph(toolbar, `Dice pool: ${data.activeRound.pool}g, closes in ${data.activeRound.remainingTicks} ticks`);
           }
-          setParagraph(toolbar, `Reset: ${new Date(data.nextResetAt).toUTCString()}`);
-          const roomDescription = document.createElement('p');
-          roomDescription.className = 'room-description';
-          roomDescription.textContent = data.description;
-          toolbar.appendChild(roomDescription);
+          const roomDescription = getRoomDescriptionWithoutLocation(data.description, data.room.row, data.room.col);
+          setParagraph(toolbar, `Reset: ${new Date(data.nextResetAt).toUTCString()} ${roomDescription}`);
           const isGuild = data.effects && data.effects.some(effect => effect.type === 'guild');
           document.getElementById('job-controls').style.display = isGuild ? 'flex' : 'none';
         });
@@ -271,7 +276,7 @@
       const clearTargetButton = document.getElementById('clear-target');
       messageInput.placeholder = selectedTarget ? `Currently targeting ${selectedTarget}` : 'Message';
       clearTargetButton.style.display = selectedTarget ? 'inline-block' : 'none';
-      clearTargetButton.textContent = selectedTarget ? `Untarget ${selectedTarget}` : 'Untarget';
+      clearTargetButton.textContent = 'Untarget';
     }
 
     function selectTarget(username) {
@@ -313,6 +318,9 @@
         body
       })
         .then(response => {
+          if (redirectIfDead(response)) {
+            return;
+          }
           if (redirectIfResponseLandedOnDeath(response)) {
             return;
           }
@@ -376,7 +384,9 @@
       document.getElementById('job-button').addEventListener('click', submitJobChange);
       document.getElementById('clear-target').addEventListener('click', clearTarget);
       document.getElementById('message').addEventListener('keydown', function(event) {
-        if ((event.altKey || event.metaKey) && event.key === 'Enter') {
+        if (event.shiftKey && event.metaKey && event.key === 'Enter') {
+          submitSkill(event);
+        } else if ((event.altKey || event.metaKey) && event.key === 'Enter') {
           submitMessage(event, true);
         }
       });

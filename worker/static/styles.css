@@ -9,6 +9,21 @@ a, button, input, select {
   font: inherit;
 }
 
+.link-button {
+  appearance: none;
+  background: none;
+  border: 0;
+  color: #0000ee;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.link-button:disabled {
+  color: #777777;
+  cursor: default;
+}
+
 .page {
   padding: 1rem;
 }
@@ -28,10 +43,32 @@ a, button, input, select {
   padding: 0 .5em;
 }
 
+.top-hud {
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #d9d9d9;
+}
+
+.hud-primary,
+#hud-status {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 1em;
+}
+
+#hud-status {
+  margin-left: auto;
+}
+
+.hud p,
+#hud-status > p {
+  margin: 0;
+}
+
 #room-ecology-toolbar {
   flex-wrap: wrap;
   gap: .4em 1em;
-  border-top: 1px solid #d9d9d9;
   border-bottom: 1px solid #d9d9d9;
   padding: .5em;
 }
@@ -71,13 +108,23 @@ a, button, input, select {
 
 .chat-form {
   display: flex;
-  padding: 1em 0;
+  align-items: center;
+  padding: .75em 0;
   gap: .5em;
   width: 100%;
 }
 
 .chat-form input {
   width: 100%;
+}
+
+.chat-form button,
+.chat-form select {
+  white-space: nowrap;
+}
+
+.chat-input-toolbar {
+  border-top: 1px solid #d9d9d9;
 }
 
 #job-controls {
@@ -134,4 +181,32 @@ a, button, input, select {
   display: flex;
   gap: 1em;
   margin-top: 1em;
+}
+
+.death-interstitial {
+  background: #ff0000;
+  color: #000000;
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+}
+
+.death-interstitial-content {
+  text-align: center;
+}
+
+.death-interstitial-content p {
+  font-size: 4rem;
+  margin: 0 0 1rem;
+}
+
+.death-proceed {
+  appearance: none;
+  background: #ffffff;
+  border: 1px solid #000000;
+  color: #000000;
+  cursor: pointer;
+  display: inline-block;
+  padding: .35em .75em;
+  text-decoration: none;
 }

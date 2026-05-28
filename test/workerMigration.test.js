@@ -184,6 +184,50 @@ test('Worker class skills write system messages and advance through the shared a
   }
 });
 
+test('Worker skill deaths record the skill and source in the cemetery cause', async () => {
+  const db = await createMigratedDb();
+  const { handleSkillAction, processStatusEffects } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, gold)
+       VALUES ('fighter', 'pw', 'Fighter', 12, 12, 100, 100, 1, 12, 1, 0)`
+    ).run();
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, gold)
+       VALUES ('target', 'pw', 'Novice', 1, 10, 100, 100, 1, 1, 1, 0)`
+    ).run();
+
+    await handleSkillAction(db, 'fighter', 1, 1, 'power_strike', 'target', 1);
+    const powerStrikeGrave = await db.prepare(
+      "SELECT cause FROM cemetery WHERE username = 'target'"
+    ).first();
+
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, gold)
+       VALUES ('poisoned', 'pw', 'Novice', 1, 10, 100, 100, 1, 1, 1, 0)`
+    ).run();
+    await db.prepare(
+      `INSERT INTO statusEffects
+        (username, source, effectType, magnitude, createdTick, expiryTick, roomRow, roomCol, sourceUsername)
+       VALUES ('poisoned', 'chemist', 'poison', 1, 1, 5, 2, 3, 'chemist')`
+    ).run();
+
+    await processStatusEffects(db, 2);
+    const poisonGrave = await db.prepare(
+      "SELECT cause FROM cemetery WHERE username = 'poisoned'"
+    ).first();
+
+    assert.equal(powerStrikeGrave.cause, 'power strike by fighter');
+    assert.equal(poisonGrave.cause, 'dose by chemist');
+  } finally {
+    await db.close();
+  }
+});
+
 test('Worker resurrection link creates a pending request for the current grave', async () => {
   const db = await createMigratedDb();
   const { createResurrectionCheckout } = await import('../worker/resurrection.mjs');
@@ -251,4 +295,47 @@ test('Worker resurrection fulfillment revives a paid grave only once', async () 
   } finally {
     await db.close();
   }
+});
+
+test('dead sessions remain death-aware after the live user is gone', async () => {
+  const db = await createMigratedDb();
+  const { createSession, requireLiveUser } = await import('../worker/auth.mjs');
+  const env = { DB: db, SESSION_SECRET: 'test-secret' };
+
+  try {
+    await db.prepare(
+      `INSERT INTO cemetery
+        (username, password, level, gold, job, cause, roomRow, roomCol)
+       VALUES ('fallen', 'pw', 0, 0, 'Novice', 'attack by fallen', 1, 1)`
+    ).run();
+
+    const session = await createSession(env, { deadUsername: 'fallen' });
+    const request = new Request('http://localhost/messages/1/1', {
+      headers: { Cookie: session.cookie }
+    });
+
+    const result = await requireLiveUser(env, request);
+
+    assert.equal(result.dead, true);
+    assert.equal(result.session.deadUsername, 'fallen');
+  } finally {
+    await db.close();
+  }
+});
+
+test('local development URLs canonicalize localhost to 127.0.0.1', async () => {
+  const { canonicalLocalRequestUrl } = await import('../worker/localHost.mjs');
+
+  assert.equal(
+    canonicalLocalRequestUrl('http://localhost:8787/chat/1/1?from=map'),
+    'http://127.0.0.1:8787/chat/1/1?from=map'
+  );
+  assert.equal(
+    canonicalLocalRequestUrl('http://127.0.0.1:8787/chat/1/1'),
+    null
+  );
+  assert.equal(
+    canonicalLocalRequestUrl('https://example.com/chat/1/1'),
+    null
+  );
 });

@@ -742,7 +742,8 @@ export async function processStatusEffects(db, currentTick) {
     }
 
     if (effect.effectType === 'poison') {
-      await damageUser(db, effect.username, effect.magnitude || 1, 'poison', effect.roomRow, effect.roomCol);
+      const cause = effect.sourceUsername ? `dose by ${effect.sourceUsername}` : 'poison';
+      await damageUser(db, effect.username, effect.magnitude || 1, cause, effect.roomRow, effect.roomCol);
     } else if (effect.effectType === 'arcane_pin') {
       await drainStamina(db, effect.username, effect.magnitude || 1);
     } else if (effect.effectType === 'bless') {
@@ -1073,7 +1074,7 @@ export async function useClassSkill(db, { username, skillId, targetUsername, row
         await dbRun(db, 'DELETE FROM statusEffects WHERE id = ?', [ward.id]);
       }
       const result = damage > 0
-        ? await damageUser(db, target, damage, 'power strike', row, col)
+        ? await damageUser(db, target, damage, `power strike by ${username}`, row, col)
         : { killed: false, remainingHealth: null };
       const message = `${username} power strikes ${target} for ${damage} damage.`;
       await insertSystemMessage(db, row, col, message);

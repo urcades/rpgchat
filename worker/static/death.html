@@ -20,10 +20,37 @@
     <div class="actions">
       <a href="/logout">Return home</a>
       <a href="/signup">Create new player</a>
-      <button id="resurrect-button" type="button">Pay to resurrect</button>
+      <button id="resurrect-button" class="link-button" type="button">Pay to resurrect</button>
     </div>
   </main>
   <script>
+    const deathFlavorRules = [
+      {
+        match: (grave, cause) => cause === `attack by ${grave.username}`,
+        text: grave => `${grave.username} killed themself.`
+      },
+      {
+        match: (grave, cause) => cause.startsWith('attack by '),
+        text: (grave, cause) => `${grave.username} was killed by ${cause.replace('attack by ', '')}.`
+      },
+      {
+        match: (grave, cause) => cause.startsWith('power strike by '),
+        text: (grave, cause) => `${grave.username} was felled by ${cause.replace('power strike by ', '')}'s Power Strike.`
+      },
+      {
+        match: (grave, cause) => cause.startsWith('dose by '),
+        text: (grave, cause) => `${grave.username} died from ${cause.replace('dose by ', '')}'s poisoned dose.`
+      },
+      {
+        match: (grave, cause) => cause === 'poison marsh',
+        text: grave => `${grave.username} was claimed by the poison marsh.`
+      },
+      {
+        match: (grave, cause) => cause.includes('trap'),
+        text: grave => `${grave.username} died to a trap.`
+      }
+    ];
+
     function setText(id, text) {
       document.getElementById(id).textContent = text;
     }
@@ -33,6 +60,12 @@
         return 'Unknown';
       }
       return `${grave.roomRow}, ${grave.roomCol}`;
+    }
+
+    function formatDeathHeadline(grave) {
+      const cause = String(grave.cause || '').trim().toLowerCase();
+      const rule = deathFlavorRules.find(candidate => candidate.match(grave, cause));
+      return rule ? rule.text(grave, cause) : `${grave.username} died.`;
     }
 
     document.getElementById('resurrect-button').addEventListener('click', () => {
@@ -65,7 +98,7 @@
         return response.json();
       })
       .then(grave => {
-        setText('grave-name', `${grave.username} died.`);
+        setText('grave-name', formatDeathHeadline(grave));
         setText('grave-job', grave.job || 'Novice');
         setText('grave-level', grave.level ?? 0);
         setText('grave-gold', grave.gold ?? 0);

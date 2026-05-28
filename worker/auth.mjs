@@ -140,6 +140,10 @@ export async function requireLiveUser(env, request) {
     return { session, user };
   }
 
+  if (session?.deadUsername) {
+    return { session, user: null, dead: true };
+  }
+
   if (session?.username) {
     const grave = await dbFirst(
       env.DB,

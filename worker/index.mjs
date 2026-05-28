@@ -32,10 +32,19 @@ import {
   createResurrectionCheckout,
   fulfillResurrectionCheckout
 } from './resurrection.mjs';
+import { canonicalLocalRequestUrl } from './localHost.mjs';
 
 const app = new Hono();
 const DEFAULT_RESURRECTION_PAYMENT_LINK_URL = 'https://buy.stripe.com/8x23codZs9Tj8dgertbV600';
 const STRIPE_WEBHOOK_TOLERANCE_SECONDS = 300;
+
+app.use('*', async (c, next) => {
+  const canonicalUrl = canonicalLocalRequestUrl(c.req.url);
+  if (canonicalUrl) {
+    return c.redirect(canonicalUrl, 307);
+  }
+  await next();
+});
 
 function isHtmlRequest(c) {
   return (c.req.header('Accept') || '').includes('text/html');
@@ -63,9 +72,9 @@ async function currentUserOrResponse(c) {
   }
   if (result.dead) {
     if (isHtmlRequest(c)) {
-      return c.redirect('/death');
+      return c.redirect('/you-died');
     }
-    return c.json({ error: 'You died', redirect: '/death' }, 410);
+    return c.json({ error: 'You died', redirect: '/you-died' }, 410);
   }
   if (isHtmlRequest(c)) {
     return c.redirect('/');
@@ -284,6 +293,14 @@ app.get('/death', async c => {
     return c.redirect('/');
   }
   return asset(c, '/death.html');
+});
+
+app.get('/you-died', async c => {
+  const session = await getSession(c.env, c.req.raw);
+  if (!session?.deadUsername) {
+    return c.redirect('/');
+  }
+  return asset(c, '/you-died.html');
 });
 
 app.get('/death-data', async c => {
