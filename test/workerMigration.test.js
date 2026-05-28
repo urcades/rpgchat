@@ -134,6 +134,31 @@ test('Worker low-stamina failures do not mutate messages or ticks', async () => 
   }
 });
 
+test('Worker malformed roll commands fail before spending stamina or advancing ticks', async () => {
+  const db = await createMigratedDb();
+  const { getCurrentTickValue, getMessages, handleChatAction } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, gold)
+       VALUES ('roller', 'pw', 'Novice', 12, 12, 100, 100, 1, 1, 1, 10)`
+    ).run();
+
+    await assert.rejects(
+      () => handleChatAction(db, 'roller', 1, 1, '/roll nope'),
+      /Use \/roll <gold>/
+    );
+
+    const user = await db.prepare("SELECT stamina, gold FROM users WHERE username = 'roller'").first();
+    assert.deepEqual(user, { stamina: 100, gold: 10 });
+    assert.equal(await getCurrentTickValue(db), 0);
+    assert.equal((await getMessages(db, 1, 1)).length, 0);
+  } finally {
+    await db.close();
+  }
+});
+
 test('Worker class skills write system messages and advance through the shared action lifecycle', async () => {
   const db = await createMigratedDb();
   const { getCurrentTickValue, getMessages, handleSkillAction } = await import('../worker/game.mjs');

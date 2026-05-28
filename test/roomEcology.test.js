@@ -1,6 +1,5 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const sqlite3 = require('sqlite3').verbose();
 
 const {
   getWorldDay,
@@ -16,10 +15,6 @@ const {
   , calculateInnFee
   , resolveGamblingRound
 } = require('../utils/roomEcology');
-const {
-  handleRollCommand,
-  validateRollCommand
-} = require('../utils/roomMechanics');
 
 test('uses a UTC world day and next UTC midnight reset', () => {
   const date = new Date('2026-05-26T16:30:00.000Z');
@@ -177,17 +172,6 @@ test('resolves gambling round by highest roll and earliest tie entry', () => {
   assert.equal(result.winner, 'winner');
   assert.equal(result.pool, 9);
   assert.equal(result.winningRoll, 18);
-});
-
-test('validateRollCommand rejects malformed roll commands before mutation', async () => {
-  const db = new sqlite3.Database(':memory:');
-
-  await assert.rejects(
-    validateRollCommand(db, 'ed', 1, 1, '/roll nope'),
-    (err) => err.statusCode === 400 && /roll/i.test(err.message)
-  );
-
-  db.close();
 });
 
 function pickStats(user) {
