@@ -20,7 +20,7 @@
     <div class="actions">
       <a href="/logout">Return home</a>
       <a href="/signup">Create new player</a>
-      <button type="button" onclick="window.alert('Resurrection is not available yet. This will eventually become a paid revive or guild service.')">Pay to resurrect</button>
+      <button id="resurrect-button" type="button">Pay to resurrect</button>
     </div>
   </main>
   <script>
@@ -34,6 +34,28 @@
       }
       return `${grave.roomRow}, ${grave.roomCol}`;
     }
+
+    document.getElementById('resurrect-button').addEventListener('click', () => {
+      const button = document.getElementById('resurrect-button');
+      button.disabled = true;
+      button.textContent = 'Opening payment...';
+
+      fetch('/resurrection-link', { method: 'POST' })
+        .then(response => {
+          if (!response.ok) {
+            throw new Error('Resurrection is not available for this character.');
+          }
+          return response.json();
+        })
+        .then(data => {
+          window.location.href = data.url;
+        })
+        .catch(error => {
+          button.disabled = false;
+          button.textContent = 'Pay to resurrect';
+          window.alert(error.message);
+        });
+    });
 
     fetch('/death-data')
       .then(response => {

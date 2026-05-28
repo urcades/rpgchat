@@ -59,8 +59,14 @@ function createSqliteD1() {
 
 async function createMigratedDb() {
   const db = createSqliteD1();
-  const migration = fs.readFileSync(path.join(__dirname, '../migrations/0001_initial.sql'), 'utf8');
-  await db.exec(migration);
+  const migrationsDir = path.join(__dirname, '../migrations');
+  const migrations = fs.readdirSync(migrationsDir)
+    .filter(file => file.endsWith('.sql'))
+    .sort();
+  for (const migrationFile of migrations) {
+    const migration = fs.readFileSync(path.join(migrationsDir, migrationFile), 'utf8');
+    await db.exec(migration);
+  }
   return db;
 }
 
@@ -148,6 +154,75 @@ test('Worker class skills write system messages and advance through the shared a
     assert.equal(user.stamina, 99);
     assert.equal(user.gold, 3);
     assert.match(messages.at(-1).message, /scrounges up 3 gold/);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Worker resurrection link creates a pending request for the current grave', async () => {
+  const db = await createMigratedDb();
+  const { createResurrectionCheckout } = await import('../worker/resurrection.mjs');
+
+  try {
+    await db.prepare(
+      `INSERT INTO cemetery
+        (username, password, level, gold, job, cause, roomRow, roomCol)
+       VALUES ('fallen', 'pw', 4, 7, 'Mage', 'test', 2, 3)`
+    ).run();
+
+    const checkout = await createResurrectionCheckout(db, 'fallen', 'https://buy.stripe.com/test_link');
+    const request = await db.prepare(
+      'SELECT token, username, graveId, status FROM resurrectionRequests WHERE username = ?'
+    ).bind('fallen').first();
+
+    assert.equal(request.token, checkout.token);
+    assert.equal(request.username, 'fallen');
+    assert.equal(request.status, 'pending');
+    assert.match(checkout.url, /^https:\/\/buy\.stripe\.com\/test_link\?client_reference_id=/);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Worker resurrection fulfillment revives a paid grave only once', async () => {
+  const db = await createMigratedDb();
+  const { createResurrectionCheckout, fulfillResurrectionCheckout } = await import('../worker/resurrection.mjs');
+
+  try {
+    await db.prepare(
+      `INSERT INTO cemetery
+        (username, password, level, gold, job, cause, roomRow, roomCol)
+       VALUES ('fallen', 'pw', 4, 7, 'Mage', 'test', 2, 3)`
+    ).run();
+
+    const checkout = await createResurrectionCheckout(db, 'fallen', 'https://buy.stripe.com/test_link');
+    const first = await fulfillResurrectionCheckout(db, checkout.token, 'cs_test_123');
+    const second = await fulfillResurrectionCheckout(db, checkout.token, 'cs_test_123');
+    const revived = await db.prepare(
+      'SELECT username, password, level, gold, job, health, maxHealth, stamina, maxStamina FROM users WHERE username = ?'
+    ).bind('fallen').first();
+    const grave = await db.prepare('SELECT username FROM cemetery WHERE username = ?').bind('fallen').first();
+    const request = await db.prepare(
+      'SELECT status, stripeSessionId, completedAt FROM resurrectionRequests WHERE token = ?'
+    ).bind(checkout.token).first();
+
+    assert.equal(first.revived, true);
+    assert.equal(second.revived, false);
+    assert.deepEqual(revived, {
+      username: 'fallen',
+      password: 'pw',
+      level: 4,
+      gold: 7,
+      job: 'Mage',
+      health: 10,
+      maxHealth: 10,
+      stamina: 100,
+      maxStamina: 100
+    });
+    assert.equal(grave, null);
+    assert.equal(request.status, 'completed');
+    assert.equal(request.stripeSessionId, 'cs_test_123');
+    assert.ok(request.completedAt);
   } finally {
     await db.close();
   }

@@ -28,8 +28,14 @@ import {
   validateRoomCoordinates,
   validateStartingAllocation
 } from './game.mjs';
+import {
+  createResurrectionCheckout,
+  fulfillResurrectionCheckout
+} from './resurrection.mjs';
 
 const app = new Hono();
+const DEFAULT_RESURRECTION_PAYMENT_LINK_URL = 'https://buy.stripe.com/8x23codZs9Tj8dgertbV600';
+const STRIPE_WEBHOOK_TOLERANCE_SECONDS = 300;
 
 function isHtmlRequest(c) {
   return (c.req.header('Accept') || '').includes('text/html');
@@ -69,6 +75,65 @@ async function currentUserOrResponse(c) {
 
 function roomName(row, col) {
   return `${row}:${col}`;
+}
+
+function constantTimeEqual(left, right) {
+  if (left.length !== right.length) {
+    return false;
+  }
+  let diff = 0;
+  for (let i = 0; i < left.length; i += 1) {
+    diff |= left.charCodeAt(i) ^ right.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+function bytesToHex(buffer) {
+  return Array.from(new Uint8Array(buffer))
+    .map(byte => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function parseStripeSignature(header = '') {
+  const pieces = header.split(',').map(piece => piece.trim()).filter(Boolean);
+  const timestamp = pieces.find(piece => piece.startsWith('t='))?.slice(2);
+  const signatures = pieces
+    .filter(piece => piece.startsWith('v1='))
+    .map(piece => piece.slice(3));
+  return { timestamp, signatures };
+}
+
+async function computeStripeSignature(payload, timestamp, secret) {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const signedPayload = `${timestamp}.${payload}`;
+  const signature = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(signedPayload));
+  return bytesToHex(signature);
+}
+
+async function verifyStripeWebhook(payload, signatureHeader, secret) {
+  if (!secret) {
+    throw new ActionError('Stripe webhook secret is not configured.', 500);
+  }
+  const { timestamp, signatures } = parseStripeSignature(signatureHeader);
+  if (!timestamp || signatures.length === 0) {
+    return false;
+  }
+  const timestampNumber = Number(timestamp);
+  if (!Number.isFinite(timestampNumber)) {
+    return false;
+  }
+  const now = Math.floor(Date.now() / 1000);
+  if (Math.abs(now - timestampNumber) > STRIPE_WEBHOOK_TOLERANCE_SECONDS) {
+    return false;
+  }
+  const expected = await computeStripeSignature(payload, timestamp, secret);
+  return signatures.some(signature => constantTimeEqual(signature, expected));
 }
 
 async function broadcastRoom(env, row, col, payload) {
@@ -241,6 +306,24 @@ app.get('/death-data', async c => {
   return c.json({ ...grave, kills: 0, achievements: [] });
 });
 
+app.post('/resurrection-link', async c => {
+  const session = await getSession(c.env, c.req.raw);
+  if (!session?.deadUsername) {
+    return c.json({ error: 'No dead character in this session' }, 401);
+  }
+
+  const checkout = await createResurrectionCheckout(
+    c.env.DB,
+    session.deadUsername,
+    c.env.RESURRECTION_PAYMENT_LINK_URL || DEFAULT_RESURRECTION_PAYMENT_LINK_URL
+  );
+  if (!checkout) {
+    return c.json({ error: 'Grave not found' }, 404);
+  }
+
+  return c.json({ url: checkout.url });
+});
+
 app.get('/cemetery-data', async c => {
   const players = await dbAll(
     c.env.DB,
@@ -252,6 +335,46 @@ app.get('/cemetery-data', async c => {
 app.get('/leaderboard-data', async c => {
   const players = await dbAll(c.env.DB, 'SELECT username, gold FROM users ORDER BY gold DESC');
   return c.json(players);
+});
+
+app.post('/stripe/webhook', async c => {
+  try {
+    const payload = await c.req.text();
+    const verified = await verifyStripeWebhook(
+      payload,
+      c.req.header('stripe-signature') || '',
+      c.env.STRIPE_WEBHOOK_SECRET
+    );
+    if (!verified) {
+      return c.text('Invalid Stripe signature', 400);
+    }
+
+    const event = JSON.parse(payload);
+    if (event.type !== 'checkout.session.completed') {
+      return c.json({ received: true });
+    }
+
+    const session = event.data?.object || {};
+    if (c.env.STRIPE_RESURRECTION_PAYMENT_LINK_ID && session.payment_link !== c.env.STRIPE_RESURRECTION_PAYMENT_LINK_ID) {
+      return c.json({ received: true, ignored: true });
+    }
+    if (session.payment_status && session.payment_status !== 'paid') {
+      return c.json({ received: true, ignored: true });
+    }
+
+    const resurrection = await fulfillResurrectionCheckout(
+      c.env.DB,
+      session.client_reference_id,
+      session.id
+    );
+    return c.json({ received: true, resurrection });
+  } catch (err) {
+    if (err instanceof ActionError) {
+      return formError(c, err);
+    }
+    console.error(err);
+    return c.text('Invalid Stripe webhook payload', 400);
+  }
 });
 
 app.get('/chat/:row/:col', async c => {
