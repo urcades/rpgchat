@@ -577,11 +577,8 @@ export async function getActiveRound(db, row, col, worldDay, tickValue) {
   };
 }
 
-export async function getRoomEcology(db, username, row, col) {
-  const worldDay = getWorldDay();
+export async function getRoomEcology(db, username, row, col, worldDay = getWorldDay()) {
   const tickValue = await getCurrentTickValue(db);
-  await cleanupOldWorldDayData(db, worldDay);
-  await ensureDailyWorldEvents(db, worldDay, tickValue);
   const traces = await dbAll(
     db,
     `SELECT id, roomRow, roomCol, traceType, intensity, attacker, target, createdTick, expiryTick, worldDay, createdAt
@@ -614,6 +611,71 @@ export async function getRoomEcology(db, username, row, col) {
     event,
     description: composeRoomDescription({ row, col, phase, features, traceSummary }),
     ...effectPayload
+  };
+}
+
+export async function getUserState(db, username) {
+  const user = await dbFirst(
+    db,
+    'SELECT username, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold, experience, attributePoints, displayName FROM users WHERE username = ? AND isNpc = 0',
+    [username]
+  );
+  if (!user) {
+    throw new ActionError('User Not Found', 404);
+  }
+
+  const effective = getEffectiveUser(user);
+  const achievements = await dbAll(
+    db,
+    `SELECT achievementType, eventId, worldDay, earnedTick, rewardExperience, rewardGold
+     FROM worldEventAchievements
+     WHERE username = ?
+     ORDER BY earnedTick DESC, id DESC`,
+    [username]
+  );
+  const kills = await dbAll(
+    db,
+    `SELECT defeatedUsername, defeatedName, defeatedKind, defeatedLevel, experienceGained, goldGained, roomRow, roomCol, worldDay, tick, createdAt
+     FROM killHistory
+     WHERE killerUsername = ?
+     ORDER BY id DESC
+     LIMIT 50`,
+    [username]
+  );
+
+  return {
+    ...user,
+    job: effective.job,
+    baseStats: effective.baseStats,
+    jobBonuses: effective.jobBonuses,
+    effectiveStats: {
+      health: effective.health,
+      maxHealth: effective.maxHealth,
+      stamina: effective.stamina,
+      maxStamina: effective.maxStamina,
+      speed: effective.speed,
+      strength: effective.strength,
+      intelligence: effective.intelligence
+    },
+    skill: effective.skill,
+    achievements,
+    kills
+  };
+}
+
+export async function getRoomState(db, username, row, col) {
+  const tick = await getCurrentTickValue(db);
+  const [room, messages, user] = await Promise.all([
+    getRoomEcology(db, username, row, col),
+    getMessages(db, row, col),
+    getUserState(db, username)
+  ]);
+
+  return {
+    room,
+    messages,
+    user,
+    tick
   };
 }
 
@@ -1251,7 +1313,6 @@ export async function advanceGlobalTick(db) {
   await processRoomEffects(db, tickValue);
   await processStatusEffects(db, tickValue);
   await resolveExpiredGamblingRounds(db, tickValue);
-  await ensureDailyWorldEvents(db, getWorldDay(), tickValue);
 
   return {
     tick: tickValue,
@@ -1261,6 +1322,7 @@ export async function advanceGlobalTick(db) {
 
 export async function runScheduledWorldPulse(db) {
   const tick = await advanceGlobalTick(db);
+  await ensureDailyWorldEvents(db, getWorldDay(), tick.tick);
 
   return {
     tick,
@@ -1269,7 +1331,6 @@ export async function runScheduledWorldPulse(db) {
 }
 
 export async function getActiveWorldEvents(db, worldDay = getWorldDay()) {
-  await ensureDailyWorldEvents(db, worldDay);
   return dbAll(
     db,
     `SELECT id, eventType, roomRow AS row, roomCol AS col, status, title, description, rewardExperience, rewardGold

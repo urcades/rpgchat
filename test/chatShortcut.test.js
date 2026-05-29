@@ -56,6 +56,7 @@ function loadChatPage(overrides = {}) {
   const elements = new Map();
   const documentListeners = {};
   const posts = [];
+  const gets = [];
   const alerts = [];
   const userAttributes = overrides.userAttributes || {
     username: 'test_player',
@@ -112,6 +113,8 @@ function loadChatPage(overrides = {}) {
         if (overrides.postResponse) {
           return Promise.resolve(overrides.postResponse);
         }
+      } else {
+        gets.push(endpoint);
       }
       return Promise.resolve({
         ok: true,
@@ -130,6 +133,14 @@ function loadChatPage(overrides = {}) {
           }
           if (endpoint === '/room-ecology/1/1') {
             return roomEcology;
+          }
+          if (endpoint === '/room-state/1/1') {
+            return {
+              room: roomEcology,
+              messages: [],
+              user: userAttributes,
+              tick: 1
+            };
           }
           return {};
         },
@@ -165,6 +176,7 @@ function loadChatPage(overrides = {}) {
     context,
     getElement,
     alerts,
+    gets,
     posts
   };
 }
@@ -233,6 +245,18 @@ test('chat header combines job and level and moves gold into the right-side stat
     page.getElement('skill-id').title,
     'Dose: Patch someone up by day, poison them by night.\n- Day: heals the target.\n- Night: poisons the target.'
   );
+});
+
+test('chat startup fetches one room state payload', async () => {
+  const page = loadChatPage();
+
+  await flushPromises();
+
+  assert.ok(page.gets.includes('/room-state/1/1'));
+  assert.equal(page.gets.includes('/messages/1/1'), false);
+  assert.equal(page.gets.includes('/room-ecology/1/1'), false);
+  assert.equal(page.gets.includes('/user-attributes'), false);
+  assert.equal(page.gets.includes('/tick'), false);
 });
 
 test('chat renderer colors support, death, attack, and speed result messages', () => {
