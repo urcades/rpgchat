@@ -38,6 +38,8 @@ import {
   fulfillResurrectionCheckout
 } from './resurrection.mjs';
 import { canonicalLocalRequestUrl } from './localHost.mjs';
+import { wantsHtmlResponse, wantsJsonResponse } from './http.mjs';
+import { elapsedMs, logEvent, measureAsync, nowMs } from './observability.mjs';
 
 const app = new Hono();
 const DEFAULT_RESURRECTION_PAYMENT_LINK_URL = 'https://buy.stripe.com/8x23codZs9Tj8dgertbV600';
@@ -45,20 +47,35 @@ const STRIPE_WEBHOOK_TOLERANCE_SECONDS = 300;
 const NO_STORE = 'no-store';
 
 app.use('*', async (c, next) => {
+  const requestStart = nowMs();
   const canonicalUrl = canonicalLocalRequestUrl(c.req.url);
   if (canonicalUrl) {
     return redirectNoStore(c, canonicalUrl, 307);
   }
-  await next();
 
   const pathname = new URL(c.req.url).pathname;
+  try {
+    await next();
+  } finally {
+    if (!isStaticAssetPath(pathname)) {
+      logEvent({
+        event: 'request.complete',
+        method: c.req.method,
+        path: pathname,
+        status: c.res.status,
+        durationMs: elapsedMs(requestStart),
+        ...parseRoomFromPath(pathname)
+      });
+    }
+  }
+
   if (!isStaticAssetPath(pathname)) {
     c.res = noStore(c.res);
   }
 });
 
 function isHtmlRequest(c) {
-  return (c.req.header('Accept') || '').includes('text/html');
+  return wantsHtmlResponse(c.req.raw);
 }
 
 function isStaticAssetPath(pathname) {
@@ -96,6 +113,54 @@ function noStore(response) {
 
 function redirectNoStore(c, path, status) {
   return noStore(c.redirect(path, status));
+}
+
+function actionResponse(c, row, col, payload = {}) {
+  if (wantsJsonResponse(c.req.raw)) {
+    return c.json({
+      ok: true,
+      redirect: `/chat/${row}/${col}`,
+      ...payload
+    });
+  }
+  return redirectNoStore(c, `/chat/${row}/${col}`);
+}
+
+function parseRoomFromPath(pathname) {
+  const match = pathname.match(/^\/(?:chat|attack|skill|job|messages|room-state|room-ecology|room-presence|room-access)\/(\d+)\/(\d+)/);
+  if (!match) {
+    return {};
+  }
+  return {
+    roomRow: Number.parseInt(match[1], 10),
+    roomCol: Number.parseInt(match[2], 10)
+  };
+}
+
+function runAfterResponse(c, payload, callback) {
+  const work = (async () => {
+    const start = nowMs();
+    try {
+      await callback();
+      logEvent({
+        ...payload,
+        event: 'background.complete',
+        durationMs: elapsedMs(start)
+      });
+    } catch (err) {
+      console.error({
+        ...payload,
+        event: 'background.error',
+        error: err instanceof Error ? err.message : String(err)
+      });
+    }
+  })();
+
+  if (c.executionCtx && typeof c.executionCtx.waitUntil === 'function') {
+    c.executionCtx.waitUntil(work);
+    return;
+  }
+  work.catch(() => {});
 }
 
 function formError(c, err) {
@@ -200,6 +265,31 @@ async function startHostileLoopIfNeeded(env, row, col) {
   }
   const stub = env.ROOMS.getByName(roomName(row, col));
   await stub.fetch(new Request(`https://room.local/hostiles/${row}/${col}/start`, { method: 'POST' }));
+}
+
+async function wakeActiveRooms(env, pulse) {
+  await Promise.all((pulse.activeRooms || []).map(async room => {
+    try {
+      const stub = env.ROOMS.getByName(roomName(room.row, room.col));
+      await stub.fetch(new Request(`https://room.local/world-pulse/${room.row}/${room.col}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: 'world-pulse',
+          tick: pulse.tick,
+          environmental: pulse.environmental
+        })
+      }));
+    } catch (err) {
+      console.error(`Unable to wake room ${room.row}:${room.col}`, err);
+    }
+  }));
+}
+
+async function runScheduledWorldPulseAndWakeRooms(env) {
+  const pulse = await runScheduledWorldPulse(env.DB);
+  await wakeActiveRooms(env, pulse);
+  return pulse;
 }
 
 async function ensureRoomUse(c, user, row, col) {
@@ -551,11 +641,32 @@ app.post('/room-presence/:row/:col', async c => {
   }
 
   try {
+    const actionStart = nowMs();
     const { row, col } = parseCoordinates(c);
-    await ensureRoomUse(c, auth.user, row, col);
-    const presence = await updatePresence(c.env.DB, auth.user.username, row, col);
-    await broadcastRoom(c.env, row, col, { type: 'presence', username: auth.user.username });
-    await startHostileLoopIfNeeded(c.env, row, col);
+    const roomUse = await measureAsync(() => ensureRoomUse(c, auth.user, row, col));
+    const presenceResult = await measureAsync(() => updatePresence(c.env.DB, auth.user.username, row, col));
+    runAfterResponse(c, { action: 'presence', roomRow: row, roomCol: col }, async () => {
+      const broadcast = await measureAsync(() => broadcastRoom(c.env, row, col, { type: 'presence', username: auth.user.username }));
+      const hostileLoop = await measureAsync(() => startHostileLoopIfNeeded(c.env, row, col));
+      logEvent({
+        event: 'action.background',
+        action: 'presence',
+        roomRow: row,
+        roomCol: col,
+        broadcastMs: broadcast.durationMs,
+        hostileLoopMs: hostileLoop.durationMs
+      });
+    });
+    logEvent({
+      event: 'action.complete',
+      action: 'presence',
+      roomRow: row,
+      roomCol: col,
+      durationMs: elapsedMs(actionStart),
+      roomUseMs: roomUse.durationMs,
+      updatePresenceMs: presenceResult.durationMs
+    });
+    const presence = presenceResult.value;
     return c.json({ ok: true, presence });
   } catch (err) {
     return formError(c, err);
@@ -587,17 +698,40 @@ app.post('/chat/:row/:col', async c => {
   }
 
   try {
+    const actionStart = nowMs();
     const { row, col } = parseCoordinates(c);
-    await ensureRoomUse(c, auth.user, row, col);
-    const body = await parseForm(c);
+    const roomUse = await measureAsync(() => ensureRoomUse(c, auth.user, row, col));
+    const bodyResult = await measureAsync(() => parseForm(c));
+    const body = bodyResult.value;
     const message = String(body.message || '');
     if (!message.trim()) {
       throw new ActionError('Message required.');
     }
-    const result = await handleChatAction(c.env.DB, auth.user.username, row, col, message);
-    await broadcastRoom(c.env, row, col, { type: 'message', username: auth.user.username, result });
-    await startHostileLoopIfNeeded(c.env, row, col);
-    return c.redirect(`/chat/${row}/${col}`);
+    const action = await measureAsync(() => handleChatAction(c.env.DB, auth.user.username, row, col, message));
+    const result = action.value;
+    runAfterResponse(c, { action: 'chat', roomRow: row, roomCol: col }, async () => {
+      const broadcast = await measureAsync(() => broadcastRoom(c.env, row, col, { type: 'message', username: auth.user.username, result }));
+      const hostileLoop = await measureAsync(() => startHostileLoopIfNeeded(c.env, row, col));
+      logEvent({
+        event: 'action.background',
+        action: 'chat',
+        roomRow: row,
+        roomCol: col,
+        broadcastMs: broadcast.durationMs,
+        hostileLoopMs: hostileLoop.durationMs
+      });
+    });
+    logEvent({
+      event: 'action.complete',
+      action: 'chat',
+      roomRow: row,
+      roomCol: col,
+      durationMs: elapsedMs(actionStart),
+      roomUseMs: roomUse.durationMs,
+      parseFormMs: bodyResult.durationMs,
+      gameActionMs: action.durationMs
+    });
+    return actionResponse(c, row, col, { action: 'chat', result });
   } catch (err) {
     return formError(c, err);
   }
@@ -610,14 +744,37 @@ app.post('/attack/:row/:col', async c => {
   }
 
   try {
+    const actionStart = nowMs();
     const { row, col } = parseCoordinates(c);
-    await ensureRoomUse(c, auth.user, row, col);
-    const body = await parseForm(c);
+    const roomUse = await measureAsync(() => ensureRoomUse(c, auth.user, row, col));
+    const bodyResult = await measureAsync(() => parseForm(c));
+    const body = bodyResult.value;
     const message = String(body.message || '');
-    const result = await handleAttackAction(c.env.DB, auth.user.username, row, col, message);
-    await broadcastRoom(c.env, row, col, { type: 'attack', username: auth.user.username, result });
-    await startHostileLoopIfNeeded(c.env, row, col);
-    return c.redirect(`/chat/${row}/${col}`);
+    const action = await measureAsync(() => handleAttackAction(c.env.DB, auth.user.username, row, col, message));
+    const result = action.value;
+    runAfterResponse(c, { action: 'attack', roomRow: row, roomCol: col }, async () => {
+      const broadcast = await measureAsync(() => broadcastRoom(c.env, row, col, { type: 'attack', username: auth.user.username, result }));
+      const hostileLoop = await measureAsync(() => startHostileLoopIfNeeded(c.env, row, col));
+      logEvent({
+        event: 'action.background',
+        action: 'attack',
+        roomRow: row,
+        roomCol: col,
+        broadcastMs: broadcast.durationMs,
+        hostileLoopMs: hostileLoop.durationMs
+      });
+    });
+    logEvent({
+      event: 'action.complete',
+      action: 'attack',
+      roomRow: row,
+      roomCol: col,
+      durationMs: elapsedMs(actionStart),
+      roomUseMs: roomUse.durationMs,
+      parseFormMs: bodyResult.durationMs,
+      gameActionMs: action.durationMs
+    });
+    return actionResponse(c, row, col, { action: 'attack', result });
   } catch (err) {
     return formError(c, err);
   }
@@ -630,12 +787,15 @@ app.post('/skill/:row/:col', async c => {
   }
 
   try {
+    const actionStart = nowMs();
     const { row, col } = parseCoordinates(c);
-    const roomUse = await ensureRoomUse(c, auth.user, row, col);
-    const body = await parseForm(c);
+    const roomUseResult = await measureAsync(() => ensureRoomUse(c, auth.user, row, col));
+    const roomUse = roomUseResult.value;
+    const bodyResult = await measureAsync(() => parseForm(c));
+    const body = bodyResult.value;
     const skillId = String(body.skillId || '');
     const targetUsername = String(body.targetUsername || body.message || '');
-    const result = await handleSkillAction(
+    const action = await measureAsync(() => handleSkillAction(
       c.env.DB,
       auth.user.username,
       row,
@@ -643,10 +803,31 @@ app.post('/skill/:row/:col', async c => {
       skillId,
       targetUsername,
       roomUse.tickValue + 1
-    );
-    await broadcastRoom(c.env, row, col, { type: 'skill', username: auth.user.username, result });
-    await startHostileLoopIfNeeded(c.env, row, col);
-    return c.redirect(`/chat/${row}/${col}`);
+    ));
+    const result = action.value;
+    runAfterResponse(c, { action: 'skill', roomRow: row, roomCol: col }, async () => {
+      const broadcast = await measureAsync(() => broadcastRoom(c.env, row, col, { type: 'skill', username: auth.user.username, result }));
+      const hostileLoop = await measureAsync(() => startHostileLoopIfNeeded(c.env, row, col));
+      logEvent({
+        event: 'action.background',
+        action: 'skill',
+        roomRow: row,
+        roomCol: col,
+        broadcastMs: broadcast.durationMs,
+        hostileLoopMs: hostileLoop.durationMs
+      });
+    });
+    logEvent({
+      event: 'action.complete',
+      action: 'skill',
+      roomRow: row,
+      roomCol: col,
+      durationMs: elapsedMs(actionStart),
+      roomUseMs: roomUseResult.durationMs,
+      parseFormMs: bodyResult.durationMs,
+      gameActionMs: action.durationMs
+    });
+    return actionResponse(c, row, col, { action: 'skill', result });
   } catch (err) {
     return formError(c, err);
   }
@@ -659,20 +840,44 @@ app.post('/job/:row/:col', async c => {
   }
 
   try {
+    const actionStart = nowMs();
     const { row, col } = parseCoordinates(c);
-    const roomUse = await ensureRoomUse(c, auth.user, row, col);
-    const body = await parseForm(c);
-    const result = await handleJobChangeAction(
+    const roomUseResult = await measureAsync(() => ensureRoomUse(c, auth.user, row, col));
+    const roomUse = roomUseResult.value;
+    const bodyResult = await measureAsync(() => parseForm(c));
+    const body = bodyResult.value;
+    const action = await measureAsync(() => handleJobChangeAction(
       c.env.DB,
       auth.user.username,
       row,
       col,
       String(body.job || ''),
       roomUse
-    );
-    await broadcastRoom(c.env, row, col, { type: 'job', username: auth.user.username, result });
-    await startHostileLoopIfNeeded(c.env, row, col);
-    return c.redirect(`/chat/${row}/${col}`);
+    ));
+    const result = action.value;
+    runAfterResponse(c, { action: 'job', roomRow: row, roomCol: col }, async () => {
+      const broadcast = await measureAsync(() => broadcastRoom(c.env, row, col, { type: 'job', username: auth.user.username, result }));
+      const hostileLoop = await measureAsync(() => startHostileLoopIfNeeded(c.env, row, col));
+      logEvent({
+        event: 'action.background',
+        action: 'job',
+        roomRow: row,
+        roomCol: col,
+        broadcastMs: broadcast.durationMs,
+        hostileLoopMs: hostileLoop.durationMs
+      });
+    });
+    logEvent({
+      event: 'action.complete',
+      action: 'job',
+      roomRow: row,
+      roomCol: col,
+      durationMs: elapsedMs(actionStart),
+      roomUseMs: roomUseResult.durationMs,
+      parseFormMs: bodyResult.durationMs,
+      gameActionMs: action.durationMs
+    });
+    return actionResponse(c, row, col, { action: 'job', result });
   } catch (err) {
     return formError(c, err);
   }
@@ -692,6 +897,24 @@ app.notFound(c => c.env.ASSETS.fetch(c.req.raw));
 export class RoomObject extends DurableObject {
   async fetch(request) {
     const url = new URL(request.url);
+    const worldPulseMatch = url.pathname.match(/^\/world-pulse\/(\d+)\/(\d+)$/);
+    if (worldPulseMatch && request.method === 'POST') {
+      const row = Number.parseInt(worldPulseMatch[1], 10);
+      const col = Number.parseInt(worldPulseMatch[2], 10);
+      let payload = { type: 'world-pulse' };
+      try {
+        payload = await request.json();
+      } catch {
+        payload = { type: 'world-pulse' };
+      }
+      await this.broadcast({ room: { row, col }, ...payload });
+      if (await roomHasActiveHostiles(this.env.DB, row, col)) {
+        await this.ctx.storage.put('hostileRoom', { row, col });
+        await this.ctx.storage.setAlarm(Date.now() + 5000);
+      }
+      return new Response('ok');
+    }
+
     const hostileMatch = url.pathname.match(/^\/hostiles\/(\d+)\/(\d+)\/start$/);
     if (hostileMatch && request.method === 'POST') {
       const row = Number.parseInt(hostileMatch[1], 10);
@@ -750,7 +973,7 @@ export default {
     return app.fetch(request, env, ctx);
   },
   async scheduled(_event, env, ctx) {
-    const pulse = runScheduledWorldPulse(env.DB);
+    const pulse = runScheduledWorldPulseAndWakeRooms(env);
     if (ctx && typeof ctx.waitUntil === 'function') {
       ctx.waitUntil(pulse);
       return;

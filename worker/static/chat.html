@@ -442,7 +442,10 @@
     function postForm(endpoint, body, onSuccess) {
       fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
         body
       })
         .then(response => {
@@ -526,15 +529,12 @@
 
       updateTargetHint();
       updateAll();
-      heartbeatTimer = setInterval(heartbeatRoom, 15000);
+      heartbeatTimer = setInterval(updateAll, 15000);
 
       const socketProtocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
       socket = new WebSocket(`${socketProtocol}${window.location.host}/ws/${row}/${col}`);
       socket.onmessage = function() {
-        loadMessages();
-        loadRoomEcology();
-        loadUserAttributes();
-        loadTick();
+        loadRoomState();
       };
     });
   </script>

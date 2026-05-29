@@ -58,6 +58,7 @@ function loadChatPage(overrides = {}) {
   const posts = [];
   const gets = [];
   const alerts = [];
+  const intervals = [];
   const userAttributes = overrides.userAttributes || {
     username: 'test_player',
     job: 'Novice',
@@ -147,10 +148,11 @@ function loadChatPage(overrides = {}) {
         text: async () => ''
       });
     },
-    setInterval() {
+    setInterval(handler) {
+      intervals.push(handler);
       return 1;
     },
-    WebSocket: function WebSocket() {
+    WebSocket: overrides.WebSocket || function WebSocket() {
       return {};
     },
     window: {
@@ -177,6 +179,7 @@ function loadChatPage(overrides = {}) {
     getElement,
     alerts,
     gets,
+    intervals,
     posts
   };
 }
@@ -257,6 +260,36 @@ test('chat startup fetches one room state payload', async () => {
   assert.equal(page.gets.includes('/room-ecology/1/1'), false);
   assert.equal(page.gets.includes('/user-attributes'), false);
   assert.equal(page.gets.includes('/tick'), false);
+});
+
+test('idle heartbeat refreshes the full room state', async () => {
+  const page = loadChatPage();
+  await flushPromises();
+  page.posts.length = 0;
+  page.gets.length = 0;
+
+  page.intervals[0]();
+  await flushPromises();
+
+  assert.ok(page.posts.some(post => post.endpoint === '/room-presence/1/1'));
+  assert.ok(page.gets.includes('/room-state/1/1'));
+});
+
+test('room socket events refresh one full room state payload', async () => {
+  let socket;
+  const page = loadChatPage({
+    WebSocket: function WebSocket() {
+      socket = {};
+      return socket;
+    }
+  });
+  await flushPromises();
+  page.gets.length = 0;
+
+  socket.onmessage();
+  await flushPromises();
+
+  assert.deepEqual(page.gets, ['/room-state/1/1']);
 });
 
 test('chat renderer colors support, death, attack, and speed result messages', () => {

@@ -186,6 +186,41 @@ test('Scheduled world pulse advances one tick and runs five-minute environmental
   }
 });
 
+test('Scheduled world pulse reports active player rooms for live refresh', async () => {
+  const db = await createMigratedDb();
+  const { runScheduledWorldPulse } = await import('../worker/game.mjs');
+  const { getWorldDay } = require('../utils/roomEcology');
+  const worldDay = getWorldDay();
+
+  try {
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
+       VALUES
+        ('awake_one', 'pw', 'Novice', 12, 12, 100, 100, 1, 1, 1),
+        ('awake_two', 'pw', 'Novice', 12, 12, 100, 100, 1, 1, 1),
+        ('stale_one', 'pw', 'Novice', 12, 12, 100, 100, 1, 1, 1)`
+    ).run();
+    await db.prepare(
+      `INSERT INTO roomPresence
+        (username, roomRow, roomCol, lastSeenTick, worldDay, lastSeenAt)
+       VALUES
+        ('awake_one', 2, 3, 0, ?, CURRENT_TIMESTAMP),
+        ('awake_two', 4, 5, 0, ?, CURRENT_TIMESTAMP),
+        ('stale_one', 6, 7, 0, ?, datetime('now', '-10 minutes'))`
+    ).bind(worldDay, worldDay, worldDay).run();
+
+    const pulse = await runScheduledWorldPulse(db);
+
+    assert.deepEqual(pulse.activeRooms, [
+      { row: 2, col: 3 },
+      { row: 4, col: 5 }
+    ]);
+  } finally {
+    await db.close();
+  }
+});
+
 test('Daily world event seeding backfills missing hostile rooms for an existing world day', async () => {
   const db = await createMigratedDb();
   const { ensureDailyWorldEvents } = await import('../worker/game.mjs');
@@ -306,6 +341,23 @@ test('Room state combines room, messages, user, and tick without seeding world e
   } finally {
     await db.close();
   }
+});
+
+test('Ajax action requests prefer JSON responses instead of page redirects', async () => {
+  const { wantsJsonResponse } = await import('../worker/http.mjs');
+
+  assert.equal(wantsJsonResponse(new Request('https://rpgchat.test/chat/1/12', {
+    method: 'POST',
+    headers: { Accept: 'application/json' }
+  })), true);
+  assert.equal(wantsJsonResponse(new Request('https://rpgchat.test/chat/1/12', {
+    method: 'POST',
+    headers: { Accept: '*/*' }
+  })), true);
+  assert.equal(wantsJsonResponse(new Request('https://rpgchat.test/chat/1/12', {
+    method: 'POST',
+    headers: { Accept: 'text/html' }
+  })), false);
 });
 
 test('Scheduled pulses respawn cleared ambient hostiles after their respawn interval', async () => {

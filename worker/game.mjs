@@ -3,6 +3,7 @@ import ecologyModule from '../utils/roomEcology.js';
 import levelingModule from '../utils/leveling.js';
 import worldEventsModule from '../utils/worldEvents.js';
 import { changes, dbAll, dbFirst, dbRun, lastInsertId } from './db.mjs';
+import { elapsedMs, logEvent, measureAsync, nowMs } from './observability.mjs';
 
 const {
   JOBS,
@@ -248,7 +249,6 @@ export async function cleanupOldWorldDayData(db, worldDay = getWorldDay()) {
 export async function updatePresence(db, username, row, col) {
   const worldDay = getWorldDay();
   const tickValue = await getCurrentTickValue(db);
-  await cleanupOldWorldDayData(db, worldDay);
   await dbRun(
     db,
     `INSERT INTO roomPresence
@@ -664,12 +664,29 @@ export async function getUserState(db, username) {
 }
 
 export async function getRoomState(db, username, row, col) {
+  const stateStart = nowMs();
   const tick = await getCurrentTickValue(db);
-  const [room, messages, user] = await Promise.all([
-    getRoomEcology(db, username, row, col),
-    getMessages(db, row, col),
-    getUserState(db, username)
+  const [roomResult, messagesResult, userResult] = await Promise.all([
+    measureAsync(() => getRoomEcology(db, username, row, col)),
+    measureAsync(() => getMessages(db, row, col)),
+    measureAsync(() => getUserState(db, username))
   ]);
+  const room = roomResult.value;
+  const messages = messagesResult.value;
+  const user = userResult.value;
+
+  logEvent({
+    event: 'room_state.complete',
+    roomRow: row,
+    roomCol: col,
+    durationMs: elapsedMs(stateStart),
+    roomMs: roomResult.durationMs,
+    messagesMs: messagesResult.durationMs,
+    userMs: userResult.durationMs,
+    messageCount: messages.length,
+    presenceCount: room.presence.length,
+    tick
+  });
 
   return {
     room,
@@ -1017,7 +1034,6 @@ async function processEchoChamber(db, row, col, currentTick, worldDay) {
 
 export async function processRoomEffects(db, currentTick) {
   const worldDay = getWorldDay();
-  await cleanupOldWorldDayData(db, worldDay);
 
   const presences = await dbAll(
     db,
@@ -1321,13 +1337,34 @@ export async function advanceGlobalTick(db) {
 }
 
 export async function runScheduledWorldPulse(db) {
+  const worldDay = getWorldDay();
+  await cleanupOldWorldDayData(db, worldDay);
   const tick = await advanceGlobalTick(db);
-  await ensureDailyWorldEvents(db, getWorldDay(), tick.tick);
+  await ensureDailyWorldEvents(db, worldDay, tick.tick);
+  const activeRooms = await getActivePlayerRooms(db);
 
   return {
     tick,
-    environmental: tick.tick % 5 === 0
+    environmental: tick.tick % 5 === 0,
+    activeRooms
   };
+}
+
+export async function getActivePlayerRooms(db, worldDay = getWorldDay()) {
+  const rooms = await dbAll(
+    db,
+    `SELECT DISTINCT rp.roomRow AS row, rp.roomCol AS col
+     FROM roomPresence rp
+     JOIN users u ON u.username = rp.username
+     WHERE rp.worldDay = ?
+       AND u.isNpc = 0
+       AND u.health > 0
+       AND rp.lastSeenAt >= datetime('now', ?)
+     ORDER BY rp.roomRow ASC, rp.roomCol ASC`,
+    [worldDay, `-${PRESENCE_MAX_AGE_SECONDS} seconds`]
+  );
+
+  return rooms.map(room => ({ row: room.row, col: room.col }));
 }
 
 export async function getActiveWorldEvents(db, worldDay = getWorldDay()) {
@@ -1634,8 +1671,6 @@ export async function handleAttack(db, username, message, row, col, options = {}
   const attacker = await getUser(db, username);
   const targets = await validateAttackTargets(db, message);
   const attackMessages = [];
-
-  await cleanupOldWorldDayData(db, worldDay);
 
   for (const user of targets) {
     const target = await getUser(db, user.username, 'Target');
