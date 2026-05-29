@@ -217,9 +217,100 @@ test('Daily world event seeding backfills missing hostile rooms for an existing 
   }
 });
 
-test('Chat ticks respawn cleared ambient hostiles after their respawn interval', async () => {
+test('Room and map reads do not seed daily world events', async () => {
   const db = await createMigratedDb();
-  const { ensureDailyWorldEvents, handleAttack, handleChatAction } = await import('../worker/game.mjs');
+  const {
+    getActiveWorldEvents,
+    getRoomEcology
+  } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
+       VALUES ('reader', 'pw', 'Novice', 12, 12, 100, 100, 1, 1, 1)`
+    ).run();
+
+    assert.deepEqual(await getActiveWorldEvents(db, '2026-05-29'), []);
+    await getRoomEcology(db, 'reader', 1, 1, '2026-05-29');
+
+    const eventCount = await db.prepare('SELECT COUNT(*) AS count FROM worldEvents').first();
+    const npcCount = await db.prepare('SELECT COUNT(*) AS count FROM users WHERE isNpc = 1').first();
+
+    assert.equal(eventCount.count, 0);
+    assert.equal(npcCount.count, 0);
+  } finally {
+    await db.close();
+  }
+});
+
+test('NPC presence stays visible while stale player presence expires', async () => {
+  const db = await createMigratedDb();
+  const {
+    getRoomEcology
+  } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, isNpc, displayName, npcKind, worldEventId)
+       VALUES
+        ('stale_player', 'pw', 'Novice', 12, 12, 100, 100, 1, 1, 1, 0, NULL, NULL, NULL),
+        ('old_lurker', 'npc', 'Novice', 8, 8, 60, 60, 3, 4, 1, 1, 'Room Lurker', 'ambient_hostile', 'old_event')`
+    ).run();
+    await db.prepare(
+      `INSERT INTO roomPresence
+        (username, roomRow, roomCol, lastSeenTick, worldDay, lastSeenAt)
+       VALUES
+        ('stale_player', 2, 2, 1, '2026-05-29', datetime('now', '-10 minutes')),
+        ('old_lurker', 2, 2, 1, '2026-05-29', datetime('now', '-10 minutes'))`
+    ).run();
+
+    const ecology = await getRoomEcology(db, 'stale_player', 2, 2, '2026-05-29');
+
+    assert.deepEqual(ecology.presence.map(entity => entity.username), ['old_lurker']);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Room state combines room, messages, user, and tick without seeding world events', async () => {
+  const db = await createMigratedDb();
+  const { getRoomState } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold, experience)
+       VALUES ('state_player', 'pw', 'Fighter', 12, 12, 100, 100, 3, 4, 2, 1, 7, 9)`
+    ).run();
+    await db.prepare(
+      `INSERT INTO messages (roomRow, roomCol, username, message)
+       VALUES (3, 3, 'state_player', 'hello room')`
+    ).run();
+
+    const state = await getRoomState(db, 'state_player', 3, 3);
+
+    assert.equal(state.tick, 0);
+    assert.equal(state.room.room.row, 3);
+    assert.equal(state.messages.length, 1);
+    assert.equal(state.messages[0].message, 'hello room');
+    assert.equal(state.user.username, 'state_player');
+    assert.equal(state.user.gold, 7);
+    assert.equal(state.user.experience, 9);
+    assert.deepEqual(state.user.achievements, []);
+    assert.deepEqual(state.user.kills, []);
+
+    const eventCount = await db.prepare('SELECT COUNT(*) AS count FROM worldEvents').first();
+    assert.equal(eventCount.count, 0);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Scheduled pulses respawn cleared ambient hostiles after their respawn interval', async () => {
+  const db = await createMigratedDb();
+  const { ensureDailyWorldEvents, handleAttack, runScheduledWorldPulse } = await import('../worker/game.mjs');
   const { getWorldDay } = require('../utils/roomEcology');
   const worldDay = getWorldDay();
 
@@ -257,7 +348,7 @@ test('Chat ticks respawn cleared ambient hostiles after their respawn interval',
       .bind(defeated.lastDefeatedTick + defeated.respawnInterval - 1)
       .run();
 
-    await handleChatAction(db, 'fighter', hostile.roomRow, hostile.roomCol, 'keeping watch');
+    await runScheduledWorldPulse(db);
 
     const respawnedNpc = await db.prepare('SELECT username FROM users WHERE username = ? AND isNpc = 1')
       .bind(hostile.npcUsername)

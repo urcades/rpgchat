@@ -13,11 +13,12 @@ import {
   JOBS,
   buildStartingStats,
   getCurrentTickValue,
-  getEffectiveUser,
   getMessages,
   getActiveWorldEvents,
   getRoomAccessState,
   getRoomEcology,
+  getRoomState,
+  getUserState,
   handleAttackAction,
   handleChatAction,
   handleJobChangeAction,
@@ -487,50 +488,11 @@ app.get('/user-attributes', async c => {
   if (auth instanceof Response) {
     return auth;
   }
-  const user = await dbFirst(
-    c.env.DB,
-    'SELECT username, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold, experience, attributePoints FROM users WHERE username = ? AND isNpc = 0',
-    [auth.user.username]
-  );
-  if (!user) {
-    return c.json({ error: 'User Not Found' }, 404);
+  try {
+    return c.json(await getUserState(c.env.DB, auth.user.username));
+  } catch (err) {
+    return formError(c, err);
   }
-  const effective = getEffectiveUser(user);
-  const achievements = await dbAll(
-    c.env.DB,
-    `SELECT achievementType, eventId, worldDay, earnedTick, rewardExperience, rewardGold
-     FROM worldEventAchievements
-     WHERE username = ?
-     ORDER BY earnedTick DESC, id DESC`,
-    [auth.user.username]
-  );
-  const kills = await dbAll(
-    c.env.DB,
-    `SELECT defeatedUsername, defeatedName, defeatedKind, defeatedLevel, experienceGained, goldGained, roomRow, roomCol, worldDay, tick, createdAt
-     FROM killHistory
-     WHERE killerUsername = ?
-     ORDER BY id DESC
-     LIMIT 50`,
-    [auth.user.username]
-  );
-  return c.json({
-    ...user,
-    job: effective.job,
-    baseStats: effective.baseStats,
-    jobBonuses: effective.jobBonuses,
-    effectiveStats: {
-      health: effective.health,
-      maxHealth: effective.maxHealth,
-      stamina: effective.stamina,
-      maxStamina: effective.maxStamina,
-      speed: effective.speed,
-      strength: effective.strength,
-      intelligence: effective.intelligence
-    },
-    skill: effective.skill,
-    achievements,
-    kills
-  });
 });
 
 app.get('/tick', async c => c.json({ tick: await getCurrentTickValue(c.env.DB) }));
@@ -559,6 +521,24 @@ app.get('/room-ecology/:row/:col', async c => {
   try {
     const { row, col } = parseCoordinates(c);
     return c.json(await getRoomEcology(c.env.DB, auth.user.username, row, col));
+  } catch (err) {
+    return formError(c, err);
+  }
+});
+
+app.get('/room-state/:row/:col', async c => {
+  const auth = await currentUserOrResponse(c);
+  if (auth instanceof Response) {
+    return auth;
+  }
+
+  try {
+    const { row, col } = parseCoordinates(c);
+    const roomUse = await ensureRoomUse(c, auth.user, row, col);
+    if (!roomUse.allowed) {
+      throw new ActionError('Inn access required', 403);
+    }
+    return c.json(await getRoomState(c.env.DB, auth.user.username, row, col));
   } catch (err) {
     return formError(c, err);
   }

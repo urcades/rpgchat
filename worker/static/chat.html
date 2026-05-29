@@ -187,6 +187,15 @@
       return messageElement;
     }
 
+    function renderMessages(data) {
+      const messagesDiv = document.getElementById('messages');
+      messagesDiv.innerHTML = '';
+      data.forEach(msg => {
+        messagesDiv.appendChild(renderMessage(msg));
+      });
+      scrollToBottom();
+    }
+
     function loadMessages() {
       fetch(`/messages/${row}/${col}`)
         .then(response => {
@@ -198,17 +207,44 @@
           }
           return response.json();
         })
-        .then(data => {
-          const messagesDiv = document.getElementById('messages');
-          messagesDiv.innerHTML = '';
-          data.forEach(msg => {
-            messagesDiv.appendChild(renderMessage(msg));
-          });
-          scrollToBottom();
-        })
+        .then(renderMessages)
         .catch(() => {
           document.getElementById('messages').textContent = 'Messages are unavailable in this room right now.';
         });
+    }
+
+    function renderUserAttributes(data) {
+      const attributesDiv = document.getElementById('attributes');
+      const effective = data.effectiveStats || data;
+      currentSkill = data.skill || null;
+      currentJob = data.job || 'Novice';
+      document.getElementById('character-link').textContent = data.displayName || data.username || 'Status';
+      attributesDiv.innerHTML = `
+        <p>${data.job || 'Novice'} ~ Level ${data.level}</p>
+        <p>Health: ${effective.health}/${effective.maxHealth}</p>
+        <p>Stamina: ${effective.stamina}/${effective.maxStamina}</p>
+        <p>Speed: ${effective.speed}</p>
+        <p>Strength: ${effective.strength}</p>
+        <p>Intelligence: ${effective.intelligence}</p>
+      `;
+      document.getElementById('gold').textContent = `Gold: ${data.gold !== undefined ? data.gold : 0}`;
+      const skillSelect = document.getElementById('skill-id');
+      if (skillSelect && currentSkill) {
+        skillSelect.innerHTML = '';
+        const option = document.createElement('option');
+        option.value = currentSkill.id;
+        option.textContent = currentSkill.label;
+        const skillTooltip = getSkillTooltip(currentSkill);
+        option.title = skillTooltip;
+        skillSelect.title = skillTooltip;
+        skillSelect.appendChild(option);
+      }
+      const jobSelect = document.getElementById('job-select');
+      if (jobSelect) {
+        Array.from(jobSelect.options).forEach(option => {
+          option.selected = option.value === currentJob;
+        });
+      }
     }
 
     function loadUserAttributes() {
@@ -219,39 +255,7 @@
           }
           return response.json();
         })
-        .then(data => {
-          const attributesDiv = document.getElementById('attributes');
-          const effective = data.effectiveStats || data;
-          currentSkill = data.skill || null;
-          currentJob = data.job || 'Novice';
-          document.getElementById('character-link').textContent = data.displayName || data.username || 'Status';
-          attributesDiv.innerHTML = `
-            <p>${data.job || 'Novice'} ~ Level ${data.level}</p>
-            <p>Health: ${effective.health}/${effective.maxHealth}</p>
-            <p>Stamina: ${effective.stamina}/${effective.maxStamina}</p>
-            <p>Speed: ${effective.speed}</p>
-            <p>Strength: ${effective.strength}</p>
-            <p>Intelligence: ${effective.intelligence}</p>
-          `;
-          document.getElementById('gold').textContent = `Gold: ${data.gold !== undefined ? data.gold : 0}`;
-          const skillSelect = document.getElementById('skill-id');
-          if (skillSelect && currentSkill) {
-            skillSelect.innerHTML = '';
-            const option = document.createElement('option');
-            option.value = currentSkill.id;
-            option.textContent = currentSkill.label;
-            const skillTooltip = getSkillTooltip(currentSkill);
-            option.title = skillTooltip;
-            skillSelect.title = skillTooltip;
-            skillSelect.appendChild(option);
-          }
-          const jobSelect = document.getElementById('job-select');
-          if (jobSelect) {
-            Array.from(jobSelect.options).forEach(option => {
-              option.selected = option.value === currentJob;
-            });
-          }
-        });
+        .then(renderUserAttributes);
     }
 
     function getSkillTooltip(skill) {
@@ -264,14 +268,17 @@
       return lines.join('\n');
     }
 
+    function renderTick(tickValue) {
+      phase = tickValue % 100 < 50 ? 'Day' : 'Night';
+      document.getElementById('tick').textContent = `Global Tick: ${tickValue}`;
+      document.getElementById('phase').textContent = `Phase: ${phase}`;
+    }
+
     function loadTick() {
       fetch('/tick')
         .then(response => response.json())
         .then(data => {
-          const tickValue = data.tick;
-          phase = tickValue % 100 < 50 ? 'Day' : 'Night';
-          document.getElementById('tick').textContent = `Global Tick: ${tickValue}`;
-          document.getElementById('phase').textContent = `Phase: ${phase}`;
+          renderTick(data.tick);
         });
     }
 
@@ -311,6 +318,41 @@
       return String(description || '').replace(new RegExp(`^Room\\s+${rowValue},\\s*${colValue}\\.\\s*`, 'i'), '');
     }
 
+    function renderRoomEcology(data) {
+      const toolbar = document.getElementById('room-ecology-toolbar');
+      const featureLabels = data.features.map(feature => feature.active === false ? `${feature.label} (dormant)` : feature.label);
+      const traceLabels = data.traceSummary.labels.length > 0 ? data.traceSummary.labels : ['none'];
+      const effectLabels = data.effects && data.effects.length > 0
+        ? data.effects.map(effect => effect.label || effect.type)
+        : ['none'];
+
+      toolbar.innerHTML = '';
+      setParagraph(toolbar, `Room: ${data.room.row}, ${data.room.col}`);
+      setParagraph(toolbar, `Features: ${featureLabels.join(', ')}`);
+      setParagraph(toolbar, `Systems: ${effectLabels.join(', ')}`);
+      setParagraph(toolbar, `Traces: ${traceLabels.join(', ')}`);
+      if (data.stock && data.stock.length > 0) {
+        setParagraph(toolbar, `Stock: ${data.stock.map(item => `${item.name} ${item.price}g`).join(', ')}`);
+      }
+      if (data.commands && data.commands.length > 0) {
+        setParagraph(toolbar, `Commands: ${data.commands.join(', ')}`);
+      }
+      if (data.innAccess && data.innAccess.required) {
+        setParagraph(toolbar, `Inn: ${data.innAccess.paid ? 'paid' : `${data.innAccess.fee}g`}`);
+      }
+      if (data.activeRound) {
+        setParagraph(toolbar, `Dice pool: ${data.activeRound.pool}g, closes in ${data.activeRound.remainingTicks} ticks`);
+      }
+      if (data.event) {
+        setParagraph(toolbar, `Event: ${data.event.title} (${data.event.eventType})`);
+      }
+      const roomDescription = getRoomDescriptionWithoutLocation(data.description, data.room.row, data.room.col);
+      setParagraph(toolbar, `Reset: ${new Date(data.nextResetAt).toUTCString()} ${roomDescription}`);
+      setPresenceParagraph(toolbar, data.presence || []);
+      const isGuild = data.effects && data.effects.some(effect => effect.type === 'guild');
+      document.getElementById('job-controls').style.display = isGuild ? 'flex' : 'none';
+    }
+
     function loadRoomEcology() {
       fetch(`/room-ecology/${row}/${col}`)
         .then(response => {
@@ -319,39 +361,33 @@
           }
           return response.json();
         })
-        .then(data => {
-          const toolbar = document.getElementById('room-ecology-toolbar');
-          const featureLabels = data.features.map(feature => feature.active === false ? `${feature.label} (dormant)` : feature.label);
-          const traceLabels = data.traceSummary.labels.length > 0 ? data.traceSummary.labels : ['none'];
-          const effectLabels = data.effects && data.effects.length > 0
-            ? data.effects.map(effect => effect.label || effect.type)
-            : ['none'];
+        .then(renderRoomEcology);
+    }
 
-          toolbar.innerHTML = '';
-          setParagraph(toolbar, `Room: ${data.room.row}, ${data.room.col}`);
-          setParagraph(toolbar, `Features: ${featureLabels.join(', ')}`);
-          setParagraph(toolbar, `Systems: ${effectLabels.join(', ')}`);
-          setParagraph(toolbar, `Traces: ${traceLabels.join(', ')}`);
-          if (data.stock && data.stock.length > 0) {
-            setParagraph(toolbar, `Stock: ${data.stock.map(item => `${item.name} ${item.price}g`).join(', ')}`);
+    function renderRoomState(data) {
+      renderRoomEcology(data.room);
+      renderMessages(data.messages || []);
+      renderUserAttributes(data.user || {});
+      renderTick(data.tick || 0);
+    }
+
+    function loadRoomState() {
+      fetch(`/room-state/${row}/${col}`)
+        .then(response => {
+          if (redirectIfDead(response)) {
+            throw new Error('You died');
           }
-          if (data.commands && data.commands.length > 0) {
-            setParagraph(toolbar, `Commands: ${data.commands.join(', ')}`);
+          if (!response.ok) {
+            throw new Error('Room state unavailable');
           }
-          if (data.innAccess && data.innAccess.required) {
-            setParagraph(toolbar, `Inn: ${data.innAccess.paid ? 'paid' : `${data.innAccess.fee}g`}`);
-          }
-          if (data.activeRound) {
-            setParagraph(toolbar, `Dice pool: ${data.activeRound.pool}g, closes in ${data.activeRound.remainingTicks} ticks`);
-          }
-          if (data.event) {
-            setParagraph(toolbar, `Event: ${data.event.title} (${data.event.eventType})`);
-          }
-          const roomDescription = getRoomDescriptionWithoutLocation(data.description, data.room.row, data.room.col);
-          setParagraph(toolbar, `Reset: ${new Date(data.nextResetAt).toUTCString()} ${roomDescription}`);
-          setPresenceParagraph(toolbar, data.presence || []);
-          const isGuild = data.effects && data.effects.some(effect => effect.type === 'guild');
-          document.getElementById('job-controls').style.display = isGuild ? 'flex' : 'none';
+          return response.json();
+        })
+        .then(renderRoomState)
+        .catch(() => {
+          loadRoomEcology();
+          loadMessages();
+          loadUserAttributes();
+          loadTick();
         });
     }
 
@@ -360,10 +396,7 @@
     }
 
     function updateAll() {
-      heartbeatRoom().finally(loadRoomEcology);
-      loadMessages();
-      loadUserAttributes();
-      loadTick();
+      heartbeatRoom().finally(loadRoomState);
     }
 
     function updateTargetHint() {
