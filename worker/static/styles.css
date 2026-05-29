@@ -84,6 +84,20 @@ a, button, input, select {
   margin-top: .35em;
 }
 
+#room-ecology-toolbar .room-presence-line {
+  flex-basis: 100%;
+}
+
+.room-presence-target {
+  background: none;
+  border: 0;
+  color: #0645ad;
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  text-decoration: underline;
+}
+
 #attributes {
   display: flex;
   flex-direction: row;
@@ -170,6 +184,11 @@ a, button, input, select {
   font-size: 14px;
   text-decoration: none;
   color: black;
+}
+
+.grid-item.world-event-room {
+  color: #b00020;
+  font-weight: 700;
 }
 
 .grid-item:hover {

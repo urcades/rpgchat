@@ -213,6 +213,32 @@
       const paragraph = document.createElement('p');
       paragraph.textContent = text;
       parent.appendChild(paragraph);
+      return paragraph;
+    }
+
+    function setPresenceParagraph(parent, presence) {
+      const paragraph = document.createElement('p');
+      paragraph.className = 'room-presence-line';
+      setText(paragraph, 'Present: ');
+      if (!presence || presence.length === 0) {
+        setText(paragraph, 'none');
+        parent.appendChild(paragraph);
+        return paragraph;
+      }
+
+      presence.forEach((player, index) => {
+        if (index > 0) {
+          setText(paragraph, ', ');
+        }
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'room-presence-target';
+        button.textContent = player.displayName || player.username;
+        button.addEventListener('click', () => selectTarget(player.username));
+        paragraph.appendChild(button);
+      });
+      parent.appendChild(paragraph);
+      return paragraph;
     }
 
     function getRoomDescriptionWithoutLocation(description, rowValue, colValue) {
@@ -252,23 +278,26 @@
           if (data.activeRound) {
             setParagraph(toolbar, `Dice pool: ${data.activeRound.pool}g, closes in ${data.activeRound.remainingTicks} ticks`);
           }
+          if (data.event) {
+            setParagraph(toolbar, `Event: ${data.event.title} (${data.event.eventType})`);
+          }
           const roomDescription = getRoomDescriptionWithoutLocation(data.description, data.room.row, data.room.col);
           setParagraph(toolbar, `Reset: ${new Date(data.nextResetAt).toUTCString()} ${roomDescription}`);
+          setPresenceParagraph(toolbar, data.presence || []);
           const isGuild = data.effects && data.effects.some(effect => effect.type === 'guild');
           document.getElementById('job-controls').style.display = isGuild ? 'flex' : 'none';
         });
     }
 
     function heartbeatRoom() {
-      fetch(`/room-presence/${row}/${col}`, { method: 'POST' }).catch(() => {});
+      return fetch(`/room-presence/${row}/${col}`, { method: 'POST' }).catch(() => {});
     }
 
     function updateAll() {
-      heartbeatRoom();
+      heartbeatRoom().finally(loadRoomEcology);
       loadMessages();
       loadUserAttributes();
       loadTick();
-      loadRoomEcology();
     }
 
     function updateTargetHint() {

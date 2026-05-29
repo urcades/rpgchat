@@ -1,6 +1,7 @@
 import jobsModule from '../utils/jobs.js';
 import ecologyModule from '../utils/roomEcology.js';
 import levelingModule from '../utils/leveling.js';
+import worldEventsModule from '../utils/worldEvents.js';
 import { changes, dbAll, dbFirst, dbRun, lastInsertId } from './db.mjs';
 
 const {
@@ -32,8 +33,11 @@ const {
 } = ecologyModule;
 
 const { calculateLevel } = levelingModule;
+const { generateDailyWorldEvents } = worldEventsModule;
 
 const PRESENCE_MAX_AGE_SECONDS = 45;
+const BASE_EXPERIENCE_REQUIRED = 100;
+const PLAYER_ACTION_EXPERIENCE = 1;
 const INN_ACCESS_TYPE = 'inn';
 const SPEED_HIT_BASE_CHANCE = 0.7;
 const SPEED_HIT_STEP = 0.05;
@@ -218,6 +222,20 @@ export async function payInnAccess(db, username, row, col) {
 }
 
 export async function cleanupOldWorldDayData(db, worldDay = getWorldDay()) {
+  await dbRun(
+    db,
+    `DELETE FROM users
+     WHERE isNpc = 1
+       AND worldEventId IN (SELECT id FROM worldEvents WHERE worldDay != ?)`,
+    [worldDay]
+  );
+  await dbRun(
+    db,
+    `DELETE FROM worldEventEntities
+     WHERE eventId IN (SELECT id FROM worldEvents WHERE worldDay != ?)`,
+    [worldDay]
+  );
+  await dbRun(db, 'DELETE FROM worldEvents WHERE worldDay != ? AND status != ?', [worldDay, 'completed']);
   await dbRun(db, 'DELETE FROM roomPresence WHERE worldDay != ?', [worldDay]);
   await dbRun(db, 'DELETE FROM roomEffectCooldowns WHERE worldDay != ?', [worldDay]);
   await dbRun(db, 'DELETE FROM roomAccess WHERE worldDay != ?', [worldDay]);
@@ -244,6 +262,231 @@ export async function updatePresence(db, username, row, col) {
   );
 
   return { username, row, col, tickValue, worldDay };
+}
+
+async function getRoomPresence(db, row, col, worldDay) {
+  return dbAll(
+    db,
+    `SELECT rp.username,
+            COALESCE(u.displayName, rp.username) AS displayName,
+            u.job,
+            u.level,
+            u.isNpc,
+            u.npcKind,
+            u.worldEventId,
+            rp.lastSeenTick
+     FROM roomPresence rp
+     JOIN users u ON u.username = rp.username
+     WHERE rp.roomRow = ?
+       AND rp.roomCol = ?
+       AND rp.worldDay = ?
+       AND rp.lastSeenAt >= datetime('now', ?)
+       AND rp.username != 'System'
+     ORDER BY lower(rp.username) ASC`,
+    [row, col, worldDay, `-${PRESENCE_MAX_AGE_SECONDS} seconds`]
+  );
+}
+
+async function getActiveRoomEvent(db, row, col, worldDay) {
+  return dbFirst(
+    db,
+    `SELECT id, worldDay, eventType, roomRow, roomCol, status, title, description, rewardExperience, rewardGold
+     FROM worldEvents
+     WHERE roomRow = ?
+       AND roomCol = ?
+       AND worldDay = ?
+       AND status = 'active'
+       AND eventType IN ('raid', 'lesser')
+     ORDER BY CASE eventType WHEN 'raid' THEN 0 ELSE 1 END
+     LIMIT 1`,
+    [row, col, worldDay]
+  );
+}
+
+function npcUsername(eventId, suffix) {
+  return `${eventId}_${suffix}`.replace(/[^A-Za-z0-9_-]/g, '_');
+}
+
+function npcTemplateFor(event, suffix) {
+  if (event.eventType === 'raid' && suffix === 'boss') {
+    return {
+      username: npcUsername(event.id, 'boss'),
+      displayName: 'Frost Wyrm',
+      npcKind: 'raid_boss',
+      health: 20,
+      stamina: 100,
+      speed: 7,
+      strength: 12,
+      intelligence: 3,
+      rewardExperience: event.rewardExperience,
+      rewardGold: event.rewardGold
+    };
+  }
+
+  if (event.eventType === 'raid') {
+    return {
+      username: npcUsername(event.id, suffix),
+      displayName: suffix === 'add_1' ? 'Frost Thrall' : 'Ice Gnawer',
+      npcKind: 'raid_add',
+      health: 10,
+      stamina: 80,
+      speed: 5,
+      strength: 6,
+      intelligence: 1,
+      rewardExperience: 12,
+      rewardGold: 3
+    };
+  }
+
+  if (event.eventType === 'lesser') {
+    return {
+      username: npcUsername(event.id, 'brute'),
+      displayName: 'Restless Brute',
+      npcKind: 'lesser_hostile',
+      health: 14,
+      stamina: 80,
+      speed: 4,
+      strength: 8,
+      intelligence: 1,
+      rewardExperience: event.rewardExperience,
+      rewardGold: event.rewardGold
+    };
+  }
+
+  return {
+    username: npcUsername(event.id, 'lurker'),
+    displayName: 'Room Lurker',
+    npcKind: 'ambient_hostile',
+    health: 8,
+    stamina: 60,
+    speed: 3,
+    strength: 4,
+    intelligence: 1,
+    rewardExperience: event.rewardExperience,
+    rewardGold: event.rewardGold
+  };
+}
+
+function npcTemplatesForEvent(event) {
+  if (event.eventType === 'raid') {
+    return [
+      npcTemplateFor(event, 'boss'),
+      npcTemplateFor(event, 'add_1'),
+      npcTemplateFor(event, 'add_2')
+    ];
+  }
+  return [npcTemplateFor(event, 'hostile')];
+}
+
+export async function createNpcForEvent(db, npc) {
+  await dbRun(
+    db,
+    `INSERT OR IGNORE INTO users
+      (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold,
+       experience, isNpc, displayName, npcKind, worldEventId)
+     VALUES (?, 'npc', 'Novice', ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 1, ?, ?, ?)`,
+    [
+      npc.username,
+      npc.health,
+      npc.health,
+      npc.stamina ?? 100,
+      npc.stamina ?? 100,
+      npc.speed,
+      npc.strength,
+      npc.intelligence,
+      npc.displayName,
+      npc.npcKind,
+      npc.worldEventId
+    ]
+  );
+  await dbRun(
+    db,
+    `INSERT INTO roomPresence
+      (username, roomRow, roomCol, lastSeenTick, worldDay, lastSeenAt)
+     VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(username, worldDay) DO UPDATE SET
+      roomRow = excluded.roomRow,
+      roomCol = excluded.roomCol,
+      lastSeenTick = excluded.lastSeenTick,
+      lastSeenAt = CURRENT_TIMESTAMP`,
+    [npc.username, npc.row, npc.col, await getCurrentTickValue(db), npc.worldDay ?? getWorldDay()]
+  );
+  await dbRun(
+    db,
+    `INSERT OR IGNORE INTO worldEventEntities
+      (eventId, username, entityKind, maxPopulation, respawnInterval, rewardExperience, rewardGold)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      npc.worldEventId,
+      npc.username,
+      npc.npcKind,
+      npc.maxPopulation ?? 1,
+      npc.respawnInterval ?? 20,
+      npc.rewardExperience ?? 0,
+      npc.rewardGold ?? 0
+    ]
+  );
+  return npc;
+}
+
+async function spawnEventNpcs(db, event) {
+  const templates = npcTemplatesForEvent(event);
+  for (const template of templates) {
+    await createNpcForEvent(db, {
+      ...template,
+      worldEventId: event.id,
+      worldDay: event.worldDay,
+      row: event.roomRow,
+      col: event.roomCol
+    });
+  }
+}
+
+export async function ensureDailyWorldEvents(db, worldDay = getWorldDay(), createdTick = null) {
+  const tickValue = createdTick ?? await getCurrentTickValue(db);
+
+  for (const event of generateDailyWorldEvents(worldDay)) {
+    await dbRun(
+      db,
+      `INSERT OR IGNORE INTO worldEvents
+        (id, worldDay, eventType, roomRow, roomCol, status, title, description, rewardExperience, rewardGold, createdTick, expiresTick)
+       VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)`,
+      [
+        event.id,
+        worldDay,
+        event.eventType,
+        event.row,
+        event.col,
+        event.title,
+        event.description,
+        event.rewardExperience,
+        event.rewardGold,
+        tickValue,
+        tickValue + 1440
+      ]
+    );
+  }
+
+  const events = await dbAll(
+    db,
+    `SELECT *
+     FROM worldEvents
+     WHERE worldDay = ?
+       AND status = 'active'
+     ORDER BY eventType ASC, id ASC`,
+    [worldDay]
+  );
+
+  for (const event of events) {
+    await spawnEventNpcs(db, event);
+  }
+
+  return {
+    raid: events.find(event => event.eventType === 'raid'),
+    lesser: events.find(event => event.eventType === 'lesser'),
+    hostiles: events.filter(event => event.eventType === 'hostile'),
+    events
+  };
 }
 
 export async function getActiveRound(db, row, col, worldDay, tickValue) {
@@ -287,6 +530,7 @@ export async function getRoomEcology(db, username, row, col) {
   const worldDay = getWorldDay();
   const tickValue = await getCurrentTickValue(db);
   await cleanupOldWorldDayData(db, worldDay);
+  await ensureDailyWorldEvents(db, worldDay, tickValue);
   const traces = await dbAll(
     db,
     `SELECT id, roomRow, roomCol, traceType, intensity, attacker, target, createdTick, expiryTick, worldDay, createdAt
@@ -303,6 +547,8 @@ export async function getRoomEcology(db, username, row, col) {
   const traceSummary = summarizeTraces(traces);
   const innAccess = await getRoomAccessState(db, username, row, col, tickValue, worldDay);
   const activeRound = await getActiveRound(db, row, col, worldDay, tickValue);
+  const presence = await getRoomPresence(db, row, col, worldDay);
+  const event = await getActiveRoomEvent(db, row, col, worldDay);
   const effectPayload = getRoomEffectPayload({ row, col, worldDay, features, innAccess, activeRound });
 
   return {
@@ -313,6 +559,8 @@ export async function getRoomEcology(db, username, row, col) {
     features,
     traces,
     traceSummary,
+    presence,
+    event,
     description: composeRoomDescription({ row, col, phase, features, traceSummary }),
     ...effectPayload
   };
@@ -610,6 +858,7 @@ export async function processRoomEffects(db, currentTick) {
      FROM roomPresence rp
      JOIN users u ON u.username = rp.username
      WHERE rp.worldDay = ?
+       AND u.isNpc = 0
        AND rp.lastSeenAt >= datetime('now', ?)`,
     [worldDay, `-${PRESENCE_MAX_AGE_SECONDS} seconds`]
   );
@@ -684,12 +933,86 @@ export async function resolveExpiredGamblingRounds(db, currentTick) {
   }
 }
 
+async function awardEventVictory(db, event, row, col, currentTick) {
+  const presentPlayers = await dbAll(
+    db,
+    `SELECT rp.username
+     FROM roomPresence rp
+     JOIN users u ON u.username = rp.username
+     WHERE rp.roomRow = ?
+       AND rp.roomCol = ?
+       AND rp.worldDay = ?
+       AND rp.lastSeenAt >= datetime('now', ?)
+       AND u.isNpc = 0`,
+    [row, col, event.worldDay, `-${PRESENCE_MAX_AGE_SECONDS} seconds`]
+  );
+
+  for (const player of presentPlayers) {
+    await awardExperience(db, player.username, event.rewardExperience || 0);
+    await dbRun(db, 'UPDATE users SET gold = gold + ? WHERE username = ?', [event.rewardGold || 0, player.username]);
+    await dbRun(
+      db,
+      `INSERT OR IGNORE INTO worldEventAchievements
+        (username, eventId, achievementType, worldDay, earnedTick, rewardExperience, rewardGold)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        player.username,
+        event.id,
+        event.eventType === 'raid' ? 'raid_victory' : 'event_victory',
+        event.worldDay,
+        currentTick,
+        event.rewardExperience || 0,
+        event.rewardGold || 0
+      ]
+    );
+  }
+
+  await dbRun(
+    db,
+    'UPDATE worldEvents SET status = ?, completedTick = ? WHERE id = ?',
+    ['completed', currentTick, event.id]
+  );
+  await insertSystemMessage(db, row, col, `${event.title} has been cleared.`);
+}
+
+async function defeatNpc(db, npc, { killer, row, col, currentTick }) {
+  const entity = await dbFirst(db, 'SELECT rewardExperience, rewardGold FROM worldEventEntities WHERE username = ?', [npc.username]);
+  const event = npc.worldEventId
+    ? await dbFirst(db, 'SELECT * FROM worldEvents WHERE id = ?', [npc.worldEventId])
+    : null;
+
+  await dbRun(db, 'DELETE FROM users WHERE username = ? AND isNpc = 1', [npc.username]);
+  await dbRun(db, 'DELETE FROM roomPresence WHERE username = ?', [npc.username]);
+  await dbRun(db, 'DELETE FROM statusEffects WHERE username = ?', [npc.username]);
+  await dbRun(db, 'UPDATE worldEventEntities SET lastDefeatedTick = ? WHERE username = ?', [currentTick, npc.username]);
+  await insertSystemMessage(db, row, col, `${npc.displayName || npc.username} is defeated by ${killer}.`);
+
+  if (event && ['raid', 'lesser'].includes(event.eventType) && npc.npcKind === 'raid_boss') {
+    await awardEventVictory(db, event, row, col, currentTick);
+    return;
+  }
+
+  if (event && event.eventType === 'lesser') {
+    await awardEventVictory(db, event, row, col, currentTick);
+    return;
+  }
+
+  if (killer && entity) {
+    await awardExperience(db, killer, entity.rewardExperience || 0);
+    await dbRun(db, 'UPDATE users SET gold = gold + ? WHERE username = ?', [entity.rewardGold || 0, killer]);
+  }
+}
+
 async function damageUser(db, username, amount, cause, row, col) {
   const target = await getUser(db, username, 'Target');
   const nextHealth = Math.max(0, target.health - amount);
   await dbRun(db, 'UPDATE users SET health = ? WHERE username = ?', [nextHealth, username]);
 
   if (nextHealth <= 0 && target.health > 0) {
+    if (target.isNpc) {
+      await defeatNpc(db, target, { killer: cause.replace(/.* by /, ''), row, col, currentTick: await getCurrentTickValue(db) });
+      return { killed: true, remainingHealth: 0 };
+    }
     await moveUserToCemetery(db, username, cause, row, col);
     return { killed: true, remainingHealth: 0 };
   }
@@ -801,6 +1124,123 @@ export async function advanceGlobalTick(db) {
   };
 }
 
+export async function runScheduledWorldPulse(db) {
+  const tick = await advanceGlobalTick(db);
+  const worldDay = getWorldDay();
+  await ensureDailyWorldEvents(db, worldDay, tick.tick);
+
+  return {
+    tick,
+    environmental: tick.tick % 5 === 0
+  };
+}
+
+export async function getActiveWorldEvents(db, worldDay = getWorldDay()) {
+  await ensureDailyWorldEvents(db, worldDay);
+  return dbAll(
+    db,
+    `SELECT id, eventType, roomRow AS row, roomCol AS col, status, title, description, rewardExperience, rewardGold
+     FROM worldEvents
+     WHERE worldDay = ?
+       AND status = 'active'
+       AND eventType IN ('raid', 'lesser')
+     ORDER BY CASE eventType WHEN 'raid' THEN 0 ELSE 1 END, id ASC`,
+    [worldDay]
+  );
+}
+
+export async function roomHasActiveHostiles(db, row, col) {
+  const worldDay = getWorldDay();
+  const hostiles = await dbFirst(
+    db,
+    `SELECT u.username
+     FROM users u
+     JOIN roomPresence rp ON rp.username = u.username
+     WHERE u.isNpc = 1
+       AND u.health > 0
+       AND rp.roomRow = ?
+       AND rp.roomCol = ?
+       AND rp.worldDay = ?
+     LIMIT 1`,
+    [row, col, worldDay]
+  );
+  const players = await dbFirst(
+    db,
+    `SELECT u.username
+     FROM users u
+     JOIN roomPresence rp ON rp.username = u.username
+     WHERE u.isNpc = 0
+       AND u.health > 0
+       AND rp.roomRow = ?
+       AND rp.roomCol = ?
+       AND rp.worldDay = ?
+       AND rp.lastSeenAt >= datetime('now', ?)
+     LIMIT 1`,
+    [row, col, worldDay, `-${PRESENCE_MAX_AGE_SECONDS} seconds`]
+  );
+  return Boolean(hostiles && players);
+}
+
+export async function runHostileRoomAction(db, row, col) {
+  const tick = await advanceGlobalTick(db);
+  const worldDay = getWorldDay();
+  const npc = await dbFirst(
+    db,
+    `SELECT u.*
+     FROM users u
+     JOIN roomPresence rp ON rp.username = u.username
+     WHERE u.isNpc = 1
+       AND u.health > 0
+       AND rp.roomRow = ?
+       AND rp.roomCol = ?
+       AND rp.worldDay = ?
+     ORDER BY CASE u.npcKind WHEN 'raid_boss' THEN 0 ELSE 1 END, u.username ASC
+     LIMIT 1`,
+    [row, col, worldDay]
+  );
+  const player = await dbFirst(
+    db,
+    `SELECT u.*
+     FROM users u
+     JOIN roomPresence rp ON rp.username = u.username
+     WHERE u.isNpc = 0
+       AND u.health > 0
+       AND rp.roomRow = ?
+       AND rp.roomCol = ?
+       AND rp.worldDay = ?
+       AND rp.lastSeenAt >= datetime('now', ?)
+     ORDER BY rp.lastSeenAt DESC, u.username ASC
+     LIMIT 1`,
+    [row, col, worldDay, `-${PRESENCE_MAX_AGE_SECONDS} seconds`]
+  );
+
+  if (!npc || !player) {
+    return { tick, acted: false };
+  }
+
+  const contest = rollSpeedContest(npc, player);
+  if (!contest.hit) {
+    await insertSystemMessage(db, row, col, `${player.username} dodged ${npc.displayName || npc.username}.`);
+    return { tick, acted: true, missed: true };
+  }
+
+  const { damage, isCriticalAttack } = await calculateAttackDamage(db, npc, player.username, tick.tick);
+  await dbRun(
+    db,
+    'UPDATE users SET health = MAX(health - ?, 0) WHERE username = ? AND health > 0',
+    [damage, player.username]
+  );
+  const after = await dbFirst(db, 'SELECT * FROM users WHERE username = ?', [player.username]);
+  const hitText = isCriticalAttack ? 'critically hits' : 'attacks';
+  await insertSystemMessage(db, row, col, `${npc.displayName || npc.username} ${hitText} ${player.username} for ${damage} damage.`);
+
+  if (after && after.health <= 0) {
+    await moveUserToCemetery(db, player.username, `attack by ${npc.username}`, row, col);
+  }
+
+  return { tick, acted: true, target: player.username, damage };
+}
+
 async function awardGoldMaybe(db, username) {
   if (Math.random() < 0.1) {
     const goldAmount = Math.floor(Math.random() * 3) + 1;
@@ -811,25 +1251,33 @@ async function awardGoldMaybe(db, username) {
 }
 
 async function updateLevel(db, username, row, col) {
-  const countRow = await dbFirst(
-    db,
-    `SELECT COUNT(*) AS messageCount
-     FROM messages
-     WHERE roomRow = ?
-       AND roomCol = ?
-       AND username = ?`,
-    [row, col, username]
-  );
-  const newLevel = calculateLevel(countRow.messageCount);
-  const user = await dbFirst(db, 'SELECT level FROM users WHERE username = ?', [username]);
+  const result = await awardExperience(db, username, PLAYER_ACTION_EXPERIENCE);
 
-  if (user && newLevel > user.level) {
+  if (result.leveled) {
+    await insertSystemMessage(db, row, col, `${username} reached level ${result.level} and gained 10 attribute points.`);
+  }
+}
+
+async function awardExperience(db, username, amount) {
+  const user = await dbFirst(db, 'SELECT experience, level, isNpc FROM users WHERE username = ?', [username]);
+  if (!user || user.isNpc) {
+    return { experience: 0, level: 0, leveled: false };
+  }
+
+  const nextExperience = (user.experience || 0) + amount;
+  const nextLevel = calculateLevel(nextExperience, BASE_EXPERIENCE_REQUIRED);
+  const levelDelta = Math.max(0, nextLevel - user.level);
+  if (levelDelta > 0) {
     await dbRun(
       db,
-      'UPDATE users SET level = ?, attributePoints = attributePoints + 10 WHERE username = ?',
-      [newLevel, username]
+      'UPDATE users SET experience = ?, level = ?, attributePoints = attributePoints + ? WHERE username = ?',
+      [nextExperience, nextLevel, levelDelta * 10, username]
     );
+  } else {
+    await dbRun(db, 'UPDATE users SET experience = ? WHERE username = ?', [nextExperience, username]);
   }
+
+  return { experience: nextExperience, level: nextLevel, leveled: levelDelta > 0 };
 }
 
 function parseRollCommand(message) {
@@ -1032,7 +1480,9 @@ export async function handleAttack(db, username, message, row, col) {
       worldDay
     });
 
-    if (wasKilled) {
+    if (wasKilled && attackedUser.isNpc) {
+      await defeatNpc(db, attackedUser, { killer: username, row, col, currentTick: createdTick });
+    } else if (wasKilled) {
       await moveUserToCemetery(db, user.username, `attack by ${username}`, row, col);
     }
 

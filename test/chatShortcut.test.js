@@ -7,6 +7,7 @@ const vm = require('node:vm');
 function createElement(id) {
   const element = {
     id,
+    tagName: id,
     value: '',
     textContent: '',
     _innerHTML: '',
@@ -18,6 +19,7 @@ function createElement(id) {
     },
     appendChild(child) {
       this.children.push(child);
+      this.textContent += child.textContent || '';
       if (id === 'skill-id' || id === 'job-select') {
         this.options.push(child);
       }
@@ -68,9 +70,11 @@ function loadChatPage(overrides = {}) {
   };
   const roomEcology = overrides.roomEcology || {
     room: { row: 1, col: 1 },
+    event: null,
     features: [],
     traceSummary: { labels: [] },
     effects: [],
+    presence: [],
     stock: [],
     commands: [],
     description: 'A room.',
@@ -221,6 +225,7 @@ test('room prose is appended to reset without repeating the room coordinate pref
       features: [{ label: 'Guild' }, { label: 'Safe' }],
       traceSummary: { labels: [] },
       effects: [{ type: 'guild', label: 'Guild' }],
+      presence: [],
       stock: [],
       commands: [],
       description: 'Room 14, 7. Old banners and tally marks make this place feel claimed.',
@@ -238,6 +243,42 @@ test('room prose is appended to reset without repeating the room coordinate pref
   assert.match(toolbarText, /Room: 14, 7/);
   assert.match(toolbarText, /Reset: Fri, 29 May 2026 00:00:00 GMT Old banners/);
   assert.doesNotMatch(toolbarText, /Room 14, 7\. Old banners/);
+});
+
+test('room toolbar renders present players as quick target buttons', async () => {
+  const page = loadChatPage({
+    roomEcology: {
+      room: { row: 1, col: 1 },
+      event: { eventType: 'raid', title: 'Frost Wyrm Den', status: 'active' },
+      features: [],
+      traceSummary: { labels: [] },
+      effects: [],
+      presence: [
+        { username: 'angel', displayName: 'angel' },
+        { username: 'raid_boss_20260529', displayName: 'Frost Wyrm', npcKind: 'raid_boss' }
+      ],
+      stock: [],
+      commands: [],
+      description: 'A room.',
+      nextResetAt: '2026-05-29T00:00:00.000Z'
+    }
+  });
+
+  await page.context.loadRoomEcology();
+  await flushPromises();
+
+  const presentLine = page.getElement('room-ecology-toolbar').children
+    .find(child => child.textContent.startsWith('Present:'));
+  const eventLine = page.getElement('room-ecology-toolbar').children
+    .find(child => child.textContent.startsWith('Event:'));
+  const targetButton = presentLine.children.find(child => child.textContent === 'Frost Wyrm');
+
+  assert.equal(eventLine.textContent, 'Event: Frost Wyrm Den (raid)');
+  assert.ok(targetButton);
+  targetButton.listeners.click();
+
+  assert.equal(page.getElement('message').placeholder, 'Currently targeting raid_boss_20260529');
+  assert.equal(page.getElement('clear-target').textContent, 'Untarget');
 });
 
 test('target button keeps a fixed untarget label when a player is selected', () => {

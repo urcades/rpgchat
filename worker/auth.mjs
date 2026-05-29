@@ -31,6 +31,23 @@ function parseCookie(header = '') {
     }, {});
 }
 
+function getCookieValues(header = '', name) {
+  return header
+    .split(';')
+    .map(part => part.trim())
+    .filter(Boolean)
+    .reduce((values, part) => {
+      const separator = part.indexOf('=');
+      if (separator === -1) {
+        return values;
+      }
+      if (part.slice(0, separator) === name) {
+        values.push(decodeURIComponent(part.slice(separator + 1)));
+      }
+      return values;
+    }, []);
+}
+
 function constantTimeEqual(left, right) {
   if (left.length !== right.length) {
     return false;
@@ -109,18 +126,30 @@ export async function destroySession(env, request) {
 }
 
 export async function getSession(env, request) {
-  const cookies = parseCookie(request.headers.get('Cookie') || '');
-  const sessionId = await verifyCookieValue(cookies[COOKIE_NAME], getSecret(env));
-  if (!sessionId) {
+  const cookieValues = getCookieValues(request.headers.get('Cookie') || '', COOKIE_NAME);
+  if (cookieValues.length === 0) {
     return null;
   }
+  const secret = getSecret(env);
+  const sessionIds = [];
+  for (const value of cookieValues) {
+    const sessionId = await verifyCookieValue(value, secret);
+    if (sessionId && !sessionIds.includes(sessionId)) {
+      sessionIds.push(sessionId);
+    }
+  }
+  if (sessionIds.length === 0) {
+    return null;
+  }
+  const placeholders = sessionIds.map(() => '?').join(', ');
   const session = await dbFirst(
     env.DB,
     `SELECT id, username, deadUsername, expiresAt
      FROM sessions
-     WHERE id = ?
-       AND expiresAt > CURRENT_TIMESTAMP`,
-    [sessionId]
+     WHERE id IN (${placeholders})
+       AND expiresAt > CURRENT_TIMESTAMP
+     ORDER BY createdAt DESC`,
+    sessionIds
   );
   return session || null;
 }
@@ -130,7 +159,7 @@ export async function getLiveSessionUser(env, request) {
   if (!session?.username) {
     return { session, user: null };
   }
-  const user = await dbFirst(env.DB, 'SELECT * FROM users WHERE username = ?', [session.username]);
+  const user = await dbFirst(env.DB, 'SELECT * FROM users WHERE username = ? AND isNpc = 0', [session.username]);
   return { session, user };
 }
 

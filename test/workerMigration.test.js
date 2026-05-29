@@ -113,6 +113,189 @@ test('Worker D1 migration creates a fresh normalized world schema', async () => 
   }
 });
 
+test('Worker room ecology includes active players present in the room', async () => {
+  const db = await createMigratedDb();
+  const { getRoomEcology, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
+       VALUES
+        ('ed', 'pw', 'Novice', 12, 12, 100, 100, 1, 1, 1),
+        ('angel', 'pw', 'Novice', 12, 12, 100, 100, 1, 1, 1),
+        ('away', 'pw', 'Novice', 12, 12, 100, 100, 1, 1, 1)`
+    ).run();
+
+    await updatePresence(db, 'ed', 1, 1);
+    await updatePresence(db, 'angel', 1, 1);
+    await updatePresence(db, 'away', 2, 1);
+
+    const ecology = await getRoomEcology(db, 'ed', 1, 1);
+
+    assert.deepEqual(ecology.presence.map(player => player.username), ['angel', 'ed']);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Worker world event migration adds XP, NPC, event, entity, and achievement storage', async () => {
+  const db = await createMigratedDb();
+  try {
+    const userColumns = await db.prepare('PRAGMA table_info(users)').all();
+    const columnNames = userColumns.results.map(column => column.name);
+    const worldEvents = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'worldEvents'").first();
+    const worldEventEntities = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'worldEventEntities'").first();
+    const worldEventAchievements = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'worldEventAchievements'").first();
+
+    assert.ok(columnNames.includes('experience'));
+    assert.ok(columnNames.includes('isNpc'));
+    assert.ok(columnNames.includes('displayName'));
+    assert.ok(columnNames.includes('npcKind'));
+    assert.ok(columnNames.includes('worldEventId'));
+    assert.equal(worldEvents.name, 'worldEvents');
+    assert.equal(worldEventEntities.name, 'worldEventEntities');
+    assert.equal(worldEventAchievements.name, 'worldEventAchievements');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Scheduled world pulse advances one tick and runs five-minute environmental work only on fifth ticks', async () => {
+  const db = await createMigratedDb();
+  const { getCurrentTickValue, runScheduledWorldPulse } = await import('../worker/game.mjs');
+
+  try {
+    const first = await runScheduledWorldPulse(db);
+    assert.equal(first.tick.tick, 1);
+    assert.equal(first.environmental, false);
+    assert.equal(await getCurrentTickValue(db), 1);
+
+    await runScheduledWorldPulse(db);
+    await runScheduledWorldPulse(db);
+    await runScheduledWorldPulse(db);
+    const fifth = await runScheduledWorldPulse(db);
+
+    assert.equal(fifth.tick.tick, 5);
+    assert.equal(fifth.environmental, true);
+    assert.equal(await getCurrentTickValue(db), 5);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Daily world event seeding backfills missing hostile rooms for an existing world day', async () => {
+  const db = await createMigratedDb();
+  const { ensureDailyWorldEvents } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      `INSERT INTO worldEvents
+        (id, worldDay, eventType, roomRow, roomCol, status, title, description, rewardExperience, rewardGold, createdTick, expiresTick)
+       VALUES
+        ('legacy_raid', '2026-05-29', 'raid', 1, 1, 'active', 'Legacy Raid', 'Already existed.', 120, 25, 1, 1441)`
+    ).run();
+
+    await ensureDailyWorldEvents(db, '2026-05-29', 2);
+
+    const hostileCount = await db.prepare(
+      "SELECT COUNT(*) AS count FROM worldEvents WHERE worldDay = '2026-05-29' AND eventType = 'hostile'"
+    ).first();
+    const totalCount = await db.prepare(
+      "SELECT COUNT(*) AS count FROM worldEvents WHERE worldDay = '2026-05-29'"
+    ).first();
+
+    assert.equal(hostileCount.count, 28);
+    assert.equal(totalCount.count, 31);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Raid event completion awards XP, gold, and achievement to present players when boss dies', async () => {
+  const db = await createMigratedDb();
+  const {
+    ensureDailyWorldEvents,
+    getRoomEcology,
+    handleAttackAction,
+    updatePresence
+  } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
+       VALUES ('raider', 'pw', 'Novice', 20, 20, 100, 100, 20, 80, 1)`
+    ).run();
+
+    const { raid } = await ensureDailyWorldEvents(db, '2026-05-29', 1);
+    await updatePresence(db, 'raider', raid.roomRow, raid.roomCol);
+    const before = await getRoomEcology(db, 'raider', raid.roomRow, raid.roomCol);
+    const boss = before.presence.find(entity => entity.npcKind === 'raid_boss');
+
+    assert.ok(boss);
+
+    await withMockedRandom([0.1, 0.99, 0.99], () => handleAttackAction(db, 'raider', raid.roomRow, raid.roomCol, `@${boss.username}`));
+
+    const player = await db.prepare("SELECT experience, level, gold, attributePoints FROM users WHERE username = 'raider'").first();
+    const achievement = await db.prepare("SELECT achievementType FROM worldEventAchievements WHERE username = 'raider'").first();
+    const event = await db.prepare("SELECT status FROM worldEvents WHERE id = ?").bind(raid.id).first();
+    const defeatedBoss = await db.prepare("SELECT username FROM users WHERE username = ?").bind(boss.username).first();
+
+    assert.equal(event.status, 'completed');
+    assert.equal(achievement.achievementType, 'raid_victory');
+    assert.equal(defeatedBoss, null);
+    assert.ok(player.experience >= raid.rewardExperience);
+    assert.ok(player.gold >= raid.rewardGold);
+    assert.ok(player.level >= 1);
+    assert.ok(player.attributePoints >= 10);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Hostile NPC room action can kill a present player through the normal cemetery flow', async () => {
+  const db = await createMigratedDb();
+  const {
+    createNpcForEvent,
+    runHostileRoomAction,
+    updatePresence
+  } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
+       VALUES ('victim', 'pw', 'Novice', 1, 10, 100, 100, 1, 1, 1)`
+    ).run();
+    await updatePresence(db, 'victim', 1, 1);
+    await createNpcForEvent(db, {
+      username: 'raid_brute_test',
+      displayName: 'Raid Brute',
+      npcKind: 'raid_add',
+      worldEventId: 'test-event',
+      row: 1,
+      col: 1,
+      health: 10,
+      stamina: 100,
+      speed: 20,
+      strength: 80,
+      intelligence: 1
+    });
+
+    await withMockedRandom([0.1, 0.99], () => runHostileRoomAction(db, 1, 1));
+
+    const livePlayer = await db.prepare("SELECT username FROM users WHERE username = 'victim'").first();
+    const grave = await db.prepare("SELECT username, cause FROM cemetery WHERE username = 'victim'").first();
+
+    assert.equal(livePlayer, null);
+    assert.equal(grave.username, 'victim');
+    assert.match(grave.cause, /raid_brute_test/);
+  } finally {
+    await db.close();
+  }
+});
+
 test('Worker attacks can miss through speed contest without damaging the target', async () => {
   const db = await createMigratedDb();
   const { getCurrentTickValue, getMessages, handleAttackAction } = await import('../worker/game.mjs');
@@ -525,6 +708,49 @@ test('dead sessions remain death-aware after the live user is gone', async () =>
 
     assert.equal(result.dead, true);
     assert.equal(result.session.deadUsername, 'fallen');
+  } finally {
+    await db.close();
+  }
+});
+
+test('new live session wins when an old dead session cookie is still present', async () => {
+  const db = await createMigratedDb();
+  const { createSession, requireLiveUser } = await import('../worker/auth.mjs');
+  const env = { DB: db, SESSION_SECRET: 'test-secret' };
+
+  try {
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
+       VALUES ('being', 'being', 'Chemist', 10, 10, 100, 100, 3, 1, 1)`
+    ).run();
+    await db.prepare(
+      `INSERT INTO cemetery
+        (username, password, level, gold, job, cause, roomRow, roomCol)
+       VALUES ('oldbeing', 'being', 0, 0, 'Chemist', 'poison marsh', 1, 1)`
+    ).run();
+
+    const oldDeadSession = await createSession(env, { deadUsername: 'oldbeing' });
+    const liveSession = await createSession(env, { username: 'being' });
+    await db.prepare(
+      `UPDATE sessions
+       SET createdAt = CASE id
+         WHEN ? THEN '2026-05-29 10:00:00'
+         WHEN ? THEN '2026-05-29 10:01:00'
+         ELSE createdAt
+       END`
+    ).bind(oldDeadSession.id, liveSession.id).run();
+
+    const oldDeadCookie = oldDeadSession.cookie.split(';')[0];
+    const liveCookie = liveSession.cookie.split(';')[0];
+    const request = new Request('https://rpgchat-worker.organelle.workers.dev/chat/1/1', {
+      headers: { Cookie: `${liveCookie}; ${oldDeadCookie}` }
+    });
+
+    const result = await requireLiveUser(env, request);
+
+    assert.equal(result.dead, undefined);
+    assert.equal(result.user.username, 'being');
   } finally {
     await db.close();
   }

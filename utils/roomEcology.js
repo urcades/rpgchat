@@ -63,6 +63,19 @@ const MECHANIC_FEATURE_CATALOG = [
   }
 ];
 
+const MECHANIC_FEATURE_WEIGHTS = {
+  shop: 0.35,
+  pub: 0.25,
+  inn: 0.25,
+  guild: 0.25,
+  gambling_den: 1,
+  poison_marsh: 1.8,
+  sun_room: 1.3,
+  moon_room: 1.3,
+  cold_room: 1.3,
+  echo_chamber: 1.3
+};
+
 const AMBIENT_FEATURE_CATALOG = [
   {
     id: 'safe',
@@ -106,6 +119,10 @@ const AMBIENT_FEATURE_CATALOG = [
     description: 'The air tastes old and unmoving.'
   }
 ];
+
+const AMBIENT_FEATURE_WEIGHTS = {
+  safe: 0.2
+};
 
 const SHOP_ITEM_CATALOG = [
   { name: 'Dented Helm', basePrice: 3 },
@@ -160,6 +177,20 @@ function seededRandom(seed) {
   };
 }
 
+function weightedSplice(catalog, random, weights) {
+  const totalWeight = catalog.reduce((sum, item) => sum + (weights[item.id] ?? 1), 0);
+  let threshold = random() * totalWeight;
+
+  for (let index = 0; index < catalog.length; index += 1) {
+    threshold -= weights[catalog[index].id] ?? 1;
+    if (threshold <= 0) {
+      return catalog.splice(index, 1)[0];
+    }
+  }
+
+  return catalog.pop();
+}
+
 function validateRoomCoordinates(row, col) {
   const parsedRow = Number.parseInt(row, 10);
   const parsedCol = Number.parseInt(col, 10);
@@ -186,14 +217,13 @@ function generateRoomFeatures(row, col, worldDay = getWorldDay()) {
   const featureCount = 2 + Math.floor(random() * 2);
   const features = [];
 
-  const mechanicIndex = Math.floor(random() * mechanicCatalog.length);
-  features.push(mechanicCatalog.splice(mechanicIndex, 1)[0]);
+  features.push(weightedSplice(mechanicCatalog, random, MECHANIC_FEATURE_WEIGHTS));
 
   while (features.length < featureCount && (mechanicCatalog.length > 0 || ambientCatalog.length > 0)) {
     const useMechanic = random() < 0.25 && mechanicCatalog.length > 0;
     const catalog = useMechanic || ambientCatalog.length === 0 ? mechanicCatalog : ambientCatalog;
-    const index = Math.floor(random() * catalog.length);
-    features.push(catalog.splice(index, 1)[0]);
+    const weights = catalog === mechanicCatalog ? MECHANIC_FEATURE_WEIGHTS : AMBIENT_FEATURE_WEIGHTS;
+    features.push(weightedSplice(catalog, random, weights));
   }
 
   return features;

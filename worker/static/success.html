@@ -17,15 +17,30 @@
   </main>
   <script>
     const gridContainer = document.querySelector('.grid-container');
+    const gridItems = new Map();
     for (let row = 1; row <= 16; row += 1) {
       for (let col = 1; col <= 16; col += 1) {
         const gridItem = document.createElement('a');
         gridItem.classList.add('grid-item');
         gridItem.href = `/chat/${row}/${col}`;
         gridItem.textContent = `${row}, ${col}`;
+        gridItems.set(`${row}:${col}`, gridItem);
         gridContainer.appendChild(gridItem);
       }
     }
+    fetch('/world-events')
+      .then(response => response.json())
+      .then(events => {
+        events.forEach(event => {
+          const item = gridItems.get(`${event.row}:${event.col}`);
+          if (!item) {
+            return;
+          }
+          item.classList.add('world-event-room');
+          item.dataset.eventType = event.eventType;
+        });
+      })
+      .catch(() => {});
   </script>
 </body>
 </html>

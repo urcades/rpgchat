@@ -34,6 +34,25 @@ test('generates stable coordinate-seeded room features for one world day', () =>
   assert.ok(first.every(feature => feature.id && feature.label && feature.description));
 });
 
+test('supportive room features are rare across a world day', () => {
+  const counts = {};
+
+  for (let row = 1; row <= 16; row += 1) {
+    for (let col = 1; col <= 16; col += 1) {
+      for (const feature of generateRoomFeatures(row, col, '2026-05-29')) {
+        counts[feature.id] = (counts[feature.id] || 0) + 1;
+      }
+    }
+  }
+
+  const supportCount = ['shop', 'pub', 'inn', 'guild'].reduce((sum, id) => sum + (counts[id] || 0), 0);
+  const dangerCount = ['poison_marsh', 'sun_room', 'moon_room', 'cold_room', 'echo_chamber'].reduce((sum, id) => sum + (counts[id] || 0), 0);
+
+  assert.ok((counts.safe || 0) <= 16);
+  assert.ok(supportCount <= 64);
+  assert.ok(dangerCount > supportCount);
+});
+
 test('night-attuned features report active only at night', () => {
   const feature = {
     id: 'night_attuned',

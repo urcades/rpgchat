@@ -15,6 +15,7 @@ import {
   getCurrentTickValue,
   getEffectiveUser,
   getMessages,
+  getActiveWorldEvents,
   getRoomAccessState,
   getRoomEcology,
   handleAttackAction,
@@ -24,6 +25,9 @@ import {
   normalizeJob,
   payInnAccess,
   requireRoomUse,
+  roomHasActiveHostiles,
+  runHostileRoomAction,
+  runScheduledWorldPulse,
   updatePresence,
   validateRoomCoordinates,
   validateStartingAllocation
@@ -37,24 +41,60 @@ import { canonicalLocalRequestUrl } from './localHost.mjs';
 const app = new Hono();
 const DEFAULT_RESURRECTION_PAYMENT_LINK_URL = 'https://buy.stripe.com/8x23codZs9Tj8dgertbV600';
 const STRIPE_WEBHOOK_TOLERANCE_SECONDS = 300;
+const NO_STORE = 'no-store';
 
 app.use('*', async (c, next) => {
   const canonicalUrl = canonicalLocalRequestUrl(c.req.url);
   if (canonicalUrl) {
-    return c.redirect(canonicalUrl, 307);
+    return redirectNoStore(c, canonicalUrl, 307);
   }
   await next();
+
+  const pathname = new URL(c.req.url).pathname;
+  if (!isStaticAssetPath(pathname)) {
+    c.res = noStore(c.res);
+  }
 });
 
 function isHtmlRequest(c) {
   return (c.req.header('Accept') || '').includes('text/html');
 }
 
-function asset(c, path) {
+function isStaticAssetPath(pathname) {
+  return /\.(?:css|gif|ico|jpe?g|js|png|svg|webp)$/i.test(pathname);
+}
+
+function asset(c, path, options = {}) {
   const url = new URL(c.req.url);
   url.pathname = path;
   url.search = '';
-  return c.env.ASSETS.fetch(new Request(url, c.req.raw));
+  const headers = new Headers(c.req.raw.headers);
+  if (options.stripCacheValidators) {
+    headers.delete('If-Match');
+    headers.delete('If-None-Match');
+    headers.delete('If-Modified-Since');
+    headers.delete('If-Unmodified-Since');
+    headers.delete('If-Range');
+  }
+  return c.env.ASSETS.fetch(new Request(url, {
+    method: 'GET',
+    headers
+  }));
+}
+
+async function protectedAsset(c, path) {
+  return noStore(await asset(c, path, { stripCacheValidators: true }));
+}
+
+function noStore(response) {
+  const next = new Response(response.body, response);
+  next.headers.set('Cache-Control', NO_STORE);
+  next.headers.set('Pragma', 'no-cache');
+  return next;
+}
+
+function redirectNoStore(c, path, status) {
+  return noStore(c.redirect(path, status));
 }
 
 function formError(c, err) {
@@ -72,12 +112,12 @@ async function currentUserOrResponse(c) {
   }
   if (result.dead) {
     if (isHtmlRequest(c)) {
-      return c.redirect('/you-died');
+      return redirectNoStore(c, '/you-died');
     }
     return c.json({ error: 'You died', redirect: '/you-died' }, 410);
   }
   if (isHtmlRequest(c)) {
-    return c.redirect('/');
+    return redirectNoStore(c, '/');
   }
   return c.json({ error: 'Login required' }, 401);
 }
@@ -153,6 +193,14 @@ async function broadcastRoom(env, row, col, payload) {
   });
 }
 
+async function startHostileLoopIfNeeded(env, row, col) {
+  if (!await roomHasActiveHostiles(env.DB, row, col)) {
+    return;
+  }
+  const stub = env.ROOMS.getByName(roomName(row, col));
+  await stub.fetch(new Request(`https://room.local/hostiles/${row}/${col}/start`, { method: 'POST' }));
+}
+
 async function ensureRoomUse(c, user, row, col) {
   const roomUse = await requireRoomUse(c.env.DB, user.username, row, col);
   if (!roomUse.allowed) {
@@ -182,12 +230,12 @@ app.post('/login', async c => {
   const body = await parseForm(c);
   const username = String(body.username || '');
   const password = String(body.password || '');
-  const user = await dbFirst(c.env.DB, 'SELECT * FROM users WHERE username = ? AND password = ?', [username, password]);
+  const user = await dbFirst(c.env.DB, 'SELECT * FROM users WHERE username = ? AND password = ? AND isNpc = 0', [username, password]);
 
   if (user) {
     const session = await createSession(c.env, { username: user.username });
     c.header('Set-Cookie', session.cookie);
-    return c.redirect('/success');
+    return redirectNoStore(c, '/success');
   }
 
   const deadUser = await dbFirst(
@@ -204,7 +252,7 @@ app.post('/login', async c => {
   if (deadUser) {
     const session = await createSession(c.env, { deadUsername: deadUser.username });
     c.header('Set-Cookie', session.cookie);
-    return c.redirect('/death');
+    return redirectNoStore(c, '/death');
   }
 
   return asset(c, '/index.html');
@@ -243,8 +291,8 @@ app.post('/signup', async c => {
     await dbRun(
       c.env.DB,
       `INSERT INTO users
-        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)`,
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold, experience, isNpc)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0)`,
       [
         username,
         password,
@@ -268,7 +316,7 @@ app.post('/signup', async c => {
 app.get('/logout', async c => {
   await destroySession(c.env, c.req.raw);
   c.header('Set-Cookie', clearSessionCookieHeader());
-  return c.redirect('/');
+  return redirectNoStore(c, '/');
 });
 
 app.get('/success', async c => {
@@ -276,7 +324,15 @@ app.get('/success', async c => {
   if (auth instanceof Response) {
     return auth;
   }
-  return asset(c, '/success.html');
+  return protectedAsset(c, '/success.html');
+});
+
+app.get('/world-events', async c => {
+  const auth = await currentUserOrResponse(c);
+  if (auth instanceof Response) {
+    return auth;
+  }
+  return c.json(await getActiveWorldEvents(c.env.DB));
 });
 
 app.get('/character', async c => {
@@ -284,23 +340,23 @@ app.get('/character', async c => {
   if (auth instanceof Response) {
     return auth;
   }
-  return asset(c, '/character.html');
+  return protectedAsset(c, '/character.html');
 });
 
 app.get('/death', async c => {
   const session = await getSession(c.env, c.req.raw);
   if (!session?.deadUsername) {
-    return c.redirect('/');
+    return redirectNoStore(c, '/');
   }
-  return asset(c, '/death.html');
+  return protectedAsset(c, '/death.html');
 });
 
 app.get('/you-died', async c => {
   const session = await getSession(c.env, c.req.raw);
   if (!session?.deadUsername) {
-    return c.redirect('/');
+    return redirectNoStore(c, '/');
   }
-  return asset(c, '/you-died.html');
+  return protectedAsset(c, '/you-died.html');
 });
 
 app.get('/death-data', async c => {
@@ -350,7 +406,7 @@ app.get('/cemetery-data', async c => {
 });
 
 app.get('/leaderboard-data', async c => {
-  const players = await dbAll(c.env.DB, 'SELECT username, gold FROM users ORDER BY gold DESC');
+  const players = await dbAll(c.env.DB, 'SELECT username, gold FROM users WHERE isNpc = 0 ORDER BY gold DESC');
   return c.json(players);
 });
 
@@ -406,7 +462,7 @@ app.get('/chat/:row/:col', async c => {
     const access = await getRoomAccessState(c.env.DB, auth.user.username, row, col, tickValue);
 
     if (access.required && !access.paid) {
-      return c.html(`<!DOCTYPE html>
+      return noStore(c.html(`<!DOCTYPE html>
 <html>
 <head><title>Inn Access</title><link rel="stylesheet" href="/styles.css"></head>
 <body>
@@ -417,10 +473,10 @@ app.get('/chat/:row/:col', async c => {
   </form>
   <p><a href="/success">Return to map</a></p>
 </body>
-</html>`);
+</html>`));
     }
 
-    return asset(c, '/chat.html');
+    return protectedAsset(c, '/chat.html');
   } catch (err) {
     return formError(c, err);
   }
@@ -433,13 +489,21 @@ app.get('/user-attributes', async c => {
   }
   const user = await dbFirst(
     c.env.DB,
-    'SELECT username, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold, attributePoints FROM users WHERE username = ?',
+    'SELECT username, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold, experience, attributePoints FROM users WHERE username = ? AND isNpc = 0',
     [auth.user.username]
   );
   if (!user) {
     return c.json({ error: 'User Not Found' }, 404);
   }
   const effective = getEffectiveUser(user);
+  const achievements = await dbAll(
+    c.env.DB,
+    `SELECT achievementType, eventId, worldDay, earnedTick, rewardExperience, rewardGold
+     FROM worldEventAchievements
+     WHERE username = ?
+     ORDER BY earnedTick DESC, id DESC`,
+    [auth.user.username]
+  );
   return c.json({
     ...user,
     job: effective.job,
@@ -454,7 +518,8 @@ app.get('/user-attributes', async c => {
       strength: effective.strength,
       intelligence: effective.intelligence
     },
-    skill: effective.skill
+    skill: effective.skill,
+    achievements
   });
 });
 
@@ -500,6 +565,7 @@ app.post('/room-presence/:row/:col', async c => {
     await ensureRoomUse(c, auth.user, row, col);
     const presence = await updatePresence(c.env.DB, auth.user.username, row, col);
     await broadcastRoom(c.env, row, col, { type: 'presence', username: auth.user.username });
+    await startHostileLoopIfNeeded(c.env, row, col);
     return c.json({ ok: true, presence });
   } catch (err) {
     return formError(c, err);
@@ -631,6 +697,16 @@ app.notFound(c => c.env.ASSETS.fetch(c.req.raw));
 
 export class RoomObject extends DurableObject {
   async fetch(request) {
+    const url = new URL(request.url);
+    const hostileMatch = url.pathname.match(/^\/hostiles\/(\d+)\/(\d+)\/start$/);
+    if (hostileMatch && request.method === 'POST') {
+      const row = Number.parseInt(hostileMatch[1], 10);
+      const col = Number.parseInt(hostileMatch[2], 10);
+      await this.ctx.storage.put('hostileRoom', { row, col });
+      await this.ctx.storage.setAlarm(Date.now() + 5000);
+      return new Response('ok');
+    }
+
     if (request.headers.get('Upgrade') !== 'websocket') {
       return new Response('Expected WebSocket upgrade', { status: 426 });
     }
@@ -657,6 +733,34 @@ export class RoomObject extends DurableObject {
       }
     }
   }
+
+  async alarm() {
+    const room = await this.ctx.storage.get('hostileRoom');
+    if (!room) {
+      return;
+    }
+
+    const result = await runHostileRoomAction(this.env.DB, room.row, room.col);
+    await this.broadcast({ type: 'hostile', room, result });
+
+    if (await roomHasActiveHostiles(this.env.DB, room.row, room.col)) {
+      await this.ctx.storage.setAlarm(Date.now() + 5000);
+    } else {
+      await this.ctx.storage.delete('hostileRoom');
+    }
+  }
 }
 
-export default app;
+export default {
+  fetch(request, env, ctx) {
+    return app.fetch(request, env, ctx);
+  },
+  async scheduled(_event, env, ctx) {
+    const pulse = runScheduledWorldPulse(env.DB);
+    if (ctx && typeof ctx.waitUntil === 'function') {
+      ctx.waitUntil(pulse);
+      return;
+    }
+    await pulse;
+  }
+};

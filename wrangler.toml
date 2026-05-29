@@ -26,3 +26,6 @@ new_sqlite_classes = ["RoomObject"]
 
 [observability]
 enabled = true
+
+[triggers]
+crons = ["* * * * *"]
