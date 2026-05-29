@@ -5,16 +5,22 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body class="chat-page">
-  <div class="hud top-hud">
+  <div class="hud global-hud">
     <div class="hud-primary">
       <p><a href="/success">World Map</a></p>
-      <p><a href="/character">Status</a></p>
+    </div>
+    <div id="global-status">
+      <p id="tick"></p>
+      <p id="phase"></p>
+    </div>
+  </div>
+  <div class="hud top-hud">
+    <div class="hud-primary">
+      <p><a id="character-link" href="/character">Status</a></p>
       <div id="attributes"></div>
     </div>
     <div id="hud-status">
       <p id="gold"></p>
-      <p id="tick"></p>
-      <p id="phase"></p>
     </div>
   </div>
   <div class="hud" id="room-ecology-toolbar"></div>
@@ -76,11 +82,48 @@
       return /\b(scrounges|wards|power strikes|doses|patches up|surveys|pins|marks|blesses)\b/i.test(message);
     }
 
-    function setText(parent, text) {
+    function isSupportSystemMessage(message) {
+      return /\b(wards|patches up|blesses)\b/i.test(message);
+    }
+
+    function isSpeedContestSystemMessage(message) {
+      return /\bdodged\b/i.test(message);
+    }
+
+    function isDeathSystemMessage(message) {
+      return /\bhas died from\b/i.test(message);
+    }
+
+    function setText(parent, text, className = '') {
       const span = document.createElement('span');
       span.textContent = text;
+      if (className) {
+        span.className = className;
+      }
       parent.appendChild(span);
       return span;
+    }
+
+    function appendPlayerMessageText(parent, message) {
+      const text = String(message || '');
+      const actionResultPattern = /\([^)]*(?:(?:attacked|landed a critical hit on)[^)]* for \d+ damage!?|dodged[^)]*)[^)]*\)/gi;
+      let index = 0;
+      let match = actionResultPattern.exec(text);
+      setText(parent, ': ');
+
+      while (match) {
+        if (match.index > index) {
+          setText(parent, text.slice(index, match.index));
+        }
+        const resultClass = /\bdodged\b/i.test(match[0]) ? 'speed-result' : 'attack-result';
+        setText(parent, match[0], resultClass);
+        index = match.index + match[0].length;
+        match = actionResultPattern.exec(text);
+      }
+
+      if (index < text.length) {
+        setText(parent, text.slice(index));
+      }
     }
 
     function redirectIfDead(response) {
@@ -113,6 +156,15 @@
         if (isSkillSystemMessage(msg.message)) {
           messageElement.classList.add('skill-message');
         }
+        if (isSupportSystemMessage(msg.message)) {
+          messageElement.classList.add('support-message');
+        }
+        if (isSpeedContestSystemMessage(msg.message)) {
+          messageElement.classList.add('speed-message');
+        }
+        if (isDeathSystemMessage(msg.message)) {
+          messageElement.classList.add('death-message');
+        }
         messageElement.textContent = `${msg.timestamp} - system: ${msg.message}`;
         return messageElement;
       }
@@ -131,7 +183,7 @@
       activeStatuses.forEach(status => {
         setText(messageElement, ` [${status}]`);
       });
-      setText(messageElement, `: ${msg.message}`);
+      appendPlayerMessageText(messageElement, msg.message);
       return messageElement;
     }
 
@@ -172,8 +224,9 @@
           const effective = data.effectiveStats || data;
           currentSkill = data.skill || null;
           currentJob = data.job || 'Novice';
+          document.getElementById('character-link').textContent = data.displayName || data.username || 'Status';
           attributesDiv.innerHTML = `
-            <p>Job: ${data.job || 'Novice'} • Level ${data.level}</p>
+            <p>${data.job || 'Novice'} ~ Level ${data.level}</p>
             <p>Health: ${effective.health}/${effective.maxHealth}</p>
             <p>Stamina: ${effective.stamina}/${effective.maxStamina}</p>
             <p>Speed: ${effective.speed}</p>
@@ -187,6 +240,9 @@
             const option = document.createElement('option');
             option.value = currentSkill.id;
             option.textContent = currentSkill.label;
+            const skillTooltip = getSkillTooltip(currentSkill);
+            option.title = skillTooltip;
+            skillSelect.title = skillTooltip;
             skillSelect.appendChild(option);
           }
           const jobSelect = document.getElementById('job-select');
@@ -196,6 +252,16 @@
             });
           }
         });
+    }
+
+    function getSkillTooltip(skill) {
+      if (!skill) {
+        return 'Skill details unavailable.';
+      }
+
+      const lines = [`${skill.label}: ${skill.description || 'No description available.'}`];
+      (skill.effects || []).forEach(effect => lines.push(`- ${effect}`));
+      return lines.join('\n');
     }
 
     function loadTick() {

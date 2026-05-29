@@ -15,7 +15,10 @@ function createElement(id) {
     options: [],
     children: [],
     classList: {
-      add() {}
+      values: [],
+      add(className) {
+        this.values.push(className);
+      }
     },
     appendChild(child) {
       this.children.push(child);
@@ -38,6 +41,7 @@ function createElement(id) {
     set(value) {
       this._innerHTML = value;
       this.children = [];
+      this.textContent = '';
       if (id === 'skill-id' || id === 'job-select') {
         this.options = [];
       }
@@ -54,6 +58,7 @@ function loadChatPage(overrides = {}) {
   const posts = [];
   const alerts = [];
   const userAttributes = overrides.userAttributes || {
+    username: 'test_player',
     job: 'Novice',
     level: 1,
     gold: 0,
@@ -194,6 +199,7 @@ test('chat header combines job and level and moves gold into the right-side stat
   const page = loadChatPage({
     userAttributes: {
       job: 'Chemist',
+      username: 'chemist',
       level: 3,
       gold: 2,
       effectiveStats: {
@@ -205,17 +211,69 @@ test('chat header combines job and level and moves gold into the right-side stat
         strength: 4,
         intelligence: 5
       },
-      skill: { id: 'dose', label: 'Dose' }
+      skill: {
+        id: 'dose',
+        label: 'Dose',
+        description: 'Patch someone up by day, poison them by night.',
+        effects: ['Day: heals the target.', 'Night: poisons the target.']
+      }
     }
   });
 
   await page.context.loadUserAttributes();
   await flushPromises();
 
-  assert.match(page.getElement('attributes').innerHTML, /Job: Chemist • Level 3/);
+  assert.equal(page.getElement('character-link').textContent, 'chemist');
+  assert.match(page.getElement('attributes').innerHTML, /Chemist ~ Level 3/);
+  assert.doesNotMatch(page.getElement('attributes').innerHTML, /Job:/);
   assert.doesNotMatch(page.getElement('attributes').innerHTML, /<p>Level:/);
   assert.doesNotMatch(page.getElement('attributes').innerHTML, /<p>Gold:/);
   assert.equal(page.getElement('gold').textContent, 'Gold: 2');
+  assert.equal(
+    page.getElement('skill-id').title,
+    'Dose: Patch someone up by day, poison them by night.\n- Day: heals the target.\n- Night: poisons the target.'
+  );
+});
+
+test('chat renderer colors support, death, attack, and speed result messages', () => {
+  const page = loadChatPage();
+
+  const supportMessage = page.context.renderMessage({
+    username: 'System',
+    timestamp: '2026-05-28 17:03:50',
+    message: 'angel patches up angel for 3 health.'
+  });
+  const attackMessage = page.context.renderMessage({
+    username: 'angel',
+    timestamp: '2026-05-28 17:04:10',
+    message: 'oops i mean stabbing myself now @angel (angel attacked angel for 2 damage)'
+  });
+  const dodgeMessage = page.context.renderMessage({
+    username: 'ed',
+    timestamp: '2026-05-29 15:25:19',
+    message: '@ed (ed dodged ed\'s attack)'
+  });
+  const deathMessage = page.context.renderMessage({
+    username: 'System',
+    timestamp: '2026-05-29 15:25:21',
+    message: 'ed has died from attack by ed.'
+  });
+
+  assert.ok(supportMessage.classList.values.includes('system-message'));
+  assert.ok(supportMessage.classList.values.includes('skill-message'));
+  assert.ok(supportMessage.classList.values.includes('support-message'));
+  assert.ok(deathMessage.classList.values.includes('system-message'));
+  assert.ok(deathMessage.classList.values.includes('death-message'));
+
+  const attackResult = attackMessage.children.find(child => child.className === 'attack-result');
+  assert.ok(attackResult);
+  assert.equal(attackResult.textContent, '(angel attacked angel for 2 damage)');
+  assert.equal(attackMessage.textContent, '2026-05-28 17:04:10 - angel: oops i mean stabbing myself now @angel (angel attacked angel for 2 damage)');
+
+  const speedResult = dodgeMessage.children.find(child => child.className === 'speed-result');
+  assert.ok(speedResult);
+  assert.equal(speedResult.textContent, '(ed dodged ed\'s attack)');
+  assert.equal(dodgeMessage.textContent, '2026-05-29 15:25:19 - ed: @ed (ed dodged ed\'s attack)');
 });
 
 test('room prose is appended to reset without repeating the room coordinate prefix', async () => {

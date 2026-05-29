@@ -19,7 +19,11 @@ const JOBS = {
     skill: {
       id: 'scrounge',
       label: 'Scrounge',
-      description: 'Search the room for a little gold.'
+      description: 'Search the room for loose gold.',
+      effects: [
+        'Gains 1 + half your Intelligence in gold, rounded down with a minimum bonus of 1.',
+        'Does not require a target.'
+      ]
     }
   },
   Paladin: {
@@ -29,7 +33,12 @@ const JOBS = {
     skill: {
       id: 'ward',
       label: 'Ward',
-      description: 'Protect yourself or another player for a few ticks.'
+      description: 'Protect yourself or another player from incoming harm.',
+      effects: [
+        'Adds Ward for 5 ticks.',
+        'The next attack or Power Strike against the warded target is reduced by 2 damage and consumes the ward.',
+        'Targets yourself if no target is selected.'
+      ]
     }
   },
   Fighter: {
@@ -39,7 +48,12 @@ const JOBS = {
     skill: {
       id: 'power_strike',
       label: 'Power Strike',
-      description: 'Hit a target harder than a normal attack.'
+      description: 'Hit a target harder than a normal attack.',
+      effects: [
+        'Uses a speed contest, so faster targets can dodge it.',
+        'Deals 1 + half your Strength in damage, rounded down.',
+        'Consumes Mark for +2 damage and consumes Ward for -2 damage.'
+      ]
     }
   },
   Chemist: {
@@ -49,7 +63,12 @@ const JOBS = {
     skill: {
       id: 'dose',
       label: 'Dose',
-      description: 'Heal by day, poison by night.'
+      description: 'Patch someone up by day, poison them by night.',
+      effects: [
+        'Day: heals the target for 2 + one quarter of your Intelligence, rounded down.',
+        'Night: uses a speed contest, then poisons the target for 5 ticks.',
+        'Poison deals 1 damage each tick after it starts.'
+      ]
     }
   },
   Dungeoneer: {
@@ -59,7 +78,12 @@ const JOBS = {
     skill: {
       id: 'survey',
       label: 'Survey',
-      description: 'Study the room, leave a trace, and gain a small reward.'
+      description: 'Study the room and leave a visible survey trace.',
+      effects: [
+        'Leaves a survey trace in the room for 20 ticks.',
+        'Gains 1 gold.',
+        'Does not require a target.'
+      ]
     }
   },
   Mage: {
@@ -69,7 +93,12 @@ const JOBS = {
     skill: {
       id: 'arcane_pin',
       label: 'Arcane Pin',
-      description: 'Pin a target with a stamina-draining spell.'
+      description: 'Pin a target with a stamina-draining spell.',
+      effects: [
+        'Uses a speed contest, so faster targets can dodge it.',
+        'Adds Arcane Pin for 4 ticks.',
+        'Arcane Pin drains 2 stamina each tick after it starts.'
+      ]
     }
   },
   Assassin: {
@@ -79,7 +108,12 @@ const JOBS = {
     skill: {
       id: 'mark',
       label: 'Mark',
-      description: 'Make a target vulnerable to the next attack.'
+      description: 'Make a target vulnerable to the next strong hit.',
+      effects: [
+        'Uses a speed contest, so faster targets can dodge it.',
+        'Adds Mark for 6 ticks.',
+        'The next attack or Power Strike against the marked target gains +2 damage and consumes the mark.'
+      ]
     }
   },
   Cleric: {
@@ -89,7 +123,12 @@ const JOBS = {
     skill: {
       id: 'bless',
       label: 'Bless',
-      description: 'Heal over several ticks and clear one harmful effect.'
+      description: 'Bless a target with healing and protection from harmful effects.',
+      effects: [
+        'Clears one harmful effect from the target if one is present.',
+        'Adds Bless for 5 ticks.',
+        'Bless heals 1 health each tick after it starts.'
+      ]
     }
   }
 };

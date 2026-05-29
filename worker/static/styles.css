@@ -43,13 +43,19 @@ a, button, input, select {
   padding: 0 .5em;
 }
 
+.global-hud,
 .top-hud {
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid #d9d9d9;
 }
 
+.global-hud {
+  padding: 1em .5em;
+}
+
 .hud-primary,
+#global-status,
 #hud-status {
   display: flex;
   flex-direction: row;
@@ -57,11 +63,13 @@ a, button, input, select {
   gap: 1em;
 }
 
+#global-status,
 #hud-status {
   margin-left: auto;
 }
 
 .hud p,
+#global-status > p,
 #hud-status > p {
   margin: 0;
 }
@@ -70,7 +78,7 @@ a, button, input, select {
   flex-wrap: wrap;
   gap: .4em 1em;
   border-bottom: 1px solid #d9d9d9;
-  padding: .5em;
+  padding: 1em .5em;
 }
 
 #room-ecology-toolbar > p,
@@ -103,6 +111,73 @@ a, button, input, select {
   flex-direction: row;
   gap: 1em;
   padding: 1em 0;
+}
+
+#attributes.character-sheet {
+  display: block;
+  max-width: 36rem;
+}
+
+.character-section {
+  margin: 0 0 1rem;
+}
+
+.character-section h2 {
+  font-size: 1rem;
+  font-weight: 700;
+  margin: 0 0 .35rem;
+}
+
+.character-section ul,
+.character-list {
+  margin: 0;
+  padding-left: 1.25rem;
+}
+
+.character-list {
+  padding-left: 0;
+}
+
+.character-row {
+  display: grid;
+  grid-template-columns: 9rem minmax(0, 1fr);
+  gap: .75rem;
+}
+
+.character-row dt {
+  font-weight: 700;
+}
+
+.character-row dd {
+  margin: 0;
+}
+
+@media (max-width: 600px) {
+  .top-hud,
+  .global-hud,
+  .hud-primary,
+  #global-status,
+  #hud-status,
+  #attributes {
+    flex-wrap: wrap;
+  }
+
+  .global-hud,
+  .top-hud {
+    align-items: flex-start;
+  }
+
+  .hud-primary,
+  #global-status,
+  #hud-status {
+    gap: .35em .75em;
+  }
+
+  #global-status,
+  #hud-status {
+    flex-basis: 100%;
+    margin-left: 0;
+  }
 }
 
 .chat-page {
@@ -139,6 +214,7 @@ a, button, input, select {
 
 .chat-input-toolbar {
   border-top: 1px solid #d9d9d9;
+  flex-wrap: wrap;
 }
 
 #job-controls {
@@ -151,6 +227,23 @@ a, button, input, select {
 
 .skill-message {
   color: #6f4aa5;
+}
+
+.support-message {
+  color: #008000;
+}
+
+.attack-result {
+  color: #b00020;
+}
+
+.speed-message,
+.speed-result {
+  color: #6f4aa5;
+}
+
+.death-message {
+  color: #b00020;
 }
 
 .message-username {

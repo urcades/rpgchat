@@ -44,6 +44,7 @@ const SPEED_HIT_STEP = 0.05;
 const SPEED_HIT_MIN_CHANCE = 0.25;
 const SPEED_HIT_MAX_CHANCE = 0.95;
 const HARMFUL_EFFECTS = new Set(['poison', 'arcane_pin', 'marked']);
+const AMBIENT_HOSTILE_RESPAWN_INTERVAL = 6;
 const PASSIVE_EFFECT_TYPES = new Set([
   'pub',
   'inn',
@@ -280,7 +281,7 @@ async function getRoomPresence(db, row, col, worldDay) {
      WHERE rp.roomRow = ?
        AND rp.roomCol = ?
        AND rp.worldDay = ?
-       AND rp.lastSeenAt >= datetime('now', ?)
+       AND (u.isNpc = 1 OR rp.lastSeenAt >= datetime('now', ?))
        AND rp.username != 'System'
      ORDER BY lower(rp.username) ASC`,
     [row, col, worldDay, `-${PRESENCE_MAX_AGE_SECONDS} seconds`]
@@ -363,7 +364,8 @@ function npcTemplateFor(event, suffix) {
     strength: 4,
     intelligence: 1,
     rewardExperience: event.rewardExperience,
-    rewardGold: event.rewardGold
+    rewardGold: event.rewardGold,
+    respawnInterval: AMBIENT_HOSTILE_RESPAWN_INTERVAL
   };
 }
 
@@ -413,9 +415,16 @@ export async function createNpcForEvent(db, npc) {
   );
   await dbRun(
     db,
-    `INSERT OR IGNORE INTO worldEventEntities
+    `INSERT INTO worldEventEntities
       (eventId, username, entityKind, maxPopulation, respawnInterval, rewardExperience, rewardGold)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(username) DO UPDATE SET
+      eventId = excluded.eventId,
+      entityKind = excluded.entityKind,
+      maxPopulation = excluded.maxPopulation,
+      respawnInterval = excluded.respawnInterval,
+      rewardExperience = excluded.rewardExperience,
+      rewardGold = excluded.rewardGold`,
     [
       npc.worldEventId,
       npc.username,
@@ -429,23 +438,63 @@ export async function createNpcForEvent(db, npc) {
   return npc;
 }
 
-async function spawnEventNpcs(db, event) {
+async function canSpawnEventNpc(db, npc, currentTick) {
+  const liveNpc = await dbFirst(db, 'SELECT username FROM users WHERE username = ? AND isNpc = 1 AND health > 0', [npc.username]);
+  if (liveNpc) {
+    return false;
+  }
+
+  const entity = await dbFirst(db, 'SELECT lastDefeatedTick, respawnInterval FROM worldEventEntities WHERE username = ?', [npc.username]);
+  if (!entity || entity.lastDefeatedTick === null || entity.lastDefeatedTick === undefined) {
+    return true;
+  }
+
+  const respawnInterval = npc.respawnInterval ?? entity.respawnInterval ?? 20;
+  return currentTick - entity.lastDefeatedTick >= respawnInterval;
+}
+
+async function spawnEventNpcs(db, event, currentTick) {
   const templates = npcTemplatesForEvent(event);
   for (const template of templates) {
-    await createNpcForEvent(db, {
+    const npc = {
       ...template,
       worldEventId: event.id,
       worldDay: event.worldDay,
       row: event.roomRow,
       col: event.roomCol
-    });
+    };
+    if (await canSpawnEventNpc(db, npc, currentTick)) {
+      await createNpcForEvent(db, npc);
+    }
+  }
+}
+
+async function expireStaleHostileEvents(db, worldDay, activeIds) {
+  const activeIdSet = new Set(activeIds);
+  const existingHostiles = await dbAll(
+    db,
+    `SELECT id
+     FROM worldEvents
+     WHERE worldDay = ?
+       AND status = 'active'
+       AND eventType = 'hostile'`,
+    [worldDay]
+  );
+  const staleEvents = existingHostiles.filter(event => !activeIdSet.has(event.id));
+
+  for (const event of staleEvents) {
+    await dbRun(db, 'DELETE FROM roomPresence WHERE username IN (SELECT username FROM users WHERE isNpc = 1 AND worldEventId = ?)', [event.id]);
+    await dbRun(db, 'DELETE FROM users WHERE isNpc = 1 AND worldEventId = ?', [event.id]);
+    await dbRun(db, 'DELETE FROM worldEventEntities WHERE eventId = ?', [event.id]);
+    await dbRun(db, 'UPDATE worldEvents SET status = ? WHERE id = ?', ['expired', event.id]);
   }
 }
 
 export async function ensureDailyWorldEvents(db, worldDay = getWorldDay(), createdTick = null) {
   const tickValue = createdTick ?? await getCurrentTickValue(db);
+  const generatedEvents = generateDailyWorldEvents(worldDay);
 
-  for (const event of generateDailyWorldEvents(worldDay)) {
+  for (const event of generatedEvents) {
     await dbRun(
       db,
       `INSERT OR IGNORE INTO worldEvents
@@ -467,6 +516,8 @@ export async function ensureDailyWorldEvents(db, worldDay = getWorldDay(), creat
     );
   }
 
+  await expireStaleHostileEvents(db, worldDay, generatedEvents.map(event => event.id));
+
   const events = await dbAll(
     db,
     `SELECT *
@@ -478,7 +529,7 @@ export async function ensureDailyWorldEvents(db, worldDay = getWorldDay(), creat
   );
 
   for (const event of events) {
-    await spawnEventNpcs(db, event);
+    await spawnEventNpcs(db, event, tickValue);
   }
 
   return {
@@ -576,6 +627,14 @@ export async function insertMessage(db, row, col, username, message) {
 
 export async function insertSystemMessage(db, row, col, message) {
   await insertMessage(db, row, col, 'System', message);
+}
+
+async function emitSystemMessage(db, row, col, message, deferredSystemMessages = null) {
+  if (deferredSystemMessages) {
+    deferredSystemMessages.push(message);
+    return;
+  }
+  await insertSystemMessage(db, row, col, message);
 }
 
 export async function createTrace(db, trace) {
@@ -700,7 +759,7 @@ async function upsertCooldown(db, username, row, col, effectType, currentTick, w
   );
 }
 
-export async function moveUserToCemetery(db, username, cause, row, col) {
+export async function moveUserToCemetery(db, username, cause, row, col, options = {}) {
   const user = await dbFirst(db, 'SELECT username, password, level, gold, job FROM users WHERE username = ?', [username]);
   if (!user) {
     return false;
@@ -716,8 +775,55 @@ export async function moveUserToCemetery(db, username, cause, row, col) {
   await dbRun(db, 'DELETE FROM users WHERE username = ?', [username]);
   await dbRun(db, 'DELETE FROM roomPresence WHERE username = ?', [username]);
   await dbRun(db, 'DELETE FROM statusEffects WHERE username = ?', [username]);
-  await insertSystemMessage(db, row, col, `${username} has died from ${cause}.`);
+  await emitSystemMessage(db, row, col, `${username} has died from ${cause}.`, options.deferredSystemMessages);
   return true;
+}
+
+function getKillerFromCause(cause) {
+  const match = String(cause || '').match(/\bby\s+(.+)$/);
+  return match ? match[1].trim() : null;
+}
+
+async function recordKill(db, {
+  killer,
+  defeatedUsername,
+  defeatedName,
+  defeatedKind,
+  defeatedLevel,
+  experienceGained = 0,
+  goldGained = 0,
+  row,
+  col,
+  currentTick
+}) {
+  if (!killer || !defeatedUsername || killer === defeatedUsername) {
+    return;
+  }
+
+  const killerUser = await dbFirst(db, 'SELECT username, isNpc FROM users WHERE username = ?', [killer]);
+  if (!killerUser || killerUser.isNpc) {
+    return;
+  }
+
+  await dbRun(
+    db,
+    `INSERT INTO killHistory
+      (killerUsername, defeatedUsername, defeatedName, defeatedKind, defeatedLevel, experienceGained, goldGained, roomRow, roomCol, worldDay, tick)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      killer,
+      defeatedUsername,
+      defeatedName || defeatedUsername,
+      defeatedKind || 'player',
+      defeatedLevel || 0,
+      experienceGained || 0,
+      goldGained || 0,
+      row,
+      col,
+      getWorldDay(),
+      currentTick ?? null
+    ]
+  );
 }
 
 async function moveUserToCemeteryFromRoomEffect(db, user, row, col, effectType, currentTick, worldDay) {
@@ -933,7 +1039,7 @@ export async function resolveExpiredGamblingRounds(db, currentTick) {
   }
 }
 
-async function awardEventVictory(db, event, row, col, currentTick) {
+async function awardEventVictory(db, event, row, col, currentTick, options = {}) {
   const presentPlayers = await dbAll(
     db,
     `SELECT rp.username
@@ -972,28 +1078,46 @@ async function awardEventVictory(db, event, row, col, currentTick) {
     'UPDATE worldEvents SET status = ?, completedTick = ? WHERE id = ?',
     ['completed', currentTick, event.id]
   );
-  await insertSystemMessage(db, row, col, `${event.title} has been cleared.`);
+  await emitSystemMessage(db, row, col, `${event.title} has been cleared.`, options.deferredSystemMessages);
 }
 
-async function defeatNpc(db, npc, { killer, row, col, currentTick }) {
+async function defeatNpc(db, npc, { killer, row, col, currentTick, deferredSystemMessages = null }) {
   const entity = await dbFirst(db, 'SELECT rewardExperience, rewardGold FROM worldEventEntities WHERE username = ?', [npc.username]);
   const event = npc.worldEventId
     ? await dbFirst(db, 'SELECT * FROM worldEvents WHERE id = ?', [npc.worldEventId])
     : null;
+  const eventVictoryExperience = event && (event.eventType === 'lesser' || (event.eventType === 'raid' && npc.npcKind === 'raid_boss'))
+    ? event.rewardExperience || 0
+    : 0;
+  const eventVictoryGold = event && (event.eventType === 'lesser' || (event.eventType === 'raid' && npc.npcKind === 'raid_boss'))
+    ? event.rewardGold || 0
+    : 0;
+  await recordKill(db, {
+    killer,
+    defeatedUsername: npc.username,
+    defeatedName: npc.displayName || npc.username,
+    defeatedKind: npc.npcKind || 'npc',
+    defeatedLevel: npc.level || 0,
+    experienceGained: eventVictoryExperience || (entity ? entity.rewardExperience : 0),
+    goldGained: eventVictoryGold || (entity ? entity.rewardGold : 0),
+    row,
+    col,
+    currentTick
+  });
 
   await dbRun(db, 'DELETE FROM users WHERE username = ? AND isNpc = 1', [npc.username]);
   await dbRun(db, 'DELETE FROM roomPresence WHERE username = ?', [npc.username]);
   await dbRun(db, 'DELETE FROM statusEffects WHERE username = ?', [npc.username]);
   await dbRun(db, 'UPDATE worldEventEntities SET lastDefeatedTick = ? WHERE username = ?', [currentTick, npc.username]);
-  await insertSystemMessage(db, row, col, `${npc.displayName || npc.username} is defeated by ${killer}.`);
+  await emitSystemMessage(db, row, col, `${npc.displayName || npc.username} is defeated by ${killer}.`, deferredSystemMessages);
 
   if (event && ['raid', 'lesser'].includes(event.eventType) && npc.npcKind === 'raid_boss') {
-    await awardEventVictory(db, event, row, col, currentTick);
+    await awardEventVictory(db, event, row, col, currentTick, { deferredSystemMessages });
     return;
   }
 
   if (event && event.eventType === 'lesser') {
-    await awardEventVictory(db, event, row, col, currentTick);
+    await awardEventVictory(db, event, row, col, currentTick, { deferredSystemMessages });
     return;
   }
 
@@ -1013,6 +1137,16 @@ async function damageUser(db, username, amount, cause, row, col) {
       await defeatNpc(db, target, { killer: cause.replace(/.* by /, ''), row, col, currentTick: await getCurrentTickValue(db) });
       return { killed: true, remainingHealth: 0 };
     }
+    await recordKill(db, {
+      killer: getKillerFromCause(cause),
+      defeatedUsername: target.username,
+      defeatedName: target.username,
+      defeatedKind: 'player',
+      defeatedLevel: target.level || 0,
+      row,
+      col,
+      currentTick: await getCurrentTickValue(db)
+    });
     await moveUserToCemetery(db, username, cause, row, col);
     return { killed: true, remainingHealth: 0 };
   }
@@ -1117,6 +1251,7 @@ export async function advanceGlobalTick(db) {
   await processRoomEffects(db, tickValue);
   await processStatusEffects(db, tickValue);
   await resolveExpiredGamblingRounds(db, tickValue);
+  await ensureDailyWorldEvents(db, getWorldDay(), tickValue);
 
   return {
     tick: tickValue,
@@ -1126,8 +1261,6 @@ export async function advanceGlobalTick(db) {
 
 export async function runScheduledWorldPulse(db) {
   const tick = await advanceGlobalTick(db);
-  const worldDay = getWorldDay();
-  await ensureDailyWorldEvents(db, worldDay, tick.tick);
 
   return {
     tick,
@@ -1433,7 +1566,7 @@ export async function validateAttackTargets(db, message) {
   return targets;
 }
 
-export async function handleAttack(db, username, message, row, col) {
+export async function handleAttack(db, username, message, row, col, options = {}) {
   const currentTick = await getCurrentTickValue(db);
   const createdTick = currentTick + 1;
   const worldDay = getWorldDay();
@@ -1481,9 +1614,27 @@ export async function handleAttack(db, username, message, row, col) {
     });
 
     if (wasKilled && attackedUser.isNpc) {
-      await defeatNpc(db, attackedUser, { killer: username, row, col, currentTick: createdTick });
+      await defeatNpc(db, attackedUser, {
+        killer: username,
+        row,
+        col,
+        currentTick: createdTick,
+        deferredSystemMessages: options.deferredSystemMessages
+      });
     } else if (wasKilled) {
-      await moveUserToCemetery(db, user.username, `attack by ${username}`, row, col);
+      await recordKill(db, {
+        killer: username,
+        defeatedUsername: attackedUser.username,
+        defeatedName: attackedUser.username,
+        defeatedKind: 'player',
+        defeatedLevel: attackedUser.level || 0,
+        row,
+        col,
+        currentTick: createdTick
+      });
+      await moveUserToCemetery(db, user.username, `attack by ${username}`, row, col, {
+        deferredSystemMessages: options.deferredSystemMessages
+      });
     }
 
     await createTrace(db, trace);
@@ -1766,8 +1917,12 @@ export async function handleAttackAction(db, username, row, col, message) {
     staminaCost: 1,
     validate: async () => validateAttackTargets(db, message),
     perform: async () => {
-      const updatedMessage = await handleAttack(db, username, message, row, col);
+      const deferredSystemMessages = [];
+      const updatedMessage = await handleAttack(db, username, message, row, col, { deferredSystemMessages });
       await insertMessage(db, row, col, username, updatedMessage);
+      for (const systemMessage of deferredSystemMessages) {
+        await insertSystemMessage(db, row, col, systemMessage);
+      }
       await awardGoldMaybe(db, username);
       await updateLevel(db, username, row, col);
       return { updatedMessage };

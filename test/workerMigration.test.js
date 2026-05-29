@@ -147,6 +147,7 @@ test('Worker world event migration adds XP, NPC, event, entity, and achievement 
     const worldEvents = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'worldEvents'").first();
     const worldEventEntities = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'worldEventEntities'").first();
     const worldEventAchievements = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'worldEventAchievements'").first();
+    const killHistory = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'killHistory'").first();
 
     assert.ok(columnNames.includes('experience'));
     assert.ok(columnNames.includes('isNpc'));
@@ -156,6 +157,7 @@ test('Worker world event migration adds XP, NPC, event, entity, and achievement 
     assert.equal(worldEvents.name, 'worldEvents');
     assert.equal(worldEventEntities.name, 'worldEventEntities');
     assert.equal(worldEventAchievements.name, 'worldEventAchievements');
+    assert.equal(killHistory.name, 'killHistory');
   } finally {
     await db.close();
   }
@@ -187,6 +189,9 @@ test('Scheduled world pulse advances one tick and runs five-minute environmental
 test('Daily world event seeding backfills missing hostile rooms for an existing world day', async () => {
   const db = await createMigratedDb();
   const { ensureDailyWorldEvents } = await import('../worker/game.mjs');
+  const { generateDailyWorldEvents } = require('../utils/worldEvents');
+  const expectedEvents = generateDailyWorldEvents('2026-05-29');
+  const expectedHostiles = expectedEvents.filter(event => event.eventType === 'hostile').length;
 
   try {
     await db.prepare(
@@ -205,8 +210,64 @@ test('Daily world event seeding backfills missing hostile rooms for an existing 
       "SELECT COUNT(*) AS count FROM worldEvents WHERE worldDay = '2026-05-29'"
     ).first();
 
-    assert.equal(hostileCount.count, 28);
-    assert.equal(totalCount.count, 31);
+    assert.equal(hostileCount.count, expectedHostiles);
+    assert.equal(totalCount.count, expectedEvents.length + 1);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Chat ticks respawn cleared ambient hostiles after their respawn interval', async () => {
+  const db = await createMigratedDb();
+  const { ensureDailyWorldEvents, handleAttack, handleChatAction } = await import('../worker/game.mjs');
+  const { getWorldDay } = require('../utils/roomEcology');
+  const worldDay = getWorldDay();
+
+  try {
+    await ensureDailyWorldEvents(db, worldDay, 1);
+    const hostile = await db.prepare(
+      `SELECT we.id, we.roomRow, we.roomCol, u.username AS npcUsername
+       FROM worldEvents we
+       JOIN users u ON u.worldEventId = we.id
+       WHERE we.worldDay = ?
+         AND we.eventType = 'hostile'
+         AND we.status = 'active'
+       ORDER BY we.id ASC
+       LIMIT 1`
+    ).bind(worldDay).first();
+
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
+       VALUES ('fighter', 'pw', 'Fighter', 100, 100, 100, 100, 20, 40, 1)`
+    ).run();
+    await db.prepare(
+      `INSERT INTO roomPresence
+        (username, roomRow, roomCol, lastSeenTick, worldDay)
+       VALUES ('fighter', ?, ?, 1, ?)`
+    ).bind(hostile.roomRow, hostile.roomCol, worldDay).run();
+    await db.prepare('UPDATE users SET health = 1 WHERE username = ?').bind(hostile.npcUsername).run();
+
+    await withMockedRandom([0.1, 0.99], () => handleAttack(db, 'fighter', `@${hostile.npcUsername}`, hostile.roomRow, hostile.roomCol));
+
+    const defeated = await db.prepare('SELECT lastDefeatedTick, respawnInterval FROM worldEventEntities WHERE username = ?')
+      .bind(hostile.npcUsername)
+      .first();
+    await db.prepare('UPDATE tick SET value = ? WHERE id = 1')
+      .bind(defeated.lastDefeatedTick + defeated.respawnInterval - 1)
+      .run();
+
+    await handleChatAction(db, 'fighter', hostile.roomRow, hostile.roomCol, 'keeping watch');
+
+    const respawnedNpc = await db.prepare('SELECT username FROM users WHERE username = ? AND isNpc = 1')
+      .bind(hostile.npcUsername)
+      .first();
+    const respawnedPresence = await db.prepare('SELECT username FROM roomPresence WHERE username = ? AND roomRow = ? AND roomCol = ?')
+      .bind(hostile.npcUsername, hostile.roomRow, hostile.roomCol)
+      .first();
+
+    assert.equal(respawnedNpc.username, hostile.npcUsername);
+    assert.equal(respawnedPresence.username, hostile.npcUsername);
   } finally {
     await db.close();
   }
@@ -241,14 +302,123 @@ test('Raid event completion awards XP, gold, and achievement to present players 
     const achievement = await db.prepare("SELECT achievementType FROM worldEventAchievements WHERE username = 'raider'").first();
     const event = await db.prepare("SELECT status FROM worldEvents WHERE id = ?").bind(raid.id).first();
     const defeatedBoss = await db.prepare("SELECT username FROM users WHERE username = ?").bind(boss.username).first();
+    const kill = await db.prepare("SELECT defeatedName, defeatedKind, defeatedLevel, experienceGained FROM killHistory WHERE killerUsername = 'raider'").first();
 
     assert.equal(event.status, 'completed');
     assert.equal(achievement.achievementType, 'raid_victory');
     assert.equal(defeatedBoss, null);
+    assert.equal(kill.defeatedName, boss.displayName);
+    assert.equal(kill.defeatedKind, 'raid_boss');
+    assert.equal(kill.defeatedLevel, boss.level);
+    assert.equal(kill.experienceGained, raid.rewardExperience);
     assert.ok(player.experience >= raid.rewardExperience);
     assert.ok(player.gold >= raid.rewardGold);
     assert.ok(player.level >= 1);
     assert.ok(player.attributePoints >= 10);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Player and NPC kills are recorded with defeated level and XP gained', async () => {
+  const db = await createMigratedDb();
+  const { handleAttack } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level)
+       VALUES ('fighter', 'pw', 'Fighter', 12, 12, 100, 100, 20, 80, 1, 4)`
+    ).run();
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level)
+       VALUES ('rival', 'pw', 'Novice', 1, 10, 100, 100, 1, 1, 1, 3)`
+    ).run();
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, isNpc, displayName, npcKind)
+       VALUES ('npc_scout', 'pw', 'Novice', 1, 10, 100, 100, 1, 1, 1, 2, 1, 'Ash Scout', 'hostile')`
+    ).run();
+    await db.prepare(
+      `INSERT INTO worldEventEntities
+        (eventId, username, entityKind, rewardExperience, rewardGold)
+       VALUES ('hostile_test', 'npc_scout', 'hostile', 8, 1)`
+    ).run();
+
+    await withMockedRandom([0.1, 0.99], () => handleAttack(db, 'fighter', '@rival', 2, 3));
+    await withMockedRandom([0.1, 0.99], () => handleAttack(db, 'fighter', '@npc_scout', 2, 3));
+
+    const kills = await db.prepare(
+      "SELECT defeatedUsername, defeatedName, defeatedKind, defeatedLevel, experienceGained FROM killHistory WHERE killerUsername = 'fighter' ORDER BY id ASC"
+    ).all();
+
+    assert.deepEqual(kills.results, [
+      {
+        defeatedUsername: 'rival',
+        defeatedName: 'rival',
+        defeatedKind: 'player',
+        defeatedLevel: 3,
+        experienceGained: 0
+      },
+      {
+        defeatedUsername: 'npc_scout',
+        defeatedName: 'Ash Scout',
+        defeatedKind: 'hostile',
+        defeatedLevel: 2,
+        experienceGained: 8
+      }
+    ]);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Killing attack messages are shown before defeat and death system messages', async () => {
+  const db = await createMigratedDb();
+  const { getMessages, handleAttackAction } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level)
+       VALUES ('fighter', 'pw', 'Fighter', 12, 12, 100, 100, 20, 80, 1, 4)`
+    ).run();
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level)
+       VALUES ('rival', 'pw', 'Novice', 1, 10, 100, 100, 1, 1, 1, 3)`
+    ).run();
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, isNpc, displayName, npcKind)
+       VALUES ('npc_scout', 'pw', 'Novice', 1, 10, 100, 100, 1, 1, 1, 2, 1, 'Ash Scout', 'hostile')`
+    ).run();
+    await db.prepare(
+      `INSERT INTO worldEventEntities
+        (eventId, username, entityKind, rewardExperience, rewardGold)
+       VALUES ('hostile_test', 'npc_scout', 'hostile', 8, 1)`
+    ).run();
+
+    await withMockedRandom([0.1, 0.99], () => handleAttackAction(db, 'fighter', 2, 3, '@npc_scout'));
+
+    const messages = await getMessages(db, 2, 3);
+    const finalMessages = messages.slice(-2);
+
+    assert.equal(finalMessages[0].username, 'fighter');
+    assert.match(finalMessages[0].message, /fighter attacked npc_scout for \d+ damage/);
+    assert.equal(finalMessages[1].username, 'System');
+    assert.equal(finalMessages[1].message, 'Ash Scout is defeated by fighter.');
+
+    await withMockedRandom([0.1, 0.99], () => handleAttackAction(db, 'fighter', 2, 3, '@rival'));
+
+    const updatedMessages = await getMessages(db, 2, 3);
+    const finalPlayerDeathMessages = updatedMessages.slice(-2);
+
+    assert.equal(finalPlayerDeathMessages[0].username, 'fighter');
+    assert.match(finalPlayerDeathMessages[0].message, /fighter attacked rival for \d+ damage/);
+    assert.equal(finalPlayerDeathMessages[1].username, 'System');
+    assert.equal(finalPlayerDeathMessages[1].message, 'rival has died from attack by fighter.');
   } finally {
     await db.close();
   }

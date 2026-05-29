@@ -504,6 +504,15 @@ app.get('/user-attributes', async c => {
      ORDER BY earnedTick DESC, id DESC`,
     [auth.user.username]
   );
+  const kills = await dbAll(
+    c.env.DB,
+    `SELECT defeatedUsername, defeatedName, defeatedKind, defeatedLevel, experienceGained, goldGained, roomRow, roomCol, worldDay, tick, createdAt
+     FROM killHistory
+     WHERE killerUsername = ?
+     ORDER BY id DESC
+     LIMIT 50`,
+    [auth.user.username]
+  );
   return c.json({
     ...user,
     job: effective.job,
@@ -519,7 +528,8 @@ app.get('/user-attributes', async c => {
       intelligence: effective.intelligence
     },
     skill: effective.skill,
-    achievements
+    achievements,
+    kills
   });
 });
 
@@ -606,6 +616,7 @@ app.post('/chat/:row/:col', async c => {
     }
     const result = await handleChatAction(c.env.DB, auth.user.username, row, col, message);
     await broadcastRoom(c.env, row, col, { type: 'message', username: auth.user.username, result });
+    await startHostileLoopIfNeeded(c.env, row, col);
     return c.redirect(`/chat/${row}/${col}`);
   } catch (err) {
     return formError(c, err);
@@ -625,6 +636,7 @@ app.post('/attack/:row/:col', async c => {
     const message = String(body.message || '');
     const result = await handleAttackAction(c.env.DB, auth.user.username, row, col, message);
     await broadcastRoom(c.env, row, col, { type: 'attack', username: auth.user.username, result });
+    await startHostileLoopIfNeeded(c.env, row, col);
     return c.redirect(`/chat/${row}/${col}`);
   } catch (err) {
     return formError(c, err);
@@ -653,6 +665,7 @@ app.post('/skill/:row/:col', async c => {
       roomUse.tickValue + 1
     );
     await broadcastRoom(c.env, row, col, { type: 'skill', username: auth.user.username, result });
+    await startHostileLoopIfNeeded(c.env, row, col);
     return c.redirect(`/chat/${row}/${col}`);
   } catch (err) {
     return formError(c, err);
@@ -678,6 +691,7 @@ app.post('/job/:row/:col', async c => {
       roomUse
     );
     await broadcastRoom(c.env, row, col, { type: 'job', username: auth.user.username, result });
+    await startHostileLoopIfNeeded(c.env, row, col);
     return c.redirect(`/chat/${row}/${col}`);
   } catch (err) {
     return formError(c, err);

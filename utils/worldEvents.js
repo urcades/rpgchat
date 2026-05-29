@@ -1,5 +1,7 @@
-const GRID_SIZE = 16;
-const HOSTILE_ROOM_COUNT = 28;
+const {
+  GRID_SIZE,
+  roomIsSafeFromHostiles
+} = require('./roomEcology');
 
 function hashString(value) {
   let hash = 2166136261;
@@ -21,28 +23,25 @@ function seededRandom(seed) {
   };
 }
 
-function nextCoordinate(random, used) {
-  for (let attempt = 0; attempt < GRID_SIZE * GRID_SIZE * 2; attempt += 1) {
-    const row = 1 + Math.floor(random() * GRID_SIZE);
-    const col = 1 + Math.floor(random() * GRID_SIZE);
-    const key = `${row}:${col}`;
-    if (!used.has(key)) {
-      used.add(key);
-      return { row, col };
-    }
-  }
-
+function hostileEligibleCoordinates(worldDay) {
+  const coordinates = [];
   for (let row = 1; row <= GRID_SIZE; row += 1) {
     for (let col = 1; col <= GRID_SIZE; col += 1) {
-      const key = `${row}:${col}`;
-      if (!used.has(key)) {
-        used.add(key);
-        return { row, col };
+      if (!roomIsSafeFromHostiles(row, col, worldDay)) {
+        coordinates.push({ row, col });
       }
     }
   }
+  return coordinates;
+}
 
-  throw new Error('No room coordinates available');
+function shuffledCoordinates(worldDay, random) {
+  const coordinates = hostileEligibleCoordinates(worldDay);
+  for (let index = coordinates.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(random() * (index + 1));
+    [coordinates[index], coordinates[swapIndex]] = [coordinates[swapIndex], coordinates[index]];
+  }
+  return coordinates;
 }
 
 function eventId(worldDay, eventType, row, col) {
@@ -51,9 +50,14 @@ function eventId(worldDay, eventType, row, col) {
 
 function generateDailyWorldEvents(worldDay) {
   const random = seededRandom(hashString(`world-events:${worldDay}`));
-  const used = new Set();
-  const raidRoom = nextCoordinate(random, used);
-  const lesserRoom = nextCoordinate(random, used);
+  const coordinates = shuffledCoordinates(worldDay, random);
+  const raidRoom = coordinates.shift();
+  const lesserRoom = coordinates.shift();
+
+  if (!raidRoom || !lesserRoom) {
+    throw new Error('Not enough hostile-eligible rooms available');
+  }
+
   const events = [
     {
       id: eventId(worldDay, 'raid', raidRoom.row, raidRoom.col),
@@ -77,8 +81,8 @@ function generateDailyWorldEvents(worldDay) {
     }
   ];
 
-  for (let index = 0; index < HOSTILE_ROOM_COUNT; index += 1) {
-    const room = nextCoordinate(random, used);
+  for (let index = 0; index < coordinates.length; index += 1) {
+    const room = coordinates[index];
     events.push({
       id: eventId(worldDay, `hostile_${index + 1}`, room.row, room.col),
       eventType: 'hostile',

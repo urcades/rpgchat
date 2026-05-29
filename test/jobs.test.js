@@ -27,6 +27,9 @@ test('defines the eight starting jobs with one active skill each', () => {
     assert.equal(typeof skill.id, 'string');
     assert.equal(typeof skill.label, 'string');
     assert.equal(typeof skill.description, 'string');
+    assert.ok(Array.isArray(skill.effects));
+    assert.ok(skill.effects.length > 0);
+    skill.effects.forEach(effect => assert.equal(typeof effect, 'string'));
   }
 });
 

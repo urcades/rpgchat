@@ -8,9 +8,44 @@
   <main class="page">
     <p>Character Information</p>
     <p><a href="#" onclick="history.back(); return false;">Back to chat</a></p>
-    <div id="attributes"></div>
+    <div id="attributes" class="character-sheet"></div>
   </main>
   <script>
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, character => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      }[character]));
+    }
+
+    function signed(value) {
+      const number = Number(value || 0);
+      return `${number >= 0 ? '+' : ''}${number}`;
+    }
+
+    function renderRows(rows) {
+      return `
+        <dl class="character-list">
+          ${rows.map(([label, value]) => `
+            <div class="character-row">
+              <dt>${escapeHtml(label)}</dt>
+              <dd>${escapeHtml(value)}</dd>
+            </div>
+          `).join('')}
+        </dl>
+      `;
+    }
+
+    function renderSimpleList(items, emptyText) {
+      if (!items.length) {
+        return `<p>${escapeHtml(emptyText)}</p>`;
+      }
+      return `<ul>${items.map(item => `<li>${item}</li>`).join('')}</ul>`;
+    }
+
     fetch('/user-attributes')
       .then(response => response.json())
       .then(data => {
@@ -19,21 +54,75 @@
         const bonuses = data.jobBonuses || {};
         const skill = data.skill || {};
         const achievements = data.achievements || [];
+        const kills = data.kills || [];
+        const overviewRows = [
+          ['Job', data.job || 'Novice'],
+          ['Skill', skill.label || 'Scrounge'],
+          ['Level', data.level ?? 0],
+          ['Experience', data.experience || 0],
+          ['Attribute Points', data.attributePoints || 0],
+          ['Gold', data.gold !== undefined ? data.gold : 0]
+        ];
+        const currentRows = [
+          ['Health', `${effective.health ?? 0}/${effective.maxHealth ?? 0}`],
+          ['Stamina', `${effective.stamina ?? 0}/${effective.maxStamina ?? 0}`],
+          ['Speed', effective.speed ?? 0],
+          ['Strength', effective.strength ?? 0],
+          ['Intelligence', effective.intelligence ?? 0]
+        ];
+        const baseItems = [
+          `HP ${escapeHtml(base.maxHealth ?? 0)}`,
+          `ST ${escapeHtml(base.maxStamina ?? 0)}`,
+          `SPD ${escapeHtml(base.speed ?? 0)}`,
+          `STR ${escapeHtml(base.strength ?? 0)}`,
+          `INT ${escapeHtml(base.intelligence ?? 0)}`
+        ];
+        const bonusItems = [
+          `HP ${escapeHtml(signed(bonuses.maxHealth))}`,
+          `ST ${escapeHtml(signed(bonuses.maxStamina))}`,
+          `SPD ${escapeHtml(signed(bonuses.speed))}`,
+          `STR ${escapeHtml(signed(bonuses.strength))}`,
+          `INT ${escapeHtml(signed(bonuses.intelligence))}`
+        ];
+        const achievementItems = achievements.map(achievement => escapeHtml(achievement.achievementType));
+        const killItems = kills.map(kill => {
+          const name = escapeHtml(kill.defeatedName || kill.defeatedUsername || 'Unknown');
+          const kind = escapeHtml(kill.defeatedKind || 'entity');
+          const level = escapeHtml(kill.defeatedLevel ?? 0);
+          const xp = escapeHtml(kill.experienceGained ?? 0);
+          return `${name} (${kind}) - Level ${level}, ${xp} XP gained`;
+        });
+        const skillEffects = (skill.effects || []).map(effect => escapeHtml(effect));
         document.getElementById('attributes').innerHTML = `
-          <p>Job: ${data.job || 'Novice'}</p>
-          <p>Skill: ${skill.label || 'Scrounge'}</p>
-          <p>Level: ${data.level}</p>
-          <p>Experience: ${data.experience || 0}</p>
-          <p>Attribute Points: ${data.attributePoints || 0}</p>
-          <p>Gold: ${data.gold !== undefined ? data.gold : 0}</p>
-          <p>Health: ${effective.health ?? 0}/${effective.maxHealth ?? 0}</p>
-          <p>Stamina: ${effective.stamina ?? 0}/${effective.maxStamina ?? 0}</p>
-          <p>Speed: ${effective.speed ?? 0}</p>
-          <p>Strength: ${effective.strength ?? 0}</p>
-          <p>Intelligence: ${effective.intelligence ?? 0}</p>
-          <p>Base: HP ${base.maxHealth ?? 0}, ST ${base.maxStamina ?? 0}, SPD ${base.speed ?? 0}, STR ${base.strength ?? 0}, INT ${base.intelligence ?? 0}</p>
-          <p>Job Bonus: HP +${bonuses.maxHealth || 0}, ST +${bonuses.maxStamina || 0}, SPD +${bonuses.speed || 0}, STR +${bonuses.strength || 0}, INT +${bonuses.intelligence || 0}</p>
-          <p>Achievements: ${achievements.length > 0 ? achievements.map(achievement => achievement.achievementType).join(', ') : 'none'}</p>
+          <section class="character-section">
+            <h2>Overview</h2>
+            ${renderRows(overviewRows)}
+          </section>
+          <section class="character-section">
+            <h2>Skill</h2>
+            <p><strong>${escapeHtml(skill.label || 'Scrounge')}:</strong> ${escapeHtml(skill.description || 'No description available.')}</p>
+            ${renderSimpleList(skillEffects, 'No skill effects listed.')}
+          </section>
+          <section class="character-section">
+            <h2>Current Stats</h2>
+            ${renderRows(currentRows)}
+          </section>
+          <section class="character-section">
+            <h2>Base Stats</h2>
+            ${renderSimpleList(baseItems, 'No base stats available.')}
+          </section>
+          <section class="character-section">
+            <h2>Job Bonus</h2>
+            ${renderSimpleList(bonusItems, 'No job bonuses available.')}
+          </section>
+          <section class="character-section">
+            <h2>Achievements</h2>
+            ${renderSimpleList(achievementItems, 'No achievements yet.')}
+          </section>
+          <section class="character-section">
+            <h2>Kills</h2>
+            ${renderSimpleList(killItems, 'No kills recorded yet.')}
+          </section>
         `;
       });
   </script>

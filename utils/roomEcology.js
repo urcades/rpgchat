@@ -140,6 +140,7 @@ const SHOP_ITEM_CATALOG = [
 const PASSIVE_EFFECT_INTERVAL = 5;
 
 const TRACE_ORDER = ['blood', 'gore', 'body', 'survey'];
+const HOSTILE_SAFE_FEATURE_IDS = new Set(['safe', 'shop', 'pub', 'inn', 'guild', 'gambling_den']);
 
 function getWorldDay(date = new Date()) {
   return date.toISOString().slice(0, 10);
@@ -227,6 +228,11 @@ function generateRoomFeatures(row, col, worldDay = getWorldDay()) {
   }
 
   return features;
+}
+
+function roomIsSafeFromHostiles(row, col, worldDay = getWorldDay()) {
+  return generateRoomFeatures(row, col, worldDay)
+    .some(feature => HOSTILE_SAFE_FEATURE_IDS.has(feature.id));
 }
 
 function getDayNumber(worldDay) {
@@ -561,6 +567,7 @@ module.exports = {
   getNextResetAt,
   validateRoomCoordinates,
   generateRoomFeatures,
+  roomIsSafeFromHostiles,
   generateShopStock,
   calculateInnFee,
   getRoomEffectPayload,
