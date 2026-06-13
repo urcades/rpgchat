@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const sqlite3 = require('sqlite3').verbose();
+const { getWorldDay, generateRoomFeatures } = require('../utils/roomEcology');
 
 function createSqliteD1() {
   const raw = new sqlite3.Database(':memory:');
@@ -84,6 +85,24 @@ async function withMockedRandom(values, callback) {
   } finally {
     Math.random = originalRandom;
   }
+}
+
+function findCalmRoom(worldDay) {
+  for (let row = 1; row <= 16; row += 1) {
+    for (let col = 1; col <= 16; col += 1) {
+      const features = generateRoomFeatures(row, col, worldDay);
+      // poison_marsh / moon_room can kill the 1-HP victim during the tick;
+      // echo_chamber consumes a Math.random() in processEchoChamber
+      // (worker/game.mjs, `Math.random() >= 0.35`) BEFORE the speed contest,
+      // desynchronizing withMockedRandom's value sequence.
+      const hazardous = features.some(feature =>
+        ['poison_marsh', 'moon_room', 'echo_chamber'].includes(feature.effect?.type));
+      if (!hazardous) {
+        return { row, col };
+      }
+    }
+  }
+  throw new Error('No calm room found for ' + worldDay);
 }
 
 test('Speed hit chance uses a clamped contested curve', async () => {
@@ -432,7 +451,7 @@ test('Raid event completion awards XP, gold, and achievement to present players 
        VALUES ('raider', 'pw', 'Novice', 20, 20, 100, 100, 20, 80, 1)`
     ).run();
 
-    const { raid } = await ensureDailyWorldEvents(db, '2026-05-29', 1);
+    const { raid } = await ensureDailyWorldEvents(db, getWorldDay(), 1);
     await updatePresence(db, 'raider', raid.roomRow, raid.roomCol);
     const before = await getRoomEcology(db, 'raider', raid.roomRow, raid.roomCol);
     const boss = before.presence.find(entity => entity.npcKind === 'raid_boss');
@@ -581,14 +600,15 @@ test('Hostile NPC room action can kill a present player through the normal cemet
         (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
        VALUES ('victim', 'pw', 'Novice', 1, 10, 100, 100, 1, 1, 1)`
     ).run();
-    await updatePresence(db, 'victim', 1, 1);
+    const calm = findCalmRoom(getWorldDay());
+    await updatePresence(db, 'victim', calm.row, calm.col);
     await createNpcForEvent(db, {
       username: 'raid_brute_test',
       displayName: 'Raid Brute',
       npcKind: 'raid_add',
       worldEventId: 'test-event',
-      row: 1,
-      col: 1,
+      row: calm.row,
+      col: calm.col,
       health: 10,
       stamina: 100,
       speed: 20,
@@ -596,7 +616,7 @@ test('Hostile NPC room action can kill a present player through the normal cemet
       intelligence: 1
     });
 
-    await withMockedRandom([0.1, 0.99], () => runHostileRoomAction(db, 1, 1));
+    await withMockedRandom([0.1, 0.99], () => runHostileRoomAction(db, calm.row, calm.col));
 
     const livePlayer = await db.prepare("SELECT username FROM users WHERE username = 'victim'").first();
     const grave = await db.prepare("SELECT username, cause FROM cemetery WHERE username = 'victim'").first();
