@@ -39,9 +39,11 @@ const { generateDailyWorldEvents } = worldEventsModule;
 
 const {
   HUMANOID_PLAN,
+  MODIFIER_KEYS,
   distributeAcrossPlan,
   partCondition,
   bodyPenaltyModifiers,
+  emptyModifiers,
   pickTargetPart
 } = bodyModule;
 
@@ -671,8 +673,9 @@ export async function getUserState(db, username) {
 
   await ensureBody(db, user);
   const bodyParts = await getBodyParts(db, username);
-  const conditionModifiers = bodyPenaltyModifiers(bodyParts);
-  const effective = getEffectiveUser(user, conditionModifiers);
+  const gearBonuses = await getEquippedModifiers(db, username);
+  const combinedModifiers = await getConditionAndGearModifiers(db, username);
+  const effective = getEffectiveUser(user, combinedModifiers);
   const body = bodyParts.map(part => ({
     label: part.label,
     partType: part.partType,
@@ -680,6 +683,30 @@ export async function getUserState(db, username) {
     condition: partCondition(part),
     vital: Boolean(part.vital)
   }));
+  const inventoryRows = await getInventory(db, username);
+  // Carried items only (equipped items show up under `equipment`).
+  const inventory = inventoryRows
+    .filter(row => row.equippedPartId === null || row.equippedPartId === undefined)
+    .map(row => ({
+      name: row.name,
+      slotType: row.slotType,
+      rarity: row.rarity,
+      modifiers: parseItemModifiers(row.modifiers)
+    }));
+  // Equipment keyed by part label: one entry per non-severed part, empty or filled.
+  const equippedByPartId = new Map(
+    inventoryRows
+      .filter(row => row.equippedPartId !== null && row.equippedPartId !== undefined)
+      .map(row => [row.equippedPartId, row])
+  );
+  const equipment = {};
+  for (const part of bodyParts) {
+    if (part.severed) {
+      continue;
+    }
+    const equipped = equippedByPartId.get(part.id);
+    equipment[part.label] = equipped ? equipped.name : null;
+  }
   const [achievements, kills] = await Promise.all([
     dbAll(
       db,
@@ -716,6 +743,9 @@ export async function getUserState(db, username) {
       intelligence: effective.intelligence
     },
     body,
+    inventory,
+    equipment,
+    gearBonuses,
     skill: effective.skill,
     achievements,
     kills
@@ -1372,6 +1402,161 @@ export async function getBodyConditionModifiers(db, username) {
   return bodyPenaltyModifiers(parts);
 }
 
+// Defensive parse of an item's stored modifiers JSON into a plain object.
+function parseItemModifiers(raw) {
+  if (!raw) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (error) {
+    return {};
+  }
+}
+
+// Owned items joined to the equipped part's label; equipped rows first.
+export async function getInventory(db, username) {
+  return dbAll(
+    db,
+    `SELECT i.id, i.templateId, i.name, i.slotType, i.rarity, i.modifiers,
+            i.equippedPartId, bp.label AS partLabel
+     FROM items i
+     LEFT JOIN bodyParts bp ON bp.id = i.equippedPartId
+     WHERE i.ownerUsername = ?
+     ORDER BY CASE WHEN i.equippedPartId IS NULL THEN 1 ELSE 0 END,
+              bp.label ASC, i.name ASC, i.id ASC`,
+    [username]
+  );
+}
+
+// Sum the modifiers of every equipped item into a modifier object over
+// MODIFIER_KEYS EXCEPT maxHealth, which is intentionally excluded: plan 015
+// owns HP gear via part maxHp, and applying maxHealth to the effective layer
+// now would be an unfillable dead stat (applyBodyHeal caps fill at part maxHp).
+export async function getEquippedModifiers(db, username) {
+  const rows = await dbAll(
+    db,
+    'SELECT modifiers FROM items WHERE ownerUsername = ? AND equippedPartId IS NOT NULL',
+    [username]
+  );
+  const modifiers = emptyModifiers();
+  delete modifiers.maxHealth; // dead-stat guard: never surface gear maxHealth.
+  for (const row of rows) {
+    const parsed = parseItemModifiers(row.modifiers);
+    for (const key of MODIFIER_KEYS) {
+      if (key === 'maxHealth') {
+        continue;
+      }
+      const value = Number(parsed[key]);
+      if (Number.isFinite(value)) {
+        modifiers[key] = (modifiers[key] || 0) + value;
+      }
+    }
+  }
+  return modifiers;
+}
+
+// Element-wise sum of wound penalties and equipped-gear bonuses. Swapped in at
+// every site that previously fed getBodyConditionModifiers / bodyPenaltyModifiers
+// into getEffectiveUser, so wounds and gear ride one modifier channel.
+export async function getConditionAndGearModifiers(db, username) {
+  const [condition, gear] = await Promise.all([
+    getBodyConditionModifiers(db, username),
+    getEquippedModifiers(db, username)
+  ]);
+  const combined = {};
+  for (const key of MODIFIER_KEYS) {
+    combined[key] = (Number(condition[key]) || 0) + (Number(gear[key]) || 0);
+  }
+  return combined;
+}
+
+async function findOwnedUnequippedItem(db, username, itemName) {
+  return dbFirst(
+    db,
+    `SELECT id, name, slotType FROM items
+     WHERE ownerUsername = ? AND equippedPartId IS NULL
+       AND roomRow IS NULL AND roomCol IS NULL
+       AND LOWER(name) = LOWER(?)
+     ORDER BY id ASC
+     LIMIT 1`,
+    [username, itemName]
+  );
+}
+
+export async function equipItem(db, user, itemName, row, col) {
+  const item = await findOwnedUnequippedItem(db, user.username, itemName);
+  if (!item) {
+    throw new ActionError("You aren't carrying that.");
+  }
+
+  await ensureBody(db, user);
+  const candidates = await dbAll(
+    db,
+    `SELECT id, label FROM bodyParts
+     WHERE username = ? AND slotType = ? AND severed = 0
+     ORDER BY id ASC`,
+    [user.username, item.slotType]
+  );
+  if (candidates.length === 0) {
+    throw new ActionError('You have nowhere to put that.');
+  }
+
+  // Which candidate parts already hold an item?
+  const occupied = await dbAll(
+    db,
+    `SELECT equippedPartId FROM items
+     WHERE ownerUsername = ? AND equippedPartId IS NOT NULL`,
+    [user.username]
+  );
+  const occupiedIds = new Set(occupied.map(o => o.equippedPartId));
+
+  // Prefer an EMPTY candidate part; if all are occupied, swap on the first one.
+  let target = candidates.find(part => !occupiedIds.has(part.id));
+  if (!target) {
+    target = candidates[0];
+    await dbRun(
+      db,
+      'UPDATE items SET equippedPartId = NULL WHERE equippedPartId = ?',
+      [target.id]
+    );
+  }
+
+  await dbRun(
+    db,
+    `UPDATE items SET equippedPartId = ?, roomRow = NULL, roomCol = NULL
+     WHERE id = ?`,
+    [target.id, item.id]
+  );
+
+  await insertSystemMessage(db, row, col, `${user.username} equips ${item.name} on their ${target.label}.`);
+  return { item, partId: target.id, partLabel: target.label };
+}
+
+export async function unequipItem(db, user, ref, row, col) {
+  await ensureBody(db, user);
+  // ref may name the item OR the body part (case-insensitive).
+  const equipped = await dbFirst(
+    db,
+    `SELECT i.id, i.name, bp.label AS partLabel
+     FROM items i
+     JOIN bodyParts bp ON bp.id = i.equippedPartId
+     WHERE i.ownerUsername = ? AND i.equippedPartId IS NOT NULL
+       AND (LOWER(i.name) = LOWER(?) OR LOWER(bp.label) = LOWER(?))
+     ORDER BY i.id ASC
+     LIMIT 1`,
+    [user.username, ref, ref]
+  );
+  if (!equipped) {
+    throw new ActionError('Nothing equipped there.');
+  }
+
+  await dbRun(db, 'UPDATE items SET equippedPartId = NULL WHERE id = ?', [equipped.id]);
+  await insertSystemMessage(db, row, col, `${user.username} stows ${equipped.name}.`);
+  return { item: { id: equipped.id, name: equipped.name }, partLabel: equipped.partLabel };
+}
+
 async function emitConditionTransitions(db, username, beforeParts, afterParts, row, col) {
   if (row === undefined || row === null || col === undefined || col === null) {
     return;
@@ -1440,6 +1625,7 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
   // Determine transitions: severance for non-vital parts driven >0 -> 0,
   // and death for any vital part driven >0 -> 0.
   const severedLabels = [];
+  const severedParts = []; // { id, label } — id resolves the knock-off UPDATE.
   let vitalDestroyed = false;
   let maxHealthReduction = 0;
   for (const part of working) {
@@ -1451,6 +1637,7 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
       } else if (!part.severed) {
         part.severed = 1;
         severedLabels.push(part.label);
+        severedParts.push({ id: part.id, label: part.label });
         maxHealthReduction += part.maxHp;
       }
     }
@@ -1480,8 +1667,29 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
   // Loud states: condition-transition messages (non-severance), then severance.
   await emitConditionTransitions(db, user.username, partsBefore, working, row, col);
   if (row !== undefined && row !== null && col !== undefined && col !== null) {
-    for (const label of severedLabels) {
-      await insertSystemMessage(db, row, col, `${user.username}'s ${label} is destroyed.`);
+    for (const part of severedParts) {
+      await insertSystemMessage(db, row, col, `${user.username}'s ${part.label} is destroyed.`);
+      // Sever knock-off: whatever was equipped on this part clatters to the
+      // floor for anyone to /take (plan 005). Fetch the name BEFORE the UPDATE.
+      const equipped = await dbFirst(
+        db,
+        'SELECT id, name FROM items WHERE equippedPartId = ?',
+        [part.id]
+      );
+      if (equipped) {
+        await dbRun(
+          db,
+          `UPDATE items SET ownerUsername = NULL, equippedPartId = NULL, roomRow = ?, roomCol = ?
+           WHERE equippedPartId = ?`,
+          [row, col, part.id]
+        );
+        await insertSystemMessage(
+          db,
+          row,
+          col,
+          `${equipped.name} falls to the floor with ${user.username}'s ${part.label}.`
+        );
+      }
     }
   }
 
@@ -1501,8 +1709,17 @@ export async function applyBodyHeal(db, user, amount, options = {}) {
   }
 
   const partsBefore = await ensureBody(db, user);
+  // Combine wound penalties (from the just-read parts) with equipped-gear
+  // bonuses so the heal cap rides the same modifier channel as combat. Gear
+  // maxHealth is intentionally excluded (getEquippedModifiers), so the cap is
+  // unchanged for HP until plan 015 makes it real via part maxHp.
   const conditionModifiers = bodyPenaltyModifiers(partsBefore);
-  const effective = getEffectiveUser(user, conditionModifiers);
+  const gearModifiers = await getEquippedModifiers(db, user.username);
+  const combinedModifiers = {};
+  for (const key of MODIFIER_KEYS) {
+    combinedModifiers[key] = (Number(conditionModifiers[key]) || 0) + (Number(gearModifiers[key]) || 0);
+  }
+  const effective = getEffectiveUser(user, combinedModifiers);
 
   const working = partsBefore.map(part => ({ ...part }));
   // Fill non-severed parts worst-ratio-first up to maxHp until the pool or the
@@ -1779,7 +1996,7 @@ export async function runHostileRoomAction(db, row, col) {
     return { tick, acted: false };
   }
 
-  const playerMods = await getBodyConditionModifiers(db, player.username);
+  const playerMods = await getConditionAndGearModifiers(db, player.username);
   const contest = rollSpeedContest(npc, player, null, playerMods);
   if (!contest.hit) {
     await insertSystemMessage(db, row, col, `${player.username} dodged ${npc.displayName || npc.username}.`);
@@ -2035,11 +2252,11 @@ export async function handleAttack(db, username, message, row, col, options = {}
   const targets = await validateAttackTargets(db, message, row, col, username);
   const attackMessages = [];
 
-  const attackerMods = attacker.isNpc ? null : await getBodyConditionModifiers(db, username);
+  const attackerMods = attacker.isNpc ? null : await getConditionAndGearModifiers(db, username);
 
   for (const user of targets) {
     const target = await getUser(db, user.username, 'Target');
-    const targetMods = target.isNpc ? null : await getBodyConditionModifiers(db, target.username);
+    const targetMods = target.isNpc ? null : await getConditionAndGearModifiers(db, target.username);
     const speedContest = rollSpeedContest(attacker, target, attackerMods, targetMods);
     if (!speedContest.hit) {
       attackMessages.push(`${user.username} dodged ${username}'s attack`);
@@ -2359,6 +2576,33 @@ export async function switchJob(db, { username, nextJob, row, col }) {
   return { message, job: nextJob };
 }
 
+// Original-case argument text after a leading "/command" word, or '' if absent.
+function commandRest(message, command) {
+  const trimmed = message.trim();
+  const rest = trimmed.slice(command.length);
+  return rest.replace(/^\s+/, '');
+}
+
+export async function handleEquipCommand(db, username, row, col, message) {
+  const rest = commandRest(message, '/equip');
+  if (!rest) {
+    throw new ActionError('Use /equip <item name>.');
+  }
+  const user = await getUser(db, username);
+  const { item } = await equipItem(db, user, rest, row, col);
+  return { equipped: item.name };
+}
+
+export async function handleUnequipCommand(db, username, row, col, message) {
+  const rest = commandRest(message, '/unequip');
+  if (!rest) {
+    throw new ActionError('Use /unequip <item name or part>.');
+  }
+  const user = await getUser(db, username);
+  const { item } = await unequipItem(db, user, rest, row, col);
+  return { unequipped: item.name };
+}
+
 export async function handleChatAction(db, username, row, col, message) {
   if (message.trim().toLowerCase().startsWith('/roll')) {
     return runPlayerAction(db, {
@@ -2366,6 +2610,24 @@ export async function handleChatAction(db, username, row, col, message) {
       staminaCost: 1,
       validate: async () => validateRollCommand(db, username, row, col, message),
       perform: async () => handleRollCommand(db, username, row, col, message),
+      advanceTick: () => advanceGlobalTick(db)
+    });
+  }
+
+  if (message.trim().toLowerCase().startsWith('/equip')) {
+    return runPlayerAction(db, {
+      username,
+      staminaCost: 1,
+      perform: async () => handleEquipCommand(db, username, row, col, message),
+      advanceTick: () => advanceGlobalTick(db)
+    });
+  }
+
+  if (message.trim().toLowerCase().startsWith('/unequip')) {
+    return runPlayerAction(db, {
+      username,
+      staminaCost: 1,
+      perform: async () => handleUnequipCommand(db, username, row, col, message),
       advanceTick: () => advanceGlobalTick(db)
     });
   }

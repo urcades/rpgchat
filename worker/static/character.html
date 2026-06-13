@@ -86,6 +86,24 @@
         ];
         const body = data.body || [];
         const bodyRows = body.map(part => [part.label, part.condition]);
+        const equipment = data.equipment || {};
+        const equipmentRows = Object.keys(equipment).map(label => [label, equipment[label] || 'empty']);
+        const inventory = data.inventory || [];
+        const inventoryItems = inventory.map(item => {
+          const mods = item.modifiers || {};
+          const modParts = ['speed', 'strength', 'intelligence', 'maxStamina']
+            .filter(key => Number(mods[key] || 0) !== 0)
+            .map(key => `${({ speed: 'SPD', strength: 'STR', intelligence: 'INT', maxStamina: 'ST' })[key]} ${signed(mods[key])}`);
+          const modText = modParts.length ? ` ${modParts.join(' ')}` : '';
+          return `${escapeHtml(item.name)} [${escapeHtml(item.slotType)}]${escapeHtml(modText)}`;
+        });
+        const gear = data.gearBonuses || {};
+        const gearItems = [
+          `ST ${escapeHtml(signed(gear.maxStamina))}`,
+          `SPD ${escapeHtml(signed(gear.speed))}`,
+          `STR ${escapeHtml(signed(gear.strength))}`,
+          `INT ${escapeHtml(signed(gear.intelligence))}`
+        ];
         const achievementItems = achievements.map(achievement => escapeHtml(achievement.achievementType));
         const killItems = kills.map(kill => {
           const name = escapeHtml(kill.defeatedName || kill.defeatedUsername || 'Unknown');
@@ -112,6 +130,18 @@
           <section class="character-section">
             <h2>Body</h2>
             ${bodyRows.length ? renderRows(bodyRows) : `<p>${escapeHtml('No body information available.')}</p>`}
+          </section>
+          <section class="character-section">
+            <h2>Equipment</h2>
+            ${equipmentRows.length ? renderRows(equipmentRows) : `<p>${escapeHtml('No equipment slots available.')}</p>`}
+          </section>
+          <section class="character-section">
+            <h2>Inventory</h2>
+            ${renderSimpleList(inventoryItems, 'Nothing carried.')}
+          </section>
+          <section class="character-section">
+            <h2>Gear Bonus</h2>
+            ${renderSimpleList(gearItems, 'No gear bonuses.')}
           </section>
           <section class="character-section">
             <h2>Base Stats</h2>

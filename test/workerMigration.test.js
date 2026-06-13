@@ -1674,3 +1674,311 @@ test('HP rebase migration triples live players while sparing System', async () =
     await db.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Plan 014: equipment and inventory attached to body parts.
+// Items are created here via raw INSERT (no item content lands until plan 005).
+// A carried item has ownerUsername set, equippedPartId NULL, room columns NULL.
+// ---------------------------------------------------------------------------
+async function insertCarriedItem(db, owner, { templateId = 'tmpl', name, slotType, modifiers = {} }) {
+  const result = await db.prepare(
+    `INSERT INTO items (templateId, name, slotType, modifiers, ownerUsername)
+     VALUES (?, ?, ?, ?, ?)`
+  ).bind(templateId, name, slotType, JSON.stringify(modifiers), owner).run();
+  return result.meta.last_row_id;
+}
+
+test('Equip lands an item on a matching body part and spends stamina and a tick', async () => {
+  const db = await createMigratedDb();
+  const { handleChatAction, getUserState, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'wielder', { health: 30, maxHealth: 30 });
+    await updatePresence(db, 'wielder', 1, 1);
+    // Trigger body instantiation so the arm part rows exist.
+    await getUserState(db, 'wielder');
+    await insertCarriedItem(db, 'wielder', { name: 'Rusty Sword', slotType: 'hand', modifiers: { strength: 2 } });
+
+    const staminaBefore = (await db.prepare("SELECT stamina FROM users WHERE username = 'wielder'").first()).stamina;
+    const tickBefore = (await db.prepare('SELECT value FROM tick WHERE id = 1').first()).value;
+
+    const action = await handleChatAction(db, 'wielder', 1, 1, '/equip Rusty Sword');
+    assert.equal(action.equipped, 'Rusty Sword');
+
+    // The item is now equipped on a `hand` part (left arm = the lower id).
+    const equipped = await db.prepare(
+      `SELECT bp.label FROM items i JOIN bodyParts bp ON bp.id = i.equippedPartId
+       WHERE i.ownerUsername = 'wielder'`
+    ).first();
+    assert.equal(equipped.label, 'left arm');
+
+    const message = await db.prepare(
+      "SELECT message FROM messages WHERE username = 'System' AND message LIKE 'wielder equips%' LIMIT 1"
+    ).first();
+    assert.equal(message.message, 'wielder equips Rusty Sword on their left arm.');
+
+    const staminaAfter = (await db.prepare("SELECT stamina FROM users WHERE username = 'wielder'").first()).stamina;
+    const tickAfter = (await db.prepare('SELECT value FROM tick WHERE id = 1').first()).value;
+    assert.equal(staminaAfter, staminaBefore - 1);
+    assert.equal(tickAfter, tickBefore + 1);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Two hand items fill both arms; a third swaps the first occupied arm', async () => {
+  const db = await createMigratedDb();
+  const { handleChatAction, getUserState, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'twohands', { health: 30, maxHealth: 30 });
+    await updatePresence(db, 'twohands', 1, 1);
+    await getUserState(db, 'twohands');
+    await insertCarriedItem(db, 'twohands', { name: 'Sword A', slotType: 'hand' });
+    await insertCarriedItem(db, 'twohands', { name: 'Sword B', slotType: 'hand' });
+    await insertCarriedItem(db, 'twohands', { name: 'Sword C', slotType: 'hand' });
+
+    await handleChatAction(db, 'twohands', 1, 1, '/equip Sword A'); // left arm (empty preferred)
+    await handleChatAction(db, 'twohands', 1, 1, '/equip Sword B'); // right arm (the other empty arm)
+
+    const equippedAfterTwo = await db.prepare(
+      `SELECT i.name, bp.label FROM items i JOIN bodyParts bp ON bp.id = i.equippedPartId
+       WHERE i.ownerUsername = 'twohands' ORDER BY bp.label ASC`
+    ).all();
+    assert.deepEqual(equippedAfterTwo.results, [
+      { name: 'Sword A', label: 'left arm' },
+      { name: 'Sword B', label: 'right arm' }
+    ]);
+
+    await handleChatAction(db, 'twohands', 1, 1, '/equip Sword C'); // both full -> swap first arm
+
+    const swordC = await db.prepare(
+      `SELECT bp.label FROM items i JOIN bodyParts bp ON bp.id = i.equippedPartId
+       WHERE i.name = 'Sword C'`
+    ).first();
+    assert.equal(swordC.label, 'left arm'); // first candidate (lowest id) is the swap target
+
+    // Sword A is now carried again (equippedPartId NULL).
+    const swordA = await db.prepare("SELECT equippedPartId FROM items WHERE name = 'Sword A'").first();
+    assert.equal(swordA.equippedPartId, null);
+    // Still exactly two items equipped (no part holds two).
+    const equippedCount = await db.prepare(
+      "SELECT COUNT(*) AS n FROM items WHERE ownerUsername = 'twohands' AND equippedPartId IS NOT NULL"
+    ).first();
+    assert.equal(equippedCount.n, 2);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Unequip works by part label and by item name', async () => {
+  const db = await createMigratedDb();
+  const { handleChatAction, getUserState, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'stower', { health: 30, maxHealth: 30 });
+    await updatePresence(db, 'stower', 1, 1);
+    await getUserState(db, 'stower');
+    await insertCarriedItem(db, 'stower', { name: 'Rusty Sword', slotType: 'hand' });
+
+    await handleChatAction(db, 'stower', 1, 1, '/equip Rusty Sword'); // left arm
+
+    // Unequip by part label.
+    const byLabel = await handleChatAction(db, 'stower', 1, 1, '/unequip left arm');
+    assert.equal(byLabel.unequipped, 'Rusty Sword');
+    let row = await db.prepare("SELECT equippedPartId FROM items WHERE name = 'Rusty Sword'").first();
+    assert.equal(row.equippedPartId, null);
+
+    // Re-equip, then unequip by item name.
+    await handleChatAction(db, 'stower', 1, 1, '/equip Rusty Sword');
+    const byName = await handleChatAction(db, 'stower', 1, 1, '/unequip Rusty Sword');
+    assert.equal(byName.unequipped, 'Rusty Sword');
+    row = await db.prepare("SELECT equippedPartId FROM items WHERE name = 'Rusty Sword'").first();
+    assert.equal(row.equippedPartId, null);
+
+    const stowMessages = await db.prepare(
+      "SELECT COUNT(*) AS n FROM messages WHERE username = 'System' AND message = 'stower stows Rusty Sword.'"
+    ).first();
+    assert.equal(stowMessages.n, 2);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Severed mount is never chosen: equip swaps the surviving arm instead', async () => {
+  const db = await createMigratedDb();
+  const { applyBodyDamage, handleChatAction, getUserState, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'maimed', { health: 30, maxHealth: 30 });
+    await updatePresence(db, 'maimed', 1, 1);
+    await getUserState(db, 'maimed'); // instantiate body
+
+    // Occupy the RIGHT arm first (equip while both arms live; left arm is the
+    // empty-preferred target, so equip a second hand item to land on the right).
+    await insertCarriedItem(db, 'maimed', { name: 'Held A', slotType: 'hand' });
+    await insertCarriedItem(db, 'maimed', { name: 'Held B', slotType: 'hand' });
+    await insertCarriedItem(db, 'maimed', { name: 'New Blade', slotType: 'hand' });
+    // First unequip Held A from the left arm after equipping, so only the right
+    // arm holds an item when we then sever the left.
+    await handleChatAction(db, 'maimed', 1, 1, '/equip Held A'); // left arm
+    await handleChatAction(db, 'maimed', 1, 1, '/equip Held B'); // right arm
+    await handleChatAction(db, 'maimed', 1, 1, '/unequip left arm'); // free the left arm
+
+    // Sever the left arm. left arm roll range [0.467,0.600); random 0.5 lands it,
+    // 4 damage drives it 4->0 and severs it (matches plan 004's sever test).
+    const victim = await db.prepare("SELECT * FROM users WHERE username = 'maimed'").first();
+    const sever = await applyBodyDamage(db, victim, 4, { cause: 'a blade', row: 1, col: 1, random: () => 0.5 });
+    assert.deepEqual(sever.severedLabels, ['left arm']);
+
+    // With the left arm severed and the right occupied by Held B, equipping a
+    // new hand item must SWAP the right arm, never land on the severed left.
+    await handleChatAction(db, 'maimed', 1, 1, '/equip New Blade');
+    const placed = await db.prepare(
+      `SELECT bp.label FROM items i JOIN bodyParts bp ON bp.id = i.equippedPartId WHERE i.name = 'New Blade'`
+    ).first();
+    assert.equal(placed.label, 'right arm');
+
+    // The severed left arm holds nothing.
+    const leftArmItems = await db.prepare(
+      `SELECT COUNT(*) AS n FROM items i JOIN bodyParts bp ON bp.id = i.equippedPartId
+       WHERE bp.username = 'maimed' AND bp.label = 'left arm'`
+    ).first();
+    assert.equal(leftArmItems.n, 0);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Gear flows into effective stats and combat, stacking with wound penalties', async () => {
+  const db = await createMigratedDb();
+  const { handleAttack, handleChatAction, getUserState, applyBodyDamage, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    // Novice (no job strength) at strength 41 so +8 gear crosses floor(/4) bands.
+    await seedLiveUser(db, 'geared', { job: 'Novice', health: 30, maxHealth: 30, speed: 20, strength: 41 });
+    await seedLiveUser(db, 'dummy_g', { health: 90, maxHealth: 90, speed: 1 });
+    const calm = findCalmRoom(getWorldDay());
+    await updatePresence(db, 'geared', calm.row, calm.col);
+    await updatePresence(db, 'dummy_g', calm.row, calm.col);
+    await getUserState(db, 'geared'); // instantiate body
+
+    // Baseline effective strength with no gear: 41.
+    const before = await getUserState(db, 'geared');
+    assert.equal(before.effectiveStats.strength, 41);
+
+    await insertCarriedItem(db, 'geared', { name: 'Brutal Axe', slotType: 'hand', modifiers: { strength: 8 } });
+    await handleChatAction(db, 'geared', calm.row, calm.col, '/equip Brutal Axe');
+
+    // Effective strength now reflects gear: 41 + 8 = 49.
+    const afterGear = await getUserState(db, 'geared');
+    assert.equal(afterGear.effectiveStats.strength, 49);
+    assert.equal(afterGear.gearBonuses.strength, 8);
+
+    // Gear feeds combat damage: strength 49 -> 1 + floor(49/4) = 13.
+    // RNG order per attack: speed hit (0.1), crit roll (0.99 no crit),
+    // pickTargetPart (0.5 = left arm), torso-spill buffer (0.99).
+    const dummyHealth = async name =>
+      (await db.prepare('SELECT health FROM users WHERE username = ?').bind(name).first()).health;
+    const gearedBefore = await dummyHealth('dummy_g');
+    await withMockedRandom([0.1, 0.99, 0.5, 0.99], () =>
+      handleAttack(db, 'geared', '@dummy_g', calm.row, calm.col));
+    const gearedDamage = gearedBefore - (await dummyHealth('dummy_g'));
+    assert.equal(gearedDamage, 13);
+
+    // Now mangle the geared striker's own left arm (strength -2). The equipped
+    // axe is on the left arm; mangling it leaves the item equipped (only sever
+    // knocks gear off) so +8 gear and -2 wound stack to a net +6 over base 41.
+    const self = await db.prepare("SELECT * FROM users WHERE username = 'geared'").first();
+    await applyBodyDamage(db, self, 3, { cause: 'prep', row: calm.row, col: calm.col, random: () => 0.5 });
+    const stacked = await getUserState(db, 'geared');
+    assert.equal(stacked.bonusModifiers.strength, 6); // +8 gear - 2 wound
+    assert.equal(stacked.effectiveStats.strength, 47); // 41 + 6
+  } finally {
+    await db.close();
+  }
+});
+
+test('Sever knock-off drops the equipped item to the room floor', async () => {
+  const db = await createMigratedDb();
+  const { applyBodyDamage, handleChatAction, getUserState, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'dropper', { health: 30, maxHealth: 30 });
+    await updatePresence(db, 'dropper', 4, 5);
+    await getUserState(db, 'dropper'); // instantiate body
+    await insertCarriedItem(db, 'dropper', { name: 'Lost Dagger', slotType: 'hand' });
+    await handleChatAction(db, 'dropper', 4, 5, '/equip Lost Dagger'); // left arm
+
+    // Sever the left arm (range [0.467,0.600); random 0.5; 4 damage 4->0).
+    const victim = await db.prepare("SELECT * FROM users WHERE username = 'dropper'").first();
+    const sever = await applyBodyDamage(db, victim, 4, { cause: 'a cleaver', row: 4, col: 5, random: () => 0.5 });
+    assert.deepEqual(sever.severedLabels, ['left arm']);
+
+    // The item is on the floor: owner NULL, part NULL, room set.
+    const floored = await db.prepare("SELECT ownerUsername, equippedPartId, roomRow, roomCol FROM items WHERE name = 'Lost Dagger'").first();
+    assert.equal(floored.ownerUsername, null);
+    assert.equal(floored.equippedPartId, null);
+    assert.equal(floored.roomRow, 4);
+    assert.equal(floored.roomCol, 5);
+
+    const message = await db.prepare(
+      "SELECT message FROM messages WHERE username = 'System' AND message LIKE 'Lost Dagger falls%' LIMIT 1"
+    ).first();
+    assert.equal(message.message, "Lost Dagger falls to the floor with dropper's left arm.");
+  } finally {
+    await db.close();
+  }
+});
+
+test('One item per part: a second INSERT on the same part is rejected', async () => {
+  const db = await createMigratedDb();
+  const { getUserState, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'unique_part', { health: 30, maxHealth: 30 });
+    await updatePresence(db, 'unique_part', 1, 1);
+    await getUserState(db, 'unique_part'); // instantiate body
+    const leftArm = await db.prepare(
+      "SELECT id FROM bodyParts WHERE username = 'unique_part' AND label = 'left arm'"
+    ).first();
+
+    await db.prepare(
+      `INSERT INTO items (templateId, name, slotType, ownerUsername, equippedPartId)
+       VALUES ('t', 'First', 'hand', 'unique_part', ?)`
+    ).bind(leftArm.id).run();
+
+    await assert.rejects(
+      () => db.prepare(
+        `INSERT INTO items (templateId, name, slotType, ownerUsername, equippedPartId)
+         VALUES ('t', 'Second', 'hand', 'unique_part', ?)`
+      ).bind(leftArm.id).run(),
+      /UNIQUE|constraint/i
+    );
+  } finally {
+    await db.close();
+  }
+});
+
+test('maxHealth gear is inert this plan: it does not raise effective maxHealth or show as a gear bonus', async () => {
+  const db = await createMigratedDb();
+  const { handleChatAction, getUserState, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'plated', { health: 30, maxHealth: 30 });
+    await updatePresence(db, 'plated', 1, 1);
+    const noGear = await getUserState(db, 'plated'); // instantiate body
+    const baselineMaxHealth = noGear.effectiveStats.maxHealth;
+
+    await insertCarriedItem(db, 'plated', { name: 'Iron Plate', slotType: 'torso', modifiers: { maxHealth: 9 } });
+    await handleChatAction(db, 'plated', 1, 1, '/equip Iron Plate');
+
+    const withGear = await getUserState(db, 'plated');
+    // The dead-stat guard: maxHealth gear is carried in the row but never applied
+    // to the effective layer (plan 015 makes it real via part maxHp).
+    assert.equal(withGear.effectiveStats.maxHealth, baselineMaxHealth);
+    assert.equal(withGear.gearBonuses.maxHealth, undefined);
+  } finally {
+    await db.close();
+  }
+});
