@@ -595,8 +595,8 @@ app.get('/messages/:row/:col', async c => {
 
   try {
     const { row, col } = parseCoordinates(c);
-    await ensureRoomUse(c, auth.user, row, col);
-    return c.json(await getMessages(c.env.DB, row, col));
+    const roomUse = await ensureRoomUse(c, auth.user, row, col);
+    return c.json(await getMessages(c.env.DB, row, col, roomUse.tickValue));
   } catch (err) {
     return formError(c, err);
   }
@@ -628,7 +628,7 @@ app.get('/room-state/:row/:col', async c => {
     if (!roomUse.allowed) {
       throw new ActionError('Inn access required', 403);
     }
-    return c.json(await getRoomState(c.env.DB, auth.user.username, row, col));
+    return c.json(await getRoomState(c.env.DB, auth.user.username, row, col, roomUse.tickValue));
   } catch (err) {
     return formError(c, err);
   }

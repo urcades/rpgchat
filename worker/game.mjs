@@ -37,6 +37,7 @@ const { calculateLevel } = levelingModule;
 const { generateDailyWorldEvents } = worldEventsModule;
 
 const PRESENCE_MAX_AGE_SECONDS = 45;
+const ROOM_MESSAGE_HISTORY_LIMIT = 100;
 const BASE_EXPERIENCE_REQUIRED = 100;
 const PLAYER_ACTION_EXPERIENCE = 1;
 const INN_ACCESS_TYPE = 'inn';
@@ -577,26 +578,28 @@ export async function getActiveRound(db, row, col, worldDay, tickValue) {
   };
 }
 
-export async function getRoomEcology(db, username, row, col, worldDay = getWorldDay()) {
-  const tickValue = await getCurrentTickValue(db);
-  const traces = await dbAll(
-    db,
-    `SELECT id, roomRow, roomCol, traceType, intensity, attacker, target, createdTick, expiryTick, worldDay, createdAt
-     FROM roomTraces
-     WHERE roomRow = ?
-       AND roomCol = ?
-       AND worldDay = ?
-       AND (expiryTick IS NULL OR expiryTick >= ?)
-     ORDER BY createdTick DESC, id DESC`,
-    [row, col, worldDay, tickValue]
-  );
-  const phase = getPhaseFromTick(tickValue);
-  const features = getRoomFeaturesForTick(row, col, tickValue, worldDay);
+export async function getRoomEcology(db, username, row, col, worldDay = getWorldDay(), tickValue = null) {
+  const currentTick = tickValue === null ? await getCurrentTickValue(db) : tickValue;
+  const phase = getPhaseFromTick(currentTick);
+  const features = getRoomFeaturesForTick(row, col, currentTick, worldDay);
+  const [traces, innAccess, activeRound, presence, event] = await Promise.all([
+    dbAll(
+      db,
+      `SELECT id, roomRow, roomCol, traceType, intensity, attacker, target, createdTick, expiryTick, worldDay, createdAt
+       FROM roomTraces
+       WHERE roomRow = ?
+         AND roomCol = ?
+         AND worldDay = ?
+         AND (expiryTick IS NULL OR expiryTick >= ?)
+       ORDER BY createdTick DESC, id DESC`,
+      [row, col, worldDay, currentTick]
+    ),
+    getRoomAccessState(db, username, row, col, currentTick, worldDay),
+    getActiveRound(db, row, col, worldDay, currentTick),
+    getRoomPresence(db, row, col, worldDay),
+    getActiveRoomEvent(db, row, col, worldDay)
+  ]);
   const traceSummary = summarizeTraces(traces);
-  const innAccess = await getRoomAccessState(db, username, row, col, tickValue, worldDay);
-  const activeRound = await getActiveRound(db, row, col, worldDay, tickValue);
-  const presence = await getRoomPresence(db, row, col, worldDay);
-  const event = await getActiveRoomEvent(db, row, col, worldDay);
   const effectPayload = getRoomEffectPayload({ row, col, worldDay, features, innAccess, activeRound });
 
   return {
@@ -625,23 +628,25 @@ export async function getUserState(db, username) {
   }
 
   const effective = getEffectiveUser(user);
-  const achievements = await dbAll(
-    db,
-    `SELECT achievementType, eventId, worldDay, earnedTick, rewardExperience, rewardGold
-     FROM worldEventAchievements
-     WHERE username = ?
-     ORDER BY earnedTick DESC, id DESC`,
-    [username]
-  );
-  const kills = await dbAll(
-    db,
-    `SELECT defeatedUsername, defeatedName, defeatedKind, defeatedLevel, experienceGained, goldGained, roomRow, roomCol, worldDay, tick, createdAt
-     FROM killHistory
-     WHERE killerUsername = ?
-     ORDER BY id DESC
-     LIMIT 50`,
-    [username]
-  );
+  const [achievements, kills] = await Promise.all([
+    dbAll(
+      db,
+      `SELECT achievementType, eventId, worldDay, earnedTick, rewardExperience, rewardGold
+       FROM worldEventAchievements
+       WHERE username = ?
+       ORDER BY earnedTick DESC, id DESC`,
+      [username]
+    ),
+    dbAll(
+      db,
+      `SELECT defeatedUsername, defeatedName, defeatedKind, defeatedLevel, experienceGained, goldGained, roomRow, roomCol, worldDay, tick, createdAt
+       FROM killHistory
+       WHERE killerUsername = ?
+       ORDER BY id DESC
+       LIMIT 50`,
+      [username]
+    )
+  ]);
 
   return {
     ...user,
@@ -663,12 +668,13 @@ export async function getUserState(db, username) {
   };
 }
 
-export async function getRoomState(db, username, row, col) {
+export async function getRoomState(db, username, row, col, tickValue = null) {
   const stateStart = nowMs();
-  const tick = await getCurrentTickValue(db);
+  const worldDay = getWorldDay();
+  const tick = tickValue === null ? await getCurrentTickValue(db) : tickValue;
   const [roomResult, messagesResult, userResult] = await Promise.all([
-    measureAsync(() => getRoomEcology(db, username, row, col)),
-    measureAsync(() => getMessages(db, row, col)),
+    measureAsync(() => getRoomEcology(db, username, row, col, worldDay, tick)),
+    measureAsync(() => getMessages(db, row, col, tick)),
     measureAsync(() => getUserState(db, username))
   ]);
   const room = roomResult.value;
@@ -736,16 +742,18 @@ export async function createTrace(db, trace) {
   );
 }
 
-export async function getMessages(db, row, col) {
-  const rows = await dbAll(
+export async function getMessages(db, row, col, tickValue = null) {
+  const recent = await dbAll(
     db,
     `SELECT id, username, message, timestamp
      FROM messages
      WHERE roomRow = ?
        AND roomCol = ?
-     ORDER BY id ASC`,
-    [row, col]
+     ORDER BY id DESC
+     LIMIT ?`,
+    [row, col, ROOM_MESSAGE_HISTORY_LIMIT]
   );
+  const rows = recent.reverse();
   const usernames = [...new Set(rows.map(row => row.username).filter(username => username && username !== 'System'))];
 
   if (usernames.length === 0) {
@@ -753,18 +761,20 @@ export async function getMessages(db, row, col) {
   }
 
   const placeholders = usernames.map(() => '?').join(', ');
-  const users = await dbAll(db, `SELECT username, job FROM users WHERE username IN (${placeholders})`, usernames);
+  const currentTick = tickValue === null ? await getCurrentTickValue(db) : tickValue;
+  const [users, effects] = await Promise.all([
+    dbAll(db, `SELECT username, job FROM users WHERE username IN (${placeholders})`, usernames),
+    dbAll(
+      db,
+      `SELECT username, effectType
+       FROM statusEffects
+       WHERE username IN (${placeholders})
+         AND expiryTick > ?
+       ORDER BY username ASC, expiryTick ASC, id ASC`,
+      [...usernames, currentTick]
+    )
+  ]);
   const usersByName = new Map(users.map(user => [user.username, user]));
-  const tickValue = await getCurrentTickValue(db);
-  const effects = await dbAll(
-    db,
-    `SELECT username, effectType
-     FROM statusEffects
-     WHERE username IN (${placeholders})
-       AND expiryTick > ?
-     ORDER BY username ASC, expiryTick ASC, id ASC`,
-    [...usernames, tickValue]
-  );
   const effectsByName = effects.reduce((map, effect) => {
     if (!map.has(effect.username)) {
       map.set(effect.username, []);
@@ -811,19 +821,29 @@ export async function runPlayerAction(db, { username, staminaCost = 1, validate,
   return { ...result, tick };
 }
 
-async function recoverStaminaForAllUsers(db) {
-  const users = await dbAll(
-    db,
-    'SELECT username, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence FROM users'
-  );
+// Effective max stamina = stored maxStamina + the job's maxStamina bonus.
+// Build that bonus as a CASE expression straight from JOBS so it stays in sync
+// with utils/jobs.js instead of hardcoding per-job numbers in SQL. Job names are
+// our own config keys (never user input), so inlining them carries no injection risk.
+function effectiveMaxStaminaSql() {
+  const clauses = Object.entries(JOBS)
+    .map(([job, definition]) => [job, definition.bonuses?.maxStamina || 0])
+    .filter(([, bonus]) => bonus > 0)
+    .map(([job, bonus]) => `WHEN '${job}' THEN maxStamina + ${bonus}`);
+  return clauses.length > 0 ? `CASE job ${clauses.join(' ')} ELSE maxStamina END` : 'maxStamina';
+}
 
-  for (const user of users) {
-    const effective = getEffectiveUser(user);
-    const nextStamina = Math.min(user.stamina + 1, effective.maxStamina);
-    if (nextStamina !== user.stamina) {
-      await dbRun(db, 'UPDATE users SET stamina = ? WHERE username = ?', [nextStamina, user.username]);
-    }
-  }
+async function recoverStaminaForAllUsers(db) {
+  // Regenerate 1 stamina for every eligible user (and clamp any over-cap values
+  // back down) in a single statement instead of one round-trip per row. The
+  // WHERE clause writes exactly the rows the per-user loop used to write.
+  const effectiveMax = effectiveMaxStaminaSql();
+  await dbRun(
+    db,
+    `UPDATE users
+     SET stamina = MIN(stamina + 1, ${effectiveMax})
+     WHERE stamina <> (${effectiveMax})`
+  );
 }
 
 async function upsertCooldown(db, username, row, col, effectType, currentTick, worldDay) {

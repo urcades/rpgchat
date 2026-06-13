@@ -533,7 +533,21 @@
 
       const socketProtocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
       socket = new WebSocket(`${socketProtocol}${window.location.host}/ws/${row}/${col}`);
-      socket.onmessage = function() {
+      socket.onmessage = function(event) {
+        let payload = null;
+        try {
+          payload = JSON.parse(event.data);
+        } catch (error) {
+          payload = null;
+        }
+        // Presence heartbeats only change who is in the room — not the messages
+        // or your own attributes. Refresh just the ecology panel (which carries
+        // the presence list) instead of re-fetching the entire room state on
+        // every other player's 15s heartbeat. Real game events still reload fully.
+        if (payload && payload.type === 'presence') {
+          loadRoomEcology();
+          return;
+        }
         loadRoomState();
       };
     });
