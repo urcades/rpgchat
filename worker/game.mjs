@@ -2,6 +2,7 @@ import jobsModule from '../utils/jobs.js';
 import ecologyModule from '../utils/roomEcology.js';
 import levelingModule from '../utils/leveling.js';
 import worldEventsModule from '../utils/worldEvents.js';
+import bodyModule from '../utils/body.js';
 import { changes, dbAll, dbFirst, dbRun, lastInsertId } from './db.mjs';
 import { elapsedMs, logEvent, measureAsync, nowMs } from './observability.mjs';
 
@@ -35,6 +36,14 @@ const {
 
 const { calculateLevel } = levelingModule;
 const { generateDailyWorldEvents } = worldEventsModule;
+
+const {
+  HUMANOID_PLAN,
+  distributeAcrossPlan,
+  partCondition,
+  bodyPenaltyModifiers,
+  pickTargetPart
+} = bodyModule;
 
 const PRESENCE_MAX_AGE_SECONDS = 45;
 const ROOM_MESSAGE_HISTORY_LIMIT = 100;
@@ -84,9 +93,9 @@ function clampNumber(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
-export function calculateSpeedHitChance(attacker, target) {
-  const effectiveAttacker = getEffectiveUser(attacker);
-  const effectiveTarget = getEffectiveUser(target);
+export function calculateSpeedHitChance(attacker, target, attackerMods = null, targetMods = null) {
+  const effectiveAttacker = getEffectiveUser(attacker, attackerMods);
+  const effectiveTarget = getEffectiveUser(target, targetMods);
   const speedDifference = effectiveAttacker.speed - effectiveTarget.speed;
   const hitChance = clampNumber(
     SPEED_HIT_BASE_CHANCE + speedDifference * SPEED_HIT_STEP,
@@ -97,8 +106,8 @@ export function calculateSpeedHitChance(attacker, target) {
   return Math.round(hitChance * 100) / 100;
 }
 
-function rollSpeedContest(attacker, target) {
-  const hitChance = calculateSpeedHitChance(attacker, target);
+function rollSpeedContest(attacker, target, attackerMods = null, targetMods = null) {
+  const hitChance = calculateSpeedHitChance(attacker, target, attackerMods, targetMods);
   return {
     hit: Math.random() < hitChance,
     hitChance
@@ -251,6 +260,33 @@ export async function cleanupOldWorldDayData(db, worldDay = getWorldDay()) {
   await dbRun(db, 'DELETE FROM roomTraces WHERE worldDay != ?', [worldDay]);
   await dbRun(db, 'DELETE FROM sessions WHERE expiresAt <= CURRENT_TIMESTAMP');
   await dbRun(db, "DELETE FROM messages WHERE timestamp < datetime('now', '-7 days')");
+  await reconcileBodyHealthInvariant(db);
+}
+
+// Self-healing reconcile: for any live non-NPC user with body rows where
+// users.health != Σ bodyParts.hp, set users.health to the sum. The invariant
+// is the contract; this only catches drift, never masks a bypassed chokepoint.
+async function reconcileBodyHealthInvariant(db) {
+  const drifted = await dbAll(
+    db,
+    `SELECT u.username AS username, u.health AS health, SUM(bp.hp) AS bodySum
+     FROM users u
+     JOIN bodyParts bp ON bp.username = u.username
+     WHERE u.isNpc = 0
+       AND u.username != 'System'
+     GROUP BY u.username
+     HAVING u.health != SUM(bp.hp)`
+  );
+  for (const row of drifted) {
+    const bodySum = Math.max(0, Math.floor(row.bodySum || 0));
+    await dbRun(db, 'UPDATE users SET health = ? WHERE username = ?', [bodySum, row.username]);
+    logEvent({
+      event: 'body.reconcile',
+      username: row.username,
+      previousHealth: row.health,
+      reconciledHealth: bodySum
+    });
+  }
 }
 
 export async function updatePresence(db, username, row, col) {
@@ -633,7 +669,17 @@ export async function getUserState(db, username) {
     throw new ActionError('User Not Found', 404);
   }
 
-  const effective = getEffectiveUser(user);
+  await ensureBody(db, user);
+  const bodyParts = await getBodyParts(db, username);
+  const conditionModifiers = bodyPenaltyModifiers(bodyParts);
+  const effective = getEffectiveUser(user, conditionModifiers);
+  const body = bodyParts.map(part => ({
+    label: part.label,
+    partType: part.partType,
+    slotType: part.slotType,
+    condition: partCondition(part),
+    vital: Boolean(part.vital)
+  }));
   const [achievements, kills] = await Promise.all([
     dbAll(
       db,
@@ -659,6 +705,7 @@ export async function getUserState(db, username) {
     job: effective.job,
     baseStats: effective.baseStats,
     jobBonuses: effective.jobBonuses,
+    bonusModifiers: effective.bonusModifiers,
     effectiveStats: {
       health: effective.health,
       maxHealth: effective.maxHealth,
@@ -668,6 +715,7 @@ export async function getUserState(db, username) {
       strength: effective.strength,
       intelligence: effective.intelligence
     },
+    body,
     skill: effective.skill,
     achievements,
     kills
@@ -880,6 +928,7 @@ export async function moveUserToCemetery(db, username, cause, row, col, options 
   await dbRun(db, 'DELETE FROM users WHERE username = ?', [username]);
   await dbRun(db, 'DELETE FROM roomPresence WHERE username = ?', [username]);
   await dbRun(db, 'DELETE FROM statusEffects WHERE username = ?', [username]);
+  await dbRun(db, 'DELETE FROM bodyParts WHERE username = ?', [username]);
   await emitSystemMessage(db, row, col, `${username} has died from ${cause}.`, options.deferredSystemMessages);
   return true;
 }
@@ -996,12 +1045,29 @@ async function processUserEffect(db, presence, effect, currentTick, worldDay) {
     return true;
   }
 
-  if (after.health !== before.health || after.stamina !== before.stamina) {
+  const healthDelta = after.health - before.health;
+  if (healthDelta < 0) {
+    await applyBodyDamage(db, presence, -healthDelta, {
+      cause: effect.type,
+      row: presence.roomRow,
+      col: presence.roomCol
+    });
+  } else if (healthDelta > 0) {
+    await applyBodyHeal(db, presence, healthDelta, {
+      row: presence.roomRow,
+      col: presence.roomCol
+    });
+  }
+
+  if (after.stamina !== before.stamina) {
     await dbRun(
       db,
-      'UPDATE users SET health = ?, stamina = ? WHERE username = ?',
-      [after.health, after.stamina, presence.username]
+      'UPDATE users SET stamina = ? WHERE username = ?',
+      [after.stamina, presence.username]
     );
+  }
+
+  if (healthDelta !== 0 || after.stamina !== before.stamina) {
     presence.health = after.health;
     presence.stamina = after.stamina;
   }
@@ -1231,12 +1297,253 @@ async function defeatNpc(db, npc, { killer, row, col, currentTick, deferredSyste
   }
 }
 
+function isBodylessUser(user) {
+  return Boolean(user && (user.isNpc || user.username === 'System'));
+}
+
+export async function getBodyParts(db, username) {
+  return dbAll(
+    db,
+    `SELECT id, username, partType, label, slotType, vital, hp, maxHp, severed
+     FROM bodyParts
+     WHERE username = ?
+     ORDER BY CASE partType WHEN 'torso' THEN 0 ELSE 1 END, id ASC`,
+    [username]
+  );
+}
+
+export async function ensureBody(db, user) {
+  if (isBodylessUser(user)) {
+    return null;
+  }
+  const existing = await getBodyParts(db, user.username);
+  if (existing.length > 0) {
+    return existing;
+  }
+
+  // Part pools mirror the STORED pool so the invariant is exact; job bonuses
+  // live in the effective layer only.
+  const storedMax = Math.max(0, Math.floor(user.maxHealth || 0));
+  const storedHealth = Math.max(0, Math.min(Math.floor(user.health || 0), storedMax));
+  const maxDistribution = distributeAcrossPlan(storedMax, HUMANOID_PLAN);
+
+  // Distribute current hp, clamped per-part to its maxHp; push any clamp
+  // overflow to parts with headroom, torso first.
+  const hpDistribution = distributeAcrossPlan(storedHealth, HUMANOID_PLAN);
+  const parts = HUMANOID_PLAN.map((template, index) => ({
+    ...template,
+    maxHp: maxDistribution[index].amount,
+    hp: Math.min(hpDistribution[index].amount, maxDistribution[index].amount)
+  }));
+  let overflow = parts.reduce(
+    (sum, part, index) => sum + Math.max(0, hpDistribution[index].amount - part.maxHp),
+    0
+  );
+  if (overflow > 0) {
+    const order = parts
+      .map((part, index) => ({ part, index, isTorso: part.partType === 'torso' }))
+      .sort((a, b) => (b.isTorso ? 1 : 0) - (a.isTorso ? 1 : 0) || a.index - b.index);
+    for (const entry of order) {
+      if (overflow <= 0) {
+        break;
+      }
+      const headroom = entry.part.maxHp - entry.part.hp;
+      const add = Math.min(headroom, overflow);
+      entry.part.hp += add;
+      overflow -= add;
+    }
+  }
+
+  for (const part of parts) {
+    await dbRun(
+      db,
+      `INSERT OR IGNORE INTO bodyParts
+        (username, partType, label, slotType, vital, hp, maxHp, severed)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
+      [user.username, part.partType, part.label, part.slotType, part.vital ? 1 : 0, part.hp, part.maxHp]
+    );
+  }
+
+  return getBodyParts(db, user.username);
+}
+
+export async function getBodyConditionModifiers(db, username) {
+  const parts = await getBodyParts(db, username);
+  return bodyPenaltyModifiers(parts);
+}
+
+async function emitConditionTransitions(db, username, beforeParts, afterParts, row, col) {
+  if (row === undefined || row === null || col === undefined || col === null) {
+    return;
+  }
+  const beforeByLabel = new Map(beforeParts.map(part => [part.label, part]));
+  for (const after of afterParts) {
+    const before = beforeByLabel.get(after.label);
+    if (!before) {
+      continue;
+    }
+    const beforeCondition = partCondition(before);
+    const afterCondition = partCondition(after);
+    if (beforeCondition === afterCondition) {
+      continue;
+    }
+    if (after.severed) {
+      // Severance gets its own "destroyed" line from the caller; skip here.
+      continue;
+    }
+    const phrase = afterCondition === 'healthy'
+      ? `${username}'s ${after.label} looks healthy again.`
+      : `${username}'s ${after.label} is ${afterCondition}.`;
+    await insertSystemMessage(db, row, col, phrase);
+  }
+}
+
+export async function applyBodyDamage(db, user, amount, options = {}) {
+  const { cause, row, col, random = Math.random } = options;
+  const damage = Math.max(0, Math.floor(amount || 0));
+
+  if (isBodylessUser(user)) {
+    const nextHealth = Math.max(0, (user.health || 0) - damage);
+    await dbRun(db, 'UPDATE users SET health = MAX(health - ?, 0) WHERE username = ?', [damage, user.username]);
+    return { died: nextHealth <= 0, npc: true, healthAfter: nextHealth, severedLabels: [] };
+  }
+
+  const partsBefore = await ensureBody(db, user);
+  const liveParts = partsBefore.filter(part => !part.severed);
+
+  // Snapshot for condition-transition messaging.
+  const working = partsBefore.map(part => ({ ...part }));
+  const workingByLabel = new Map(working.map(part => [part.label, part]));
+  const torso = working.find(part => part.partType === 'torso');
+
+  let remaining = damage;
+  const target = pickTargetPart(liveParts, random);
+  const targetWorking = target ? workingByLabel.get(target.label) : null;
+
+  let totalDealt = 0;
+  if (targetWorking && remaining > 0) {
+    const dealt = Math.min(remaining, targetWorking.hp);
+    targetWorking.hp -= dealt;
+    totalDealt += dealt;
+    remaining -= dealt;
+  }
+
+  // Spill remainder into the torso (if the target wasn't the torso); anything
+  // beyond torso hp is dropped (total is already 0 by then).
+  if (remaining > 0 && torso && (!targetWorking || targetWorking.label !== torso.label) && !torso.severed) {
+    const dealt = Math.min(remaining, torso.hp);
+    torso.hp -= dealt;
+    totalDealt += dealt;
+    remaining -= dealt;
+  }
+
+  // Determine transitions: severance for non-vital parts driven >0 -> 0,
+  // and death for any vital part driven >0 -> 0.
+  const severedLabels = [];
+  let vitalDestroyed = false;
+  let maxHealthReduction = 0;
+  for (const part of working) {
+    const before = workingByLabel.get(part.label);
+    const wasAlive = partsBefore.find(p => p.label === part.label).hp > 0;
+    if (part.hp <= 0 && wasAlive) {
+      if (part.vital) {
+        vitalDestroyed = true;
+      } else if (!part.severed) {
+        part.severed = 1;
+        severedLabels.push(part.label);
+        maxHealthReduction += part.maxHp;
+      }
+    }
+  }
+
+  // Persist part rows.
+  for (const part of working) {
+    await dbRun(
+      db,
+      'UPDATE bodyParts SET hp = ?, severed = ? WHERE username = ? AND label = ?',
+      [Math.max(0, part.hp), part.severed ? 1 : 0, user.username, part.label]
+    );
+  }
+
+  // Mirror the same total deduction on users.health in a single UPDATE.
+  const healthAfter = Math.max(0, (user.health || 0) - totalDealt);
+  if (maxHealthReduction > 0) {
+    await dbRun(
+      db,
+      'UPDATE users SET health = ?, maxHealth = MAX(maxHealth - ?, 0) WHERE username = ?',
+      [healthAfter, maxHealthReduction, user.username]
+    );
+  } else {
+    await dbRun(db, 'UPDATE users SET health = ? WHERE username = ?', [healthAfter, user.username]);
+  }
+
+  // Loud states: condition-transition messages (non-severance), then severance.
+  await emitConditionTransitions(db, user.username, partsBefore, working, row, col);
+  if (row !== undefined && row !== null && col !== undefined && col !== null) {
+    for (const label of severedLabels) {
+      await insertSystemMessage(db, row, col, `${user.username}'s ${label} is destroyed.`);
+    }
+  }
+
+  const died = vitalDestroyed || healthAfter <= 0;
+  return { died, npc: false, healthAfter, severedLabels };
+}
+
+export async function applyBodyHeal(db, user, amount, options = {}) {
+  const { row, col } = options;
+  const heal = Math.max(0, Math.floor(amount || 0));
+
+  if (isBodylessUser(user)) {
+    const effective = getEffectiveUser(user);
+    const nextHealth = Math.min(effective.maxHealth, (user.health || 0) + heal);
+    await dbRun(db, 'UPDATE users SET health = ? WHERE username = ?', [nextHealth, user.username]);
+    return nextHealth;
+  }
+
+  const partsBefore = await ensureBody(db, user);
+  const conditionModifiers = bodyPenaltyModifiers(partsBefore);
+  const effective = getEffectiveUser(user, conditionModifiers);
+
+  const working = partsBefore.map(part => ({ ...part }));
+  // Fill non-severed parts worst-ratio-first up to maxHp until the pool or the
+  // effective max is exhausted. Severed parts are never restored (plan 006).
+  const currentTotal = working.reduce((sum, part) => sum + (part.severed ? 0 : part.hp), 0);
+  let budget = Math.max(0, Math.min(heal, effective.maxHealth - currentTotal));
+
+  while (budget > 0) {
+    const candidates = working
+      .filter(part => !part.severed && part.hp < part.maxHp)
+      .sort((a, b) => (a.hp / a.maxHp) - (b.hp / b.maxHp));
+    if (candidates.length === 0) {
+      break;
+    }
+    const target = candidates[0];
+    target.hp += 1;
+    budget -= 1;
+  }
+
+  const totalHealed = working.reduce((sum, part) => sum + (part.severed ? 0 : part.hp), 0)
+    - currentTotal;
+  for (const part of working) {
+    await dbRun(
+      db,
+      'UPDATE bodyParts SET hp = ? WHERE username = ? AND label = ?',
+      [part.hp, user.username, part.label]
+    );
+  }
+
+  const healthAfter = Math.max(0, (user.health || 0) + totalHealed);
+  await dbRun(db, 'UPDATE users SET health = ? WHERE username = ?', [healthAfter, user.username]);
+  await emitConditionTransitions(db, user.username, partsBefore, working, row, col);
+  return healthAfter;
+}
+
 async function damageUser(db, username, amount, cause, row, col) {
   const target = await getUser(db, username, 'Target');
-  const nextHealth = Math.max(0, target.health - amount);
-  await dbRun(db, 'UPDATE users SET health = ? WHERE username = ?', [nextHealth, username]);
+  const result = await applyBodyDamage(db, target, amount, { cause, row, col });
+  const nextHealth = result.healthAfter;
 
-  if (nextHealth <= 0 && target.health > 0) {
+  if (result.died && target.health > 0) {
     if (target.isNpc) {
       await defeatNpc(db, target, { killer: cause.replace(/.* by /, ''), row, col, currentTick: await getCurrentTickValue(db) });
       return { killed: true, remainingHealth: 0 };
@@ -1258,12 +1565,9 @@ async function damageUser(db, username, amount, cause, row, col) {
   return { killed: false, remainingHealth: nextHealth };
 }
 
-async function healUser(db, username, amount) {
+async function healUser(db, username, amount, row, col) {
   const user = await getUser(db, username, 'Target');
-  const effective = getEffectiveUser(user);
-  const nextHealth = Math.min(effective.maxHealth, user.health + amount);
-  await dbRun(db, 'UPDATE users SET health = ? WHERE username = ?', [nextHealth, username]);
-  return nextHealth;
+  return applyBodyHeal(db, user, amount, { row, col });
 }
 
 async function drainStamina(db, username, amount) {
@@ -1337,7 +1641,7 @@ export async function processStatusEffects(db, currentTick) {
     } else if (effect.effectType === 'arcane_pin') {
       await drainStamina(db, effect.username, effect.magnitude || 1);
     } else if (effect.effectType === 'bless') {
-      await healUser(db, effect.username, effect.magnitude || 1);
+      await healUser(db, effect.username, effect.magnitude || 1, effect.roomRow, effect.roomCol);
     }
   }
 
@@ -1475,23 +1779,23 @@ export async function runHostileRoomAction(db, row, col) {
     return { tick, acted: false };
   }
 
-  const contest = rollSpeedContest(npc, player);
+  const playerMods = await getBodyConditionModifiers(db, player.username);
+  const contest = rollSpeedContest(npc, player, null, playerMods);
   if (!contest.hit) {
     await insertSystemMessage(db, row, col, `${player.username} dodged ${npc.displayName || npc.username}.`);
     return { tick, acted: true, missed: true };
   }
 
-  const { damage, isCriticalAttack } = await calculateAttackDamage(db, npc, player.username, tick.tick);
-  await dbRun(
-    db,
-    'UPDATE users SET health = MAX(health - ?, 0) WHERE username = ? AND health > 0',
-    [damage, player.username]
-  );
-  const after = await dbFirst(db, 'SELECT * FROM users WHERE username = ?', [player.username]);
+  const { damage, isCriticalAttack } = await calculateAttackDamage(db, npc, player.username, tick.tick, null);
+  const damageResult = await applyBodyDamage(db, player, damage, {
+    cause: `attack by ${npc.username}`,
+    row,
+    col
+  });
   const hitText = isCriticalAttack ? 'critically hits' : 'attacks';
   await insertSystemMessage(db, row, col, `${npc.displayName || npc.username} ${hitText} ${player.username} for ${damage} damage.`);
 
-  if (after && after.health <= 0) {
+  if (damageResult.died) {
     await moveUserToCemetery(db, player.username, `attack by ${npc.username}`, row, col);
   }
 
@@ -1669,8 +1973,8 @@ async function consumeStatusModifier(db, targetUsername, effectType, currentTick
   return effect.magnitude || 0;
 }
 
-async function calculateAttackDamage(db, attacker, targetUsername, currentTick) {
-  const effectiveAttacker = getEffectiveUser(attacker);
+async function calculateAttackDamage(db, attacker, targetUsername, currentTick, attackerMods = null) {
+  const effectiveAttacker = getEffectiveUser(attacker, attackerMods);
   const isCriticalAttack = Math.random() < 0.01;
   const markedBonus = await consumeStatusModifier(db, targetUsername, 'marked', currentTick);
   const wardReduction = await consumeStatusModifier(db, targetUsername, 'ward', currentTick);
@@ -1731,24 +2035,27 @@ export async function handleAttack(db, username, message, row, col, options = {}
   const targets = await validateAttackTargets(db, message, row, col, username);
   const attackMessages = [];
 
+  const attackerMods = attacker.isNpc ? null : await getBodyConditionModifiers(db, username);
+
   for (const user of targets) {
     const target = await getUser(db, user.username, 'Target');
-    const speedContest = rollSpeedContest(attacker, target);
+    const targetMods = target.isNpc ? null : await getBodyConditionModifiers(db, target.username);
+    const speedContest = rollSpeedContest(attacker, target, attackerMods, targetMods);
     if (!speedContest.hit) {
       attackMessages.push(`${user.username} dodged ${username}'s attack`);
       continue;
     }
 
-    const { damage, isCriticalAttack } = await calculateAttackDamage(db, attacker, user.username, createdTick);
-    await dbRun(
-      db,
-      'UPDATE users SET health = MAX(health - ?, 0) WHERE username = ? AND health > 0',
-      [damage, user.username]
-    );
+    const { damage, isCriticalAttack } = await calculateAttackDamage(db, attacker, user.username, createdTick, attackerMods);
+    const damageResult = await applyBodyDamage(db, target, damage, {
+      cause: `attack by ${username}`,
+      row,
+      col
+    });
 
     const attackedUser = await dbFirst(db, 'SELECT * FROM users WHERE username = ?', [user.username]);
     const remainingHealth = attackedUser ? attackedUser.health : 0;
-    const wasKilled = Boolean(attackedUser && attackedUser.health <= 0);
+    const wasKilled = damageResult.died;
     const attackMessage = isCriticalAttack
       ? `${username} landed a critical hit on ${user.username} for ${damage} damage!`
       : `${username} attacked ${user.username} for ${damage} damage`;
@@ -1924,7 +2231,7 @@ export async function useClassSkill(db, { username, skillId, targetUsername, row
       }
 
       const amount = 2 + Math.floor(effectiveActor.intelligence / 4);
-      await healUser(db, target, amount);
+      await healUser(db, target, amount, row, col);
       const message = `${username} patches up ${target} for ${amount} health.`;
       await insertSystemMessage(db, row, col, message);
       return { message };
@@ -2028,14 +2335,24 @@ export async function switchJob(db, { username, nextJob, row, col }) {
 
   const user = await getUser(db, username);
   const nextEffective = getEffectiveUser({ ...user, job: nextJob });
-  const nextHealth = Math.min(user.health, nextEffective.maxHealth);
   const nextStamina = Math.min(user.stamina, nextEffective.maxStamina);
 
+  // Job and stamina update directly; the downward health clamp routes through
+  // the body chokepoint so part HP and the invariant stay consistent.
   await dbRun(
     db,
-    'UPDATE users SET job = ?, health = ?, stamina = ? WHERE username = ?',
-    [nextJob, nextHealth, nextStamina, username]
+    'UPDATE users SET job = ?, stamina = ? WHERE username = ?',
+    [nextJob, nextStamina, username]
   );
+
+  if (user.health > nextEffective.maxHealth) {
+    const difference = user.health - nextEffective.maxHealth;
+    await applyBodyDamage(db, { ...user, job: nextJob }, difference, {
+      cause: 'the change of vocation',
+      row,
+      col
+    });
+  }
 
   const message = `${username} changes job to ${nextJob}.`;
   await insertSystemMessage(db, row, col, message);

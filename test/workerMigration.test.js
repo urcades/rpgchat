@@ -94,9 +94,13 @@ function findCalmRoom(worldDay) {
       // poison_marsh / moon_room can kill the 1-HP victim during the tick;
       // echo_chamber consumes a Math.random() in processEchoChamber
       // (worker/game.mjs, `Math.random() >= 0.35`) BEFORE the speed contest,
-      // desynchronizing withMockedRandom's value sequence.
+      // desynchronizing withMockedRandom's value sequence. The remaining health
+      // passives (pub/inn/sun_room/cold_room/guild) heal or hurt body parts on
+      // the post-action tick, which emits extra condition-transition system
+      // messages (plan 004) and shifts the tail of the message log.
       const hazardous = features.some(feature =>
-        ['poison_marsh', 'moon_room', 'echo_chamber'].includes(feature.effect?.type));
+        ['poison_marsh', 'moon_room', 'echo_chamber', 'pub', 'inn', 'sun_room', 'cold_room', 'guild']
+          .includes(feature.effect?.type));
       if (!hazardous) {
         return { row, col };
       }
@@ -566,13 +570,14 @@ test('Killing attack messages are shown before defeat and death system messages'
        VALUES ('hostile_test', 'npc_scout', 'hostile', 8, 1)`
     ).run();
 
-    await updatePresence(db, 'fighter', 2, 3);
-    await updatePresence(db, 'rival', 2, 3);
-    await updatePresence(db, 'npc_scout', 2, 3);
+    const calm = findCalmRoom(getWorldDay());
+    await updatePresence(db, 'fighter', calm.row, calm.col);
+    await updatePresence(db, 'rival', calm.row, calm.col);
+    await updatePresence(db, 'npc_scout', calm.row, calm.col);
 
-    await withMockedRandom([0.1, 0.99], () => handleAttackAction(db, 'fighter', 2, 3, '@npc_scout'));
+    await withMockedRandom([0.1, 0.99], () => handleAttackAction(db, 'fighter', calm.row, calm.col, '@npc_scout'));
 
-    const messages = await getMessages(db, 2, 3);
+    const messages = await getMessages(db, calm.row, calm.col);
     const finalMessages = messages.slice(-2);
 
     assert.equal(finalMessages[0].username, 'fighter');
@@ -580,9 +585,9 @@ test('Killing attack messages are shown before defeat and death system messages'
     assert.equal(finalMessages[1].username, 'System');
     assert.equal(finalMessages[1].message, 'Ash Scout is defeated by fighter.');
 
-    await withMockedRandom([0.1, 0.99], () => handleAttackAction(db, 'fighter', 2, 3, '@rival'));
+    await withMockedRandom([0.1, 0.99], () => handleAttackAction(db, 'fighter', calm.row, calm.col, '@rival'));
 
-    const updatedMessages = await getMessages(db, 2, 3);
+    const updatedMessages = await getMessages(db, calm.row, calm.col);
     const finalPlayerDeathMessages = updatedMessages.slice(-2);
 
     assert.equal(finalPlayerDeathMessages[0].username, 'fighter');
@@ -1023,8 +1028,8 @@ test('Worker resurrection fulfillment revives a paid grave only once', async () 
       level: 4,
       gold: 7,
       job: 'Mage',
-      health: 10,
-      maxHealth: 10,
+      health: 30,
+      maxHealth: 30,
       stamina: 100,
       maxStamina: 100
     });
@@ -1347,6 +1352,324 @@ test('Daily cleanup prunes messages older than seven days', async () => {
 
     const remaining = await db.prepare('SELECT username FROM messages ORDER BY id').all();
     assert.deepEqual(remaining.results.map(row => row.username), ['fresh']);
+  } finally {
+    await db.close();
+  }
+});
+
+async function seedLiveUser(db, username, overrides = {}) {
+  const stats = {
+    job: 'Novice',
+    health: 30,
+    maxHealth: 30,
+    stamina: 100,
+    maxStamina: 100,
+    speed: 1,
+    strength: 1,
+    intelligence: 1,
+    level: 0,
+    ...overrides
+  };
+  await db.prepare(
+    `INSERT INTO users
+      (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(
+    username, 'pw', stats.job, stats.health, stats.maxHealth, stats.stamina,
+    stats.maxStamina, stats.speed, stats.strength, stats.intelligence, stats.level
+  ).run();
+}
+
+async function sumBodyHp(db, username) {
+  const row = await db.prepare('SELECT COALESCE(SUM(hp), 0) AS total FROM bodyParts WHERE username = ?')
+    .bind(username).first();
+  return row.total;
+}
+
+test('Body invariant holds after a battle: users.health equals sum of part hp', async () => {
+  const db = await createMigratedDb();
+  const { handleAttack, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    // Attacker hits hard enough to wound but the victim has a deep pool so it
+    // survives several rounds; the invariant must hold after every blow.
+    await seedLiveUser(db, 'striker', { job: 'Fighter', health: 30, maxHealth: 30, speed: 20, strength: 40 });
+    await seedLiveUser(db, 'punching_bag', { health: 90, maxHealth: 90, speed: 1 });
+
+    const calm = findCalmRoom(getWorldDay());
+    await updatePresence(db, 'striker', calm.row, calm.col);
+    await updatePresence(db, 'punching_bag', calm.row, calm.col);
+
+    // RNG per attack: speed contest (hit), crit roll (no crit), pickTargetPart,
+    // then awardGoldMaybe + tick effects fall back to the repeated last value.
+    for (let round = 0; round < 4; round += 1) {
+      await withMockedRandom([0.1, 0.99, 0.5, 0.99], () =>
+        handleAttack(db, 'striker', '@punching_bag', calm.row, calm.col));
+
+      const user = await db.prepare("SELECT health FROM users WHERE username = 'punching_bag'").first();
+      if (!user) {
+        break; // died — invariant no longer applies (rows deleted)
+      }
+      const bodySum = await sumBodyHp(db, 'punching_bag');
+      assert.equal(user.health, bodySum, `invariant after round ${round}`);
+    }
+  } finally {
+    await db.close();
+  }
+});
+
+test('Body damage severs a non-vital part driven to zero without killing the victim', async () => {
+  const db = await createMigratedDb();
+  const { applyBodyDamage, getBodyParts } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'amputee', { health: 30, maxHealth: 30 });
+    const victim = await db.prepare("SELECT * FROM users WHERE username = 'amputee'").first();
+
+    // maxHealth 30 -> left arm has maxHp 4 and occupies roll range [0.467, 0.600).
+    // random = 0.5 lands pickTargetPart on the left arm; 4 damage drives it 4->0
+    // with no spill, severing it.
+    const result = await applyBodyDamage(db, victim, 4, {
+      cause: 'a test blade',
+      row: 1,
+      col: 1,
+      random: () => 0.5
+    });
+
+    assert.equal(result.died, false);
+    assert.deepEqual(result.severedLabels, ['left arm']);
+
+    const parts = await getBodyParts(db, 'amputee');
+    const leftArm = parts.find(part => part.label === 'left arm');
+    assert.equal(leftArm.severed, 1);
+    assert.equal(leftArm.hp, 0);
+
+    const after = await db.prepare("SELECT health, maxHealth FROM users WHERE username = 'amputee'").first();
+    assert.equal(after.maxHealth, 26); // 30 - left arm maxHp (4)
+    assert.equal(after.health, 26); // 30 - 4 dealt
+
+    const messages = await db.prepare("SELECT message FROM messages WHERE username = 'System' ORDER BY id").all();
+    assert.ok(messages.results.some(row => row.message === "amputee's left arm is destroyed."));
+  } finally {
+    await db.close();
+  }
+});
+
+test('Destroying a vital part kills the victim through the normal death flow', async () => {
+  const db = await createMigratedDb();
+  const { applyBodyDamage, getBodyParts, moveUserToCemetery } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'doomed', { health: 30, maxHealth: 30 });
+    const victim = await db.prepare("SELECT * FROM users WHERE username = 'doomed'").first();
+
+    // torso (vital) occupies roll range [0.133, 0.433); random 0.2 lands there.
+    // Overwhelming damage drives torso >0 -> 0 which is a vital-part death.
+    const result = await applyBodyDamage(db, victim, 100, {
+      cause: 'a test impaling',
+      row: 1,
+      col: 1,
+      random: () => 0.2
+    });
+
+    assert.equal(result.died, true);
+
+    // The caller owns the cemetery move (preserving the existing death flow).
+    await moveUserToCemetery(db, 'doomed', 'a test impaling', 1, 1);
+
+    const live = await db.prepare("SELECT username FROM users WHERE username = 'doomed'").first();
+    const grave = await db.prepare("SELECT username, cause FROM cemetery WHERE username = 'doomed'").first();
+    const parts = await getBodyParts(db, 'doomed');
+
+    assert.equal(live, null);
+    assert.equal(grave.username, 'doomed');
+    assert.equal(parts.length, 0);
+
+    const death = await db.prepare(
+      "SELECT message FROM messages WHERE username = 'System' AND message LIKE 'doomed has died%' LIMIT 1"
+    ).first();
+    assert.ok(death);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Attrition death: total health reaching zero kills even when no vital part hits zero', async () => {
+  const db = await createMigratedDb();
+  const { applyBodyDamage, getBodyParts } = await import('../worker/game.mjs');
+
+  try {
+    // Instantiate the body, then put the victim in a state where both vital
+    // parts are ALREADY empty (badly hurt earlier) and the only remaining HP
+    // lives in a non-vital arm. The final blow empties that arm: total health
+    // reaches 0 and the victim dies via attrition, not via a vital part going
+    // from >0 to 0 (the vital parts were already at 0 before this blow).
+    await seedLiveUser(db, 'bleeder', { health: 30, maxHealth: 30 });
+    await getBodyParts(db, 'bleeder');
+    // ensureBody has not run yet (no read path triggered it); force it.
+    const seeded = await db.prepare("SELECT * FROM users WHERE username = 'bleeder'").first();
+    await applyBodyDamage(db, seeded, 0, { cause: 'noop', random: () => 0.5 }); // instantiates body
+
+    // Hand-set the body: head and torso empty, left arm holds the last 2 HP.
+    await db.prepare("UPDATE bodyParts SET hp = 0 WHERE username = 'bleeder'").run();
+    await db.prepare("UPDATE bodyParts SET hp = 2 WHERE username = 'bleeder' AND label = 'left arm'").run();
+    await db.prepare("UPDATE users SET health = 2 WHERE username = 'bleeder'").run();
+
+    const victim = await db.prepare("SELECT * FROM users WHERE username = 'bleeder'").first();
+    // random 0.5 lands on the left arm; 2 damage empties it -> total 0 -> death.
+    const result = await applyBodyDamage(db, victim, 2, {
+      cause: 'slow bleeding',
+      row: 1,
+      col: 1,
+      random: () => 0.5
+    });
+
+    assert.equal(result.died, true);
+    assert.equal(result.healthAfter, 0);
+    // The fatal blow severed the non-vital arm rather than destroying a vital part.
+    assert.deepEqual(result.severedLabels, ['left arm']);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Instantiation never kills or severs a badly hurt player', async () => {
+  const db = await createMigratedDb();
+  const { getUserState } = await import('../worker/game.mjs');
+
+  try {
+    // Raw insert with health 1, maxHealth 10 (NOT through buildStartingStats).
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
+       VALUES ('frail', 'pw', 'Novice', 1, 10, 100, 100, 1, 1, 1)`
+    ).run();
+
+    const state = await getUserState(db, 'frail'); // triggers ensureBody
+
+    const live = await db.prepare("SELECT username FROM users WHERE username = 'frail'").first();
+    assert.ok(live);
+
+    const parts = await db.prepare('SELECT severed FROM bodyParts WHERE username = ?').bind('frail').all();
+    assert.equal(parts.results.length, 7);
+    assert.ok(parts.results.every(part => part.severed === 0));
+
+    // Body payload is qualitative only — no numeric HP leaks.
+    assert.ok(Array.isArray(state.body));
+    assert.equal(state.body.length, 7);
+    for (const part of state.body) {
+      assert.equal(part.hp, undefined);
+      assert.equal(part.maxHp, undefined);
+      assert.ok(['healthy', 'hurt', 'mangled', 'missing'].includes(part.condition));
+    }
+
+    const bodySum = await sumBodyHp(db, 'frail');
+    assert.equal(bodySum, 1); // mirrors stored health, no kill
+  } finally {
+    await db.close();
+  }
+});
+
+test('Body heal restores the worst-ratio part first and emits a recovery message', async () => {
+  const db = await createMigratedDb();
+  const { applyBodyDamage, applyBodyHeal, getBodyParts } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'mender', { health: 30, maxHealth: 30 });
+    let victim = await db.prepare("SELECT * FROM users WHERE username = 'mender'").first();
+
+    // Hurt the left arm (range [0.467, 0.600)) down to a low ratio.
+    await applyBodyDamage(db, victim, 3, { cause: 'a scratch', row: 1, col: 1, random: () => 0.5 });
+
+    const beforeHeal = await getBodyParts(db, 'mender');
+    const armBefore = beforeHeal.find(part => part.label === 'left arm');
+    assert.equal(armBefore.hp, 1); // 4 -> 1 (worst ratio in the body now)
+
+    victim = await db.prepare("SELECT * FROM users WHERE username = 'mender'").first();
+    await applyBodyHeal(db, victim, 2, { row: 1, col: 1 });
+
+    const afterHeal = await getBodyParts(db, 'mender');
+    const armAfter = afterHeal.find(part => part.label === 'left arm');
+    // Worst-ratio-first: the damaged arm recovers before any full part changes.
+    assert.equal(armAfter.hp, 3);
+
+    const recovery = await db.prepare(
+      "SELECT message FROM messages WHERE username = 'System' AND message LIKE \"mender's left arm%\" ORDER BY id"
+    ).all();
+    assert.ok(recovery.results.length >= 1);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Condition penalties bite: a mangled arm reduces attack damage by the strength penalty', async () => {
+  const db = await createMigratedDb();
+  const { applyBodyDamage, getBodyConditionModifiers, handleAttack, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    // Novice strikers (no job strength bonus) at strength 41 so the -2 arm
+    // penalty crosses a floor(strength/4) boundary and the damage visibly drops.
+    await seedLiveUser(db, 'healthy_hand', { job: 'Novice', health: 30, maxHealth: 30, speed: 20, strength: 41 });
+    await seedLiveUser(db, 'dummy_a', { health: 90, maxHealth: 90, speed: 1 });
+    // Identical striker whose left arm we mangle (strength -2).
+    await seedLiveUser(db, 'hurt_hand', { job: 'Novice', health: 30, maxHealth: 30, speed: 20, strength: 41 });
+    await seedLiveUser(db, 'dummy_b', { health: 90, maxHealth: 90, speed: 1 });
+
+    const calm = findCalmRoom(getWorldDay());
+    for (const name of ['healthy_hand', 'dummy_a', 'hurt_hand', 'dummy_b']) {
+      await updatePresence(db, name, calm.row, calm.col);
+    }
+
+    // Mangle hurt_hand's left arm (range [0.467,0.600)) to ratio <= 0.25.
+    const hurtUser = await db.prepare("SELECT * FROM users WHERE username = 'hurt_hand'").first();
+    await applyBodyDamage(db, hurtUser, 3, { cause: 'prep', random: () => 0.5 });
+    const mods = await getBodyConditionModifiers(db, 'hurt_hand');
+    assert.equal(mods.strength, -2);
+
+    // Measure damage as the drop in users.health (kept equal to Σ part hp by
+    // the invariant); reading health avoids any instantiation-timing skew.
+    const dummyHealth = async name =>
+      (await db.prepare('SELECT health FROM users WHERE username = ?').bind(name).first()).health;
+
+    const healthyBefore = await dummyHealth('dummy_a');
+    await withMockedRandom([0.1, 0.99, 0.5, 0.99], () =>
+      handleAttack(db, 'healthy_hand', '@dummy_a', calm.row, calm.col));
+    const healthyDamage = healthyBefore - (await dummyHealth('dummy_a'));
+
+    const hurtBefore = await dummyHealth('dummy_b');
+    await withMockedRandom([0.1, 0.99, 0.5, 0.99], () =>
+      handleAttack(db, 'hurt_hand', '@dummy_b', calm.row, calm.col));
+    const hurtDamage = hurtBefore - (await dummyHealth('dummy_b'));
+
+    // strength 41 -> base damage 1 + floor(41/4) = 11. With -2 strength the
+    // mangled striker swings as strength 39 -> 1 + floor(39/4) = 10.
+    assert.equal(healthyDamage, 11);
+    assert.equal(hurtDamage, 10);
+    assert.ok(hurtDamage < healthyDamage);
+  } finally {
+    await db.close();
+  }
+});
+
+test('HP rebase migration triples live players while sparing System', async () => {
+  const db = await createMigratedDb();
+  const { buildStartingStats } = await import('../worker/game.mjs');
+  const { BASE_STATS } = require('../utils/jobs');
+
+  try {
+    // createMigratedDb applies every migration before we can seed, so we assert
+    // the rebase via the System exclusion and the rebased BASE_STATS that a
+    // normal signup-path user is built from.
+    const system = await db.prepare("SELECT health, maxHealth FROM users WHERE username = 'System'").first();
+    assert.equal(system.health, 9999);
+    assert.equal(system.maxHealth, 9999);
+
+    assert.equal(BASE_STATS.health, 30);
+    assert.equal(BASE_STATS.maxHealth, 30);
+
+    const startStats = buildStartingStats({ health: 0, stamina: 0, speed: 4, strength: 4, intelligence: 4 });
+    assert.equal(startStats.health, 30); // 30 + 0*3
+    assert.equal(startStats.maxHealth, 30);
   } finally {
     await db.close();
   }

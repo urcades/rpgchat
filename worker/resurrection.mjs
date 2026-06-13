@@ -84,7 +84,7 @@ export async function fulfillResurrectionCheckout(db, token, stripeSessionId) {
       db,
       `INSERT INTO users
         (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold)
-       VALUES (?, ?, ?, 10, 10, 100, 100, 1, 1, 1, ?, ?)`,
+       VALUES (?, ?, ?, 30, 30, 100, 100, 1, 1, 1, ?, ?)`,
       [grave.username, grave.password || '', grave.job || 'Novice', grave.level || 0, grave.gold || 0]
     );
   }

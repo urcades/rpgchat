@@ -2,8 +2,8 @@ const STAT_KEYS = ['health', 'stamina', 'speed', 'strength', 'intelligence'];
 const STARTING_STAT_POINTS = 12;
 
 const BASE_STATS = {
-  health: 10,
-  maxHealth: 10,
+  health: 30,
+  maxHealth: 30,
   stamina: 100,
   maxStamina: 100,
   speed: 1,
@@ -29,7 +29,7 @@ const JOBS = {
   Paladin: {
     label: 'Paladin',
     description: 'A stubborn protector whose holiness mostly looks like interference.',
-    bonuses: { maxHealth: 3, strength: 1 },
+    bonuses: { maxHealth: 9, strength: 1 },
     skill: {
       id: 'ward',
       label: 'Ward',
@@ -44,7 +44,7 @@ const JOBS = {
   Fighter: {
     label: 'Fighter',
     description: 'A blunt instrument with legs and a grievance.',
-    bonuses: { maxHealth: 1, strength: 2 },
+    bonuses: { maxHealth: 3, strength: 2 },
     skill: {
       id: 'power_strike',
       label: 'Power Strike',
@@ -119,7 +119,7 @@ const JOBS = {
   Cleric: {
     label: 'Cleric',
     description: 'Keeps people alive in ways that create obligations.',
-    bonuses: { maxHealth: 2, intelligence: 2 },
+    bonuses: { maxHealth: 6, intelligence: 2 },
     skill: {
       id: 'bless',
       label: 'Bless',
@@ -211,8 +211,8 @@ function validateStartingAllocation(input = {}) {
 
 function buildStartingStats(allocation) {
   return {
-    health: BASE_STATS.health + allocation.health,
-    maxHealth: BASE_STATS.maxHealth + allocation.health,
+    health: BASE_STATS.health + allocation.health * 3,
+    maxHealth: BASE_STATS.maxHealth + allocation.health * 3,
     stamina: BASE_STATS.stamina + allocation.stamina * 10,
     maxStamina: BASE_STATS.maxStamina + allocation.stamina * 10,
     speed: BASE_STATS.speed + allocation.speed,
@@ -237,7 +237,7 @@ function getBaseStats(user = {}) {
   };
 }
 
-function getEffectiveUser(user = {}) {
+function getEffectiveUser(user = {}, bonusModifiers = null) {
   const job = normalizeJob(user.job);
   const baseStats = getBaseStats(user);
   const jobBonuses = {
@@ -248,21 +248,30 @@ function getEffectiveUser(user = {}) {
     intelligence: 0,
     ...JOBS[job].bonuses
   };
-  const maxHealth = baseStats.maxHealth + jobBonuses.maxHealth;
-  const maxStamina = baseStats.maxStamina + jobBonuses.maxStamina;
+  const mods = {
+    maxHealth: 0,
+    maxStamina: 0,
+    speed: 0,
+    strength: 0,
+    intelligence: 0,
+    ...(bonusModifiers || {})
+  };
+  const maxHealth = baseStats.maxHealth + jobBonuses.maxHealth + mods.maxHealth;
+  const maxStamina = baseStats.maxStamina + jobBonuses.maxStamina + mods.maxStamina;
 
   return {
     ...user,
     job,
     baseStats,
     jobBonuses,
+    bonusModifiers: mods,
     health: Math.min(baseStats.health, maxHealth),
     maxHealth,
     stamina: Math.min(baseStats.stamina, maxStamina),
     maxStamina,
-    speed: baseStats.speed + jobBonuses.speed,
-    strength: baseStats.strength + jobBonuses.strength,
-    intelligence: baseStats.intelligence + jobBonuses.intelligence,
+    speed: baseStats.speed + jobBonuses.speed + mods.speed,
+    strength: baseStats.strength + jobBonuses.strength + mods.strength,
+    intelligence: baseStats.intelligence + jobBonuses.intelligence + mods.intelligence,
     skill: getSkillForJob(job)
   };
 }

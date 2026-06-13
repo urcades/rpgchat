@@ -101,8 +101,8 @@ test('builds saved base stats separately from temporary job bonuses', () => {
   });
 
   assert.deepEqual(stats, {
-    health: 12,
-    maxHealth: 12,
+    health: 36,
+    maxHealth: 36,
     stamina: 130,
     maxStamina: 130,
     speed: 3,
@@ -113,8 +113,8 @@ test('builds saved base stats separately from temporary job bonuses', () => {
   const effective = getEffectiveUser({
     username: 'tank',
     job: 'Paladin',
-    health: 12,
-    maxHealth: 12,
+    health: 36,
+    maxHealth: 36,
     stamina: 130,
     maxStamina: 130,
     speed: 3,
@@ -122,10 +122,10 @@ test('builds saved base stats separately from temporary job bonuses', () => {
     intelligence: 3
   });
 
-  assert.equal(effective.baseStats.maxHealth, 12);
-  assert.equal(effective.jobBonuses.maxHealth, 3);
-  assert.equal(effective.maxHealth, 15);
-  assert.equal(effective.health, 12);
+  assert.equal(effective.baseStats.maxHealth, 36);
+  assert.equal(effective.jobBonuses.maxHealth, 9);
+  assert.equal(effective.maxHealth, 45);
+  assert.equal(effective.health, 36);
   assert.equal(effective.strength, 5);
 });
 
