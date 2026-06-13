@@ -51,7 +51,13 @@ const {
   partCondition,
   bodyPenaltyModifiers,
   emptyModifiers,
-  pickTargetPart
+  pickTargetPart,
+  STANCES,
+  DEFAULT_STANCE,
+  normalizeStance,
+  parseCalledShot,
+  CALLED_SHOT_HIT_PENALTY,
+  CALLED_SHOT_HEAD_BONUS
 } = bodyModule;
 
 const PRESENCE_MAX_AGE_SECONDS = 45;
@@ -63,6 +69,10 @@ const SPEED_HIT_BASE_CHANCE = 0.7;
 const SPEED_HIT_STEP = 0.05;
 const SPEED_HIT_MIN_CHANCE = 0.25;
 const SPEED_HIT_MAX_CHANCE = 0.95;
+// Regrowth (plan 006): the inn's dark miracle restores one severed part per day.
+const REGROW_GOLD_COST = 25;
+const REGROW_STAMINA_COST = 20;
+const REGROW_EFFECT_TYPE = 'regrow';
 const HARMFUL_EFFECTS = new Set(['poison', 'arcane_pin', 'marked']);
 const AMBIENT_HOSTILE_RESPAWN_INTERVAL = 6;
 const PASSIVE_EFFECT_TYPES = new Set([
@@ -103,12 +113,16 @@ function clampNumber(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
-export function calculateSpeedHitChance(attacker, target, attackerMods = null, targetMods = null) {
+export function calculateSpeedHitChance(attacker, target, attackerMods = null, targetMods = null, { hitDelta = 0, dodgeDelta = 0 } = {}) {
   const effectiveAttacker = getEffectiveUser(attacker, attackerMods);
   const effectiveTarget = getEffectiveUser(target, targetMods);
   const speedDifference = effectiveAttacker.speed - effectiveTarget.speed;
+  // hitDelta raises the attacker's chance; dodgeDelta lowers it (the defender
+  // is harder to hit). Both fold in before the [0.25, 0.95] clamp. With both
+  // deltas at 0 (the default — standing stance, no called shot) the result is
+  // byte-identical to the original curve.
   const hitChance = clampNumber(
-    SPEED_HIT_BASE_CHANCE + speedDifference * SPEED_HIT_STEP,
+    SPEED_HIT_BASE_CHANCE + speedDifference * SPEED_HIT_STEP + hitDelta - dodgeDelta,
     SPEED_HIT_MIN_CHANCE,
     SPEED_HIT_MAX_CHANCE
   );
@@ -116,8 +130,8 @@ export function calculateSpeedHitChance(attacker, target, attackerMods = null, t
   return Math.round(hitChance * 100) / 100;
 }
 
-function rollSpeedContest(attacker, target, attackerMods = null, targetMods = null) {
-  const hitChance = calculateSpeedHitChance(attacker, target, attackerMods, targetMods);
+function rollSpeedContest(attacker, target, attackerMods = null, targetMods = null, options = {}) {
+  const hitChance = calculateSpeedHitChance(attacker, target, attackerMods, targetMods, options);
   return {
     hit: Math.random() < hitChance,
     hitChance
@@ -674,7 +688,7 @@ export async function getRoomEcology(db, username, row, col, worldDay = getWorld
 export async function getUserState(db, username) {
   const user = await dbFirst(
     db,
-    'SELECT username, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold, experience, attributePoints, displayName FROM users WHERE username = ? AND isNpc = 0',
+    'SELECT username, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold, experience, attributePoints, displayName, stance FROM users WHERE username = ? AND isNpc = 0',
     [username]
   );
   if (!user) {
@@ -1354,7 +1368,7 @@ function isBodylessUser(user) {
 export async function getBodyParts(db, username) {
   return dbAll(
     db,
-    `SELECT id, username, partType, label, slotType, vital, hp, maxHp, severed
+    `SELECT id, username, partType, label, slotType, vital, hp, maxHp, baseMaxHp, severed
      FROM bodyParts
      WHERE username = ?
      ORDER BY CASE partType WHEN 'torso' THEN 0 ELSE 1 END, id ASC`,
@@ -1405,12 +1419,15 @@ export async function ensureBody(db, user) {
   }
 
   for (const part of parts) {
+    // baseMaxHp mirrors the distributed base maxHp at creation (plan 006). Armor
+    // bonuses (plan 015's applyPartMaxHpDelta) move maxHp transiently but never
+    // touch baseMaxHp, so /regrow can restore the permanent, un-fortified base.
     await dbRun(
       db,
       `INSERT OR IGNORE INTO bodyParts
-        (username, partType, label, slotType, vital, hp, maxHp, severed)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
-      [user.username, part.partType, part.label, part.slotType, part.vital ? 1 : 0, part.hp, part.maxHp]
+        (username, partType, label, slotType, vital, hp, maxHp, baseMaxHp, severed)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+      [user.username, part.partType, part.label, part.slotType, part.vital ? 1 : 0, part.hp, part.maxHp, part.maxHp]
     );
   }
 
@@ -1796,7 +1813,7 @@ async function emitConditionTransitions(db, username, beforeParts, afterParts, r
 }
 
 export async function applyBodyDamage(db, user, amount, options = {}) {
-  const { cause, row, col, random = Math.random } = options;
+  const { cause, row, col, random = Math.random, targetLabel = null } = options;
   const damage = Math.max(0, Math.floor(amount || 0));
 
   if (isBodylessUser(user)) {
@@ -1814,7 +1831,18 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
   const torso = working.find(part => part.partType === 'torso');
 
   let remaining = damage;
-  const target = pickTargetPart(liveParts, random);
+  // A called shot (targetLabel) routes damage to the named, non-severed part
+  // instead of the weighted-random pick. Spill-to-torso and every other rule
+  // below is unchanged. When targetLabel is absent this is byte-identical to the
+  // original random routing (the `random` draw is still consumed, preserving the
+  // RNG order callers rely on).
+  let target = pickTargetPart(liveParts, random);
+  if (targetLabel) {
+    const aimed = liveParts.find(part => part.label === targetLabel);
+    if (aimed) {
+      target = aimed;
+    }
+  }
   const targetWorking = target ? workingByLabel.get(target.label) : null;
 
   let totalDealt = 0;
@@ -2209,13 +2237,17 @@ export async function runHostileRoomAction(db, row, col) {
   }
 
   const playerMods = await getConditionAndGearModifiers(db, player.username);
-  const contest = rollSpeedContest(npc, player, null, playerMods);
+  // Only the defending PLAYER's stance applies against an NPC: dodgeBonus makes
+  // them harder to hit, damageTakenDelta adjusts the blow. The NPC has no stance.
+  const playerStance = STANCES[normalizeStance(player.stance)];
+  const contest = rollSpeedContest(npc, player, null, playerMods, { dodgeDelta: playerStance.dodgeBonus });
   if (!contest.hit) {
     await insertSystemMessage(db, row, col, `${player.username} dodged ${npc.displayName || npc.username}.`);
     return { tick, acted: true, missed: true };
   }
 
-  const { damage, isCriticalAttack } = await calculateAttackDamage(db, npc, player.username, tick.tick, null);
+  const { damage: baseDamage, isCriticalAttack } = await calculateAttackDamage(db, npc, player.username, tick.tick, null);
+  const damage = Math.max(0, baseDamage + playerStance.damageTakenDelta);
   const damageResult = await applyBodyDamage(db, player, damage, {
     cause: `attack by ${npc.username}`,
     row,
@@ -2466,20 +2498,43 @@ export async function handleAttack(db, username, message, row, col, options = {}
 
   const attackerMods = attacker.isNpc ? null : await getConditionAndGearModifiers(db, username);
 
+  // Stance and called shot are attacker-message-level (apply to every target in
+  // this attack). NPCs have no parts, so a called shot only routes at player
+  // targets; against NPCs it's ignored. standing/no-aim => deltas are all zero,
+  // so every existing combat number is unchanged.
+  const attackerStance = STANCES[normalizeStance(attacker.stance)];
+
   for (const user of targets) {
     const target = await getUser(db, user.username, 'Target');
     const targetMods = target.isNpc ? null : await getConditionAndGearModifiers(db, target.username);
-    const speedContest = rollSpeedContest(attacker, target, attackerMods, targetMods);
+    const calledShot = target.isNpc ? null : parseCalledShot(message);
+    const targetStance = target.isNpc ? STANCES[DEFAULT_STANCE] : STANCES[normalizeStance(target.stance)];
+
+    // Contest deltas: attacker stance hitBonus and (when aiming) the called-shot
+    // accuracy penalty raise/lower the attacker; defender stance dodgeBonus
+    // makes the defender harder to hit. Folded in before the [0.25, 0.95] clamp.
+    let hitDelta = attackerStance.hitBonus;
+    if (calledShot) {
+      hitDelta -= CALLED_SHOT_HIT_PENALTY;
+    }
+    const dodgeDelta = targetStance.dodgeBonus;
+
+    const speedContest = rollSpeedContest(attacker, target, attackerMods, targetMods, { hitDelta, dodgeDelta });
     if (!speedContest.hit) {
       attackMessages.push(`${user.username} dodged ${username}'s attack`);
       continue;
     }
 
-    const { damage, isCriticalAttack } = await calculateAttackDamage(db, attacker, user.username, createdTick, attackerMods);
+    const { damage: baseDamage, isCriticalAttack } = await calculateAttackDamage(db, attacker, user.username, createdTick, attackerMods);
+    // Damage modifiers: aimed head bonus, attacker stance damageBonus, and the
+    // defender's stance damageTakenDelta. Floor at 0. standing => all zero.
+    const headBonus = calledShot === 'head' ? CALLED_SHOT_HEAD_BONUS : 0;
+    const damage = Math.max(0, baseDamage + headBonus + attackerStance.damageBonus + targetStance.damageTakenDelta);
     const damageResult = await applyBodyDamage(db, target, damage, {
       cause: `attack by ${username}`,
       row,
-      col
+      col,
+      targetLabel: calledShot
     });
 
     const attackedUser = await dbFirst(db, 'SELECT * FROM users WHERE username = ?', [user.username]);
@@ -2824,7 +2879,137 @@ export async function handleTakeCommand(db, username, row, col, message) {
   return { taken: item.name };
 }
 
+// Space-separated stance keys for usage/error messages, e.g. "standing,
+// aggressive, guarding, crouched".
+function stanceOptionList() {
+  return Object.keys(STANCES).join(', ');
+}
+
+// Resolve the severed part the player named in /regrow, normalizing label
+// spelling (underscores/case) the same way called shots do. Returns the live
+// part row (the named, currently-severed part) plus context, or throws the
+// appropriate validation ActionError. Shared by validate and perform so the
+// two can't drift.
+async function resolveRegrow(db, username, row, col, message) {
+  const rest = commandRest(message, '/regrow').trim();
+  if (!rest) {
+    throw new ActionError('Use /regrow <part label>.');
+  }
+  // Map 'left_arm'/'RIGHT ARM' to the canonical label via parseCalledShot,
+  // which matches any humanoid part label. Fall back to the raw text so the
+  // not-a-part error path stays informative.
+  const label = parseCalledShot(rest) || rest.toLowerCase();
+
+  const worldDay = getWorldDay();
+  const tickValue = await getCurrentTickValue(db);
+
+  // Inn gate: room must be an inn today AND the player must have paid access.
+  const access = await getRoomAccessState(db, username, row, col, tickValue, worldDay);
+  assertAction(access.required, 'Regrowth rites require an inn.', 403);
+  assertAction(access.paid, 'You must pay for inn access first.', 402);
+
+  // One regrowth per player per worldDay (pseudo-room 0,0 — global per day).
+  const cooldown = await dbFirst(
+    db,
+    `SELECT lastAppliedTick FROM roomEffectCooldowns
+     WHERE username = ? AND roomRow = 0 AND roomCol = 0 AND effectType = ? AND worldDay = ?`,
+    [username, REGROW_EFFECT_TYPE, worldDay]
+  );
+  assertAction(!cooldown, 'You can only regrow once per day.');
+
+  const user = await getUser(db, username);
+  assertAction((user.gold || 0) >= REGROW_GOLD_COST, 'Not enough gold for the rite.', 402);
+
+  const parts = (await ensureBody(db, user)) || [];
+  const part = parts.find(p => p.label === label);
+  assertAction(part, 'No such body part.');
+  assertAction(part.severed, 'That part is not severed.');
+
+  return { user, part, worldDay, tickValue, label: part.label };
+}
+
+export async function validateRegrowCommand(db, username, row, col, message) {
+  // All failure paths fire here (before spendStamina): bad part, not an inn,
+  // unpaid, short on gold, already regrown today.
+  await resolveRegrow(db, username, row, col, message);
+}
+
+// Dedicated regrow restorer — NOT applyBodyHeal (which skips severed parts).
+// Restores the part to its BASE (un-fortified) maxHp, hp 1, un-severs it, and
+// folds baseMaxHp back into users.maxHealth and 1 into users.health, keeping
+// the invariant `users.maxHealth == Σ non-severed maxHp` exact. The limb
+// regrows bare; re-equipping armor re-applies its bonus via plan 015.
+async function restoreSeveredPart(db, username, part) {
+  const base = Math.max(0, Math.floor(part.baseMaxHp || 0));
+  await dbRun(
+    db,
+    'UPDATE bodyParts SET severed = 0, maxHp = ?, hp = 1 WHERE id = ?',
+    [base, part.id]
+  );
+  await dbRun(
+    db,
+    'UPDATE users SET maxHealth = maxHealth + ?, health = health + 1 WHERE username = ?',
+    [base, username]
+  );
+}
+
+export async function handleRegrowCommand(db, username, row, col, message) {
+  const { part, worldDay, tickValue, label } = await resolveRegrow(db, username, row, col, message);
+
+  // Conditional gold decrement (plan 003 pattern) — only fires once and never
+  // overdraws below zero.
+  const goldUpdate = await dbRun(
+    db,
+    'UPDATE users SET gold = gold - ? WHERE username = ? AND gold >= ?',
+    [REGROW_GOLD_COST, username, REGROW_GOLD_COST]
+  );
+  assertAction(changes(goldUpdate) > 0, 'Not enough gold for the rite.', 402);
+
+  await restoreSeveredPart(db, username, part);
+  // Stamp the per-day cooldown (pseudo-room 0,0).
+  await upsertCooldown(db, username, 0, 0, REGROW_EFFECT_TYPE, tickValue, worldDay);
+
+  const message_ = `${username}'s ${label} regrows, pale and new.`;
+  await insertSystemMessage(db, row, col, message_);
+  return { regrew: label };
+}
+
+export async function handleStanceCommand(db, username, row, col, message) {
+  const rest = commandRest(message, '/stance').trim();
+  if (!rest) {
+    throw new ActionError(`Use /stance <${stanceOptionList()}>.`);
+  }
+  const requested = rest.split(/\s+/)[0].toLowerCase();
+  if (!Object.prototype.hasOwnProperty.call(STANCES, requested)) {
+    throw new ActionError(`Unknown stance. Choose one of: ${stanceOptionList()}.`);
+  }
+  await getUser(db, username); // 404 if the user vanished
+  await dbRun(db, 'UPDATE users SET stance = ? WHERE username = ?', [requested, username]);
+  const message_ = `${username} takes a ${STANCES[requested].label} stance.`;
+  await insertSystemMessage(db, row, col, message_);
+  return { stance: requested };
+}
+
 export async function handleChatAction(db, username, row, col, message) {
+  if (message.trim().toLowerCase().startsWith('/stance')) {
+    return runPlayerAction(db, {
+      username,
+      staminaCost: 1,
+      perform: async () => handleStanceCommand(db, username, row, col, message),
+      advanceTick: () => advanceGlobalTick(db)
+    });
+  }
+
+  if (message.trim().toLowerCase().startsWith('/regrow')) {
+    return runPlayerAction(db, {
+      username,
+      staminaCost: 20,
+      validate: async () => validateRegrowCommand(db, username, row, col, message),
+      perform: async () => handleRegrowCommand(db, username, row, col, message),
+      advanceTick: () => advanceGlobalTick(db)
+    });
+  }
+
   if (message.trim().toLowerCase().startsWith('/roll')) {
     return runPlayerAction(db, {
       username,
@@ -2875,11 +3060,43 @@ export async function handleChatAction(db, username, row, col, message) {
   });
 }
 
+// Called-shot pre-flight: if the attacker named a part, at least one player
+// target must have that part non-severed, else the aim is rejected BEFORE any
+// stamina is spent. NPC targets have no parts and never satisfy the aim. This
+// runs inside handleAttackAction's `validate`, so the throw happens before
+// spendStamina in runPlayerAction.
+async function validateCalledShot(db, message, targets) {
+  const calledShot = parseCalledShot(message);
+  if (!calledShot) {
+    return;
+  }
+  let aimable = false;
+  for (const target of targets) {
+    const full = await getUser(db, target.username, 'Target');
+    if (full.isNpc) {
+      continue;
+    }
+    // ensureBody instantiates the part rows if the target has never been read,
+    // so a fresh target's intact limb is aimable.
+    const parts = (await ensureBody(db, full)) || [];
+    const part = parts.find(p => p.label === calledShot);
+    if (part && !part.severed) {
+      aimable = true;
+      break;
+    }
+  }
+  assertAction(aimable, 'There is nothing left to aim at.');
+}
+
 export async function handleAttackAction(db, username, row, col, message) {
   return runPlayerAction(db, {
     username,
     staminaCost: 1,
-    validate: async () => validateAttackTargets(db, message, row, col, username),
+    validate: async () => {
+      const targets = await validateAttackTargets(db, message, row, col, username);
+      await validateCalledShot(db, message, targets);
+      return targets;
+    },
     perform: async () => {
       const deferredSystemMessages = [];
       const updatedMessage = await handleAttack(db, username, message, row, col, { deferredSystemMessages });

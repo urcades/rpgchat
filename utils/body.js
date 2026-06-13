@@ -97,6 +97,61 @@ function bodyPenaltyModifiers(parts) {
   return modifiers;
 }
 
+// Stances trade hit/dodge/damage. `standing` is all-zero so the default is
+// behavior-neutral: with no stance change every combat number is unchanged.
+// All tuning lives here; the engine references the symbols, never the numbers.
+const STANCES = {
+  standing:   { label: 'Standing',   hitBonus: 0,     dodgeBonus: 0,    damageBonus: 0,  damageTakenDelta: 0 },
+  aggressive: { label: 'Aggressive', hitBonus: 0.05,  dodgeBonus: -0.1, damageBonus: 1,  damageTakenDelta: 1 },
+  guarding:   { label: 'Guarding',   hitBonus: -0.05, dodgeBonus: 0.05, damageBonus: -1, damageTakenDelta: -1 },
+  crouched:   { label: 'Crouched',   hitBonus: -0.1,  dodgeBonus: 0.1,  damageBonus: 0,  damageTakenDelta: 0 }
+};
+
+const DEFAULT_STANCE = 'standing';
+
+// A known stance key, or 'standing' for anything unrecognized.
+function normalizeStance(value) {
+  if (typeof value === 'string') {
+    const key = value.trim().toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(STANCES, key)) {
+      return key;
+    }
+  }
+  return DEFAULT_STANCE;
+}
+
+// Called shots trade accuracy for placement. Numbers live here only.
+const CALLED_SHOT_HIT_PENALTY = 0.15;
+const CALLED_SHOT_HEAD_BONUS = 1; // aimed head hits land +1 damage
+
+// Part labels a player can name in an attack message (the humanoid plan).
+// Matched case-insensitively; space or underscore between words is accepted.
+const CALLED_SHOT_LABELS = HUMANOID_PLAN.map(part => part.label);
+
+// Find a part LABEL named in the message and return its normalized label, or
+// null when no part is aimed at. Two-word labels accept an underscore in place
+// of the space ('RIGHT_ARM' -> 'right arm'). Word-boundary anchored so 'head'
+// inside 'headlong' never matches.
+function parseCalledShot(message) {
+  if (typeof message !== 'string') {
+    return null;
+  }
+  // Strip @mention target tokens first: a called shot names a body part in the
+  // prose, never inside the @target handle. Without this, attacking '@left_arm'
+  // (a username) would be misread as aiming at the left arm.
+  const haystack = message.toLowerCase().replace(/@[a-z0-9_-]+/g, ' ');
+  for (const label of CALLED_SHOT_LABELS) {
+    const pattern = new RegExp(
+      `(^|[^a-z])${label.replace(/ /g, '[ _]')}([^a-z]|$)`,
+      'i'
+    );
+    if (pattern.test(haystack)) {
+      return label;
+    }
+  }
+  return null;
+}
+
 // Weighted-random target selection among non-severed parts, by maxHp.
 function pickTargetPart(parts, random = Math.random) {
   const live = (parts || []).filter(part => !part.severed);
@@ -125,5 +180,11 @@ module.exports = {
   PART_PENALTIES,
   bodyPenaltyModifiers,
   pickTargetPart,
-  emptyModifiers
+  emptyModifiers,
+  STANCES,
+  DEFAULT_STANCE,
+  normalizeStance,
+  parseCalledShot,
+  CALLED_SHOT_HIT_PENALTY,
+  CALLED_SHOT_HEAD_BONUS
 };

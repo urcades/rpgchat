@@ -8,7 +8,10 @@ const {
   partCondition,
   bodyPenaltyModifiers,
   pickTargetPart,
-  emptyModifiers
+  emptyModifiers,
+  STANCES,
+  normalizeStance,
+  parseCalledShot
 } = require('../utils/body');
 
 test('distributeAcrossPlan sums exactly for awkward totals', () => {
@@ -105,4 +108,52 @@ test('pickTargetPart returns null when every part is severed', () => {
   ];
   assert.equal(pickTargetPart(parts, () => 0.5), null);
   assert.equal(pickTargetPart([], () => 0.5), null);
+});
+
+test('parseCalledShot normalizes labels across case, spaces, and underscores', () => {
+  assert.equal(parseCalledShot('take his RIGHT_ARM off @bob'), 'right arm');
+  assert.equal(parseCalledShot('aim for the Left Leg'), 'left leg');
+  assert.equal(parseCalledShot('go for the head'), 'head');
+  assert.equal(parseCalledShot('strike the TORSO'), 'torso');
+  assert.equal(parseCalledShot('a clean shot at his neck'), 'neck');
+  // underscore form for a one-word label is a no-op (still matches)
+  assert.equal(parseCalledShot('hit the left_arm'), 'left arm');
+});
+
+test('parseCalledShot returns null when no part is named', () => {
+  assert.equal(parseCalledShot('I attack @bob'), null);
+  assert.equal(parseCalledShot(''), null);
+  assert.equal(parseCalledShot(undefined), null);
+  // word-boundary anchored: a part name embedded inside another word never matches
+  assert.equal(parseCalledShot('he charged headlong into battle'), null);
+  assert.equal(parseCalledShot('the armageddon begins'), null); // 'arm' inside 'armageddon'
+});
+
+test('normalizeStance accepts known keys and falls back to standing', () => {
+  assert.equal(normalizeStance('aggressive'), 'aggressive');
+  assert.equal(normalizeStance('GUARDING'), 'guarding');
+  assert.equal(normalizeStance('  crouched  '), 'crouched');
+  assert.equal(normalizeStance('standing'), 'standing');
+  assert.equal(normalizeStance('nonsense'), 'standing');
+  assert.equal(normalizeStance(''), 'standing');
+  assert.equal(normalizeStance(undefined), 'standing');
+  assert.equal(normalizeStance(null), 'standing');
+});
+
+test('STANCES table has the four expected keys and a neutral standing default', () => {
+  assert.deepEqual(Object.keys(STANCES).sort(), ['aggressive', 'crouched', 'guarding', 'standing']);
+  // standing must be all-zero so the default is behavior-neutral in combat.
+  const standing = STANCES.standing;
+  assert.equal(standing.hitBonus, 0);
+  assert.equal(standing.dodgeBonus, 0);
+  assert.equal(standing.damageBonus, 0);
+  assert.equal(standing.damageTakenDelta, 0);
+  // Every stance exposes the same shape with numeric fields and a label.
+  for (const key of Object.keys(STANCES)) {
+    const stance = STANCES[key];
+    assert.equal(typeof stance.label, 'string');
+    for (const field of ['hitBonus', 'dodgeBonus', 'damageBonus', 'damageTakenDelta']) {
+      assert.equal(typeof stance[field], 'number', `${key}.${field} is numeric`);
+    }
+  }
 });

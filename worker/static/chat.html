@@ -226,6 +226,7 @@
         <p>Speed: ${effective.speed}</p>
         <p>Strength: ${effective.strength}</p>
         <p>Intelligence: ${effective.intelligence}</p>
+        <p>Stance: ${(data.stance || 'standing').replace(/^\w/, c => c.toUpperCase())}</p>
       `;
       document.getElementById('gold').textContent = `Gold: ${data.gold !== undefined ? data.gold : 0}`;
       const skillSelect = document.getElementById('skill-id');

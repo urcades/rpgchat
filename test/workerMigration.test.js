@@ -2008,7 +2008,7 @@ async function assertHpInvariant(db, username) {
 }
 
 async function partRow(db, username, label) {
-  return db.prepare('SELECT id, hp, maxHp, severed FROM bodyParts WHERE username = ? AND label = ?')
+  return db.prepare('SELECT id, hp, maxHp, baseMaxHp, severed FROM bodyParts WHERE username = ? AND label = ?')
     .bind(username, label).first();
 }
 
@@ -2493,6 +2493,421 @@ test('Plan 005: floor items surface in the room payload as groundItems', async (
     assert.equal(ecology.groundItems.length, 1);
     assert.equal(ecology.groundItems[0].name, 'Padded Vest');
     assert.equal(ecology.groundItems[0].slotType, 'torso');
+  } finally {
+    await db.close();
+  }
+});
+
+// ── Plan 006: called shots, stances, regrowth ──────────────────────────────
+
+test('Plan 006: a called shot misses where an unaimed swing would land', async () => {
+  const db = await createMigratedDb();
+  const { handleAttack, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    // Equal speeds => base hit chance 0.7. A called shot subtracts the 0.15
+    // accuracy penalty => aimed chance 0.55. A mocked contest roll of 0.6 is
+    // ABOVE 0.55 (aimed misses: 0.6 < 0.55 is false) but BELOW 0.7 (unaimed
+    // hits: 0.6 < 0.7 is true). Only one Math.random() draw is consumed before
+    // the hit/miss branch decides; the repeated tail value covers crit + pick.
+    await seedLiveUser(db, 'sniper', { health: 30, maxHealth: 30, speed: 1, strength: 1 });
+    await seedLiveUser(db, 'mark_a', { health: 30, maxHealth: 30, speed: 1 });
+    await seedLiveUser(db, 'mark_b', { health: 30, maxHealth: 30, speed: 1 });
+
+    const calm = findCalmRoom(getWorldDay());
+    await updatePresence(db, 'sniper', calm.row, calm.col);
+    await updatePresence(db, 'mark_a', calm.row, calm.col);
+    await updatePresence(db, 'mark_b', calm.row, calm.col);
+
+    // Aimed at mark_a's left arm: chance 0.55, roll 0.6 -> miss.
+    const aimed = await withMockedRandom([0.6], () =>
+      handleAttack(db, 'sniper', 'I aim for @mark_a left_arm', calm.row, calm.col));
+    assert.match(aimed, /mark_a dodged/);
+
+    // Unaimed at mark_b: chance 0.7, same roll 0.6 -> hit.
+    const unaimed = await withMockedRandom([0.6, 0.99, 0.5], () =>
+      handleAttack(db, 'sniper', 'I swing at @mark_b', calm.row, calm.col));
+    assert.match(unaimed, /sniper attacked mark_b/);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 006: a called shot lands on exactly the named part', async () => {
+  const db = await createMigratedDb();
+  const { handleAttack, getBodyParts, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    // Force the hit (roll 0.1 < 0.55 aimed chance), no crit (0.99), and a
+    // pickTargetPart draw (0.95 -> a leg) that the called shot OVERRIDES: damage
+    // must land on the left arm, never the leg the random pick chose.
+    await seedLiveUser(db, 'placer', { health: 30, maxHealth: 30, speed: 1, strength: 1 });
+    await seedLiveUser(db, 'limb', { health: 30, maxHealth: 30, speed: 1 });
+
+    const calm = findCalmRoom(getWorldDay());
+    await updatePresence(db, 'placer', calm.row, calm.col);
+    await updatePresence(db, 'limb', calm.row, calm.col);
+
+    // base damage = 1 + floor(1/4) = 1; left arm has hp 4 so no sever/spill.
+    await withMockedRandom([0.1, 0.99, 0.95], () =>
+      handleAttack(db, 'placer', 'I cut @limb left_arm', calm.row, calm.col));
+
+    const parts = await getBodyParts(db, 'limb');
+    const leftArm = parts.find(p => p.label === 'left arm');
+    const rightLeg = parts.find(p => p.label === 'right leg');
+    assert.equal(leftArm.hp, 3, 'left arm took the 1 damage');
+    assert.equal(rightLeg.hp, 4, 'the randomly-picked leg was untouched');
+
+    // Invariant: users.health == Σ part hp.
+    const user = await db.prepare("SELECT health FROM users WHERE username = 'limb'").first();
+    assert.equal(user.health, await sumBodyHp(db, 'limb'));
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 006: an aimed head hit does +1 damage versus an unaimed head hit', async () => {
+  const db = await createMigratedDb();
+  const { handleAttack, getBodyParts, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    // getBodyParts orders torso first, so the weighted roll ranges are:
+    // torso [0.0,0.30), head [0.30,0.4333). A pick draw of 0.35 lands
+    // pickTargetPart on the head, letting us compare the same part with and
+    // without aiming. head maxHp is 4.
+    await seedLiveUser(db, 'archer', { health: 30, maxHealth: 30, speed: 1, strength: 1 });
+    await seedLiveUser(db, 'head_a', { health: 30, maxHealth: 30, speed: 1 });
+    await seedLiveUser(db, 'head_b', { health: 30, maxHealth: 30, speed: 1 });
+
+    const calm = findCalmRoom(getWorldDay());
+    await updatePresence(db, 'archer', calm.row, calm.col);
+    await updatePresence(db, 'head_a', calm.row, calm.col);
+    await updatePresence(db, 'head_b', calm.row, calm.col);
+
+    // Aimed head: hit (0.1 < 0.55), no crit (0.99), pick draw 0.35 (overridden by
+    // the called shot). base 1 + head bonus 1 = 2 damage -> head 4 -> 2.
+    await withMockedRandom([0.1, 0.99, 0.35], () =>
+      handleAttack(db, 'archer', 'arrow to the head @head_a', calm.row, calm.col));
+    const headA = (await getBodyParts(db, 'head_a')).find(p => p.label === 'head');
+    assert.equal(headA.hp, 2, 'aimed head took 2 damage (base 1 + head bonus 1)');
+
+    // Unaimed but forced to the head via the pick draw 0.35: hit (0.1 < 0.7),
+    // no crit (0.99), pick 0.35 -> head. base 1, no bonus -> head 4 -> 3.
+    await withMockedRandom([0.1, 0.99, 0.35], () =>
+      handleAttack(db, 'archer', 'I swing at @head_b', calm.row, calm.col));
+    const headB = (await getBodyParts(db, 'head_b')).find(p => p.label === 'head');
+    assert.equal(headB.hp, 3, 'unaimed head took 1 damage');
+
+    assert.equal((headB.hp - headA.hp), 1, 'aimed head dealt exactly 1 more');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 006: aiming at a severed part rejects before any stamina is spent', async () => {
+  const db = await createMigratedDb();
+  const { handleAttackAction, applyBodyDamage, getUser, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'duelist', { health: 30, maxHealth: 30, speed: 1, strength: 1, stamina: 100, maxStamina: 100 });
+    await seedLiveUser(db, 'stump', { health: 30, maxHealth: 30, speed: 1 });
+
+    const calm = findCalmRoom(getWorldDay());
+    await updatePresence(db, 'duelist', calm.row, calm.col);
+    await updatePresence(db, 'stump', calm.row, calm.col);
+
+    // Sever stump's left arm first (random 0.5 -> left arm; 4 damage -> sever).
+    await applyBodyDamage(db, await getUser(db, 'stump'), 4, {
+      cause: 'a prior wound', row: calm.row, col: calm.col, random: () => 0.5
+    });
+
+    const staminaBefore = (await db.prepare("SELECT stamina FROM users WHERE username = 'duelist'").first()).stamina;
+
+    await assert.rejects(
+      () => handleAttackAction(db, 'duelist', calm.row, calm.col, 'go for the @stump left_arm'),
+      /There is nothing left to aim at\./
+    );
+
+    const staminaAfter = (await db.prepare("SELECT stamina FROM users WHERE username = 'duelist'").first()).stamina;
+    assert.equal(staminaAfter, staminaBefore, 'validation failure spent no stamina');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 006: /stance guarding cuts incoming damage by 1; /stance nonsense rejects', async () => {
+  const db = await createMigratedDb();
+  const { handleAttack, handleChatAction, getBodyParts, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    // Two identical defenders; one guards (damageTakenDelta -1). Same attacker,
+    // same forced RNG. base damage = 1 + floor(8/4) = 3. Standing defender takes
+    // 3; guarding defender takes 3 - 1 = 2. Pick draw 0.5 -> left arm (hp 4) on
+    // both, so neither severs and the comparison is clean.
+    await seedLiveUser(db, 'basher', { health: 30, maxHealth: 30, speed: 1, strength: 8 });
+    await seedLiveUser(db, 'plain', { health: 30, maxHealth: 30, speed: 1 });
+    await seedLiveUser(db, 'turtle', { health: 30, maxHealth: 30, speed: 1, stamina: 100, maxStamina: 100 });
+
+    const calm = findCalmRoom(getWorldDay());
+    await updatePresence(db, 'basher', calm.row, calm.col);
+    await updatePresence(db, 'plain', calm.row, calm.col);
+    await updatePresence(db, 'turtle', calm.row, calm.col);
+
+    // turtle adopts a guarding stance.
+    const stanceResult = await handleChatAction(db, 'turtle', calm.row, calm.col, '/stance guarding');
+    assert.equal(stanceResult.stance, 'guarding');
+    const turtleRow = await db.prepare("SELECT stance FROM users WHERE username = 'turtle'").first();
+    assert.equal(turtleRow.stance, 'guarding');
+
+    // Standing defender: hit (0.1 < 0.7), no crit (0.99), pick 0.5 -> left arm.
+    await withMockedRandom([0.1, 0.99, 0.5], () =>
+      handleAttack(db, 'basher', 'I clobber @plain', calm.row, calm.col));
+    const plainArm = (await getBodyParts(db, 'plain')).find(p => p.label === 'left arm');
+    assert.equal(plainArm.hp, 1, 'standing defender took 3 damage (4 -> 1)');
+
+    // Guarding defender: same rolls, damage 3 - 1 = 2 (4 -> 2).
+    await withMockedRandom([0.1, 0.99, 0.5], () =>
+      handleAttack(db, 'basher', 'I clobber @turtle', calm.row, calm.col));
+    const turtleArm = (await getBodyParts(db, 'turtle')).find(p => p.label === 'left arm');
+    assert.equal(turtleArm.hp, 2, 'guarding defender took only 2 damage (4 -> 2)');
+
+    // An unknown stance is rejected with the option list and changes nothing.
+    await assert.rejects(
+      () => handleChatAction(db, 'plain', calm.row, calm.col, '/stance nonsense'),
+      /Unknown stance.*standing.*aggressive.*guarding.*crouched/
+    );
+    const plainStance = await db.prepare("SELECT stance FROM users WHERE username = 'plain'").first();
+    assert.equal(plainStance.stance, 'standing', 'rejected stance left the default in place');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 006: an aggressive attacker hits harder and lands where standing would miss', async () => {
+  const db = await createMigratedDb();
+  const { handleAttack, handleChatAction, getBodyParts, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    // Aggressive stance: hitBonus +0.05, damageBonus +1. Equal speeds => base
+    // 0.7; aggressive attacker chance 0.75. A contest roll of 0.72 MISSES a
+    // standing attacker (0.72 < 0.70 is false) but HITS an aggressive one
+    // (0.72 < 0.75 is true). When it lands, damage = base 1 + 1 = 2.
+    await seedLiveUser(db, 'standing_atk', { health: 30, maxHealth: 30, speed: 1, strength: 1, stamina: 100, maxStamina: 100 });
+    await seedLiveUser(db, 'raging_atk', { health: 30, maxHealth: 30, speed: 1, strength: 1, stamina: 100, maxStamina: 100 });
+    await seedLiveUser(db, 'dummy_a', { health: 30, maxHealth: 30, speed: 1 });
+    await seedLiveUser(db, 'dummy_b', { health: 30, maxHealth: 30, speed: 1 });
+
+    const calm = findCalmRoom(getWorldDay());
+    await updatePresence(db, 'standing_atk', calm.row, calm.col);
+    await updatePresence(db, 'raging_atk', calm.row, calm.col);
+    await updatePresence(db, 'dummy_a', calm.row, calm.col);
+    await updatePresence(db, 'dummy_b', calm.row, calm.col);
+
+    // Standing attacker, roll 0.72 -> miss (chance 0.70).
+    const standMiss = await withMockedRandom([0.72], () =>
+      handleAttack(db, 'standing_atk', 'I jab @dummy_a', calm.row, calm.col));
+    assert.match(standMiss, /dummy_a dodged/);
+
+    // raging_atk goes aggressive, then same roll 0.72 -> hit (chance 0.75).
+    await handleChatAction(db, 'raging_atk', calm.row, calm.col, '/stance aggressive');
+    // hit (0.72 < 0.75), no crit (0.99), pick 0.5 -> left arm. damage 1+1 = 2.
+    const rageHit = await withMockedRandom([0.72, 0.99, 0.5], () =>
+      handleAttack(db, 'raging_atk', 'I jab @dummy_b', calm.row, calm.col));
+    assert.match(rageHit, /raging_atk attacked dummy_b/);
+    const dummyArm = (await getBodyParts(db, 'dummy_b')).find(p => p.label === 'left arm');
+    assert.equal(dummyArm.hp, 2, 'aggressive attacker dealt 2 (base 1 + damageBonus 1)');
+  } finally {
+    await db.close();
+  }
+});
+
+async function grantInnAccess(db, username, row, col, worldDay, fee = 0) {
+  await db.prepare(
+    `INSERT INTO roomAccess (username, roomRow, roomCol, accessType, costPaid, worldDay)
+     VALUES (?, ?, ?, 'inn', ?, ?)`
+  ).bind(username, row, col, fee, worldDay).run();
+}
+
+test('Plan 006: /regrow at a paid inn restores a severed part and rejects repeats, non-inns, and the broke', async () => {
+  const db = await createMigratedDb();
+  // The regrow EFFECT (un-sever, hp 1, maxHp = baseMaxHp, pool bookkeeping,
+  // gold, cooldown, message) is asserted through handleRegrowCommand directly:
+  // that is the `perform` step, with NO tick advance, so the inn's post-action
+  // passive heal (+2 hp/stamina) can't perturb the exact numbers. The full
+  // handleChatAction path is exercised separately to confirm the staminaCost 20
+  // and tick advance wiring, and to drive every validation rejection (which all
+  // throw BEFORE spendStamina, so stamina stays exact).
+  const {
+    handleChatAction, handleRegrowCommand, applyBodyDamage,
+    getBodyParts, getUser, ensureBody, updatePresence
+  } = await import('../worker/game.mjs');
+
+  try {
+    const worldDay = getWorldDay();
+    const inn = findInnRoom(worldDay);
+    const calm = findCalmRoom(worldDay);
+
+    await seedLiveUser(db, 'pilgrim', { health: 30, maxHealth: 30, speed: 1, stamina: 100, maxStamina: 100, gold: 100 });
+    await updatePresence(db, 'pilgrim', inn.row, inn.col);
+    await ensureBody(db, await getUser(db, 'pilgrim'));
+
+    // Sever the left leg: random 0.8 -> left leg (range [0.7333, 0.8667)), 4
+    // damage -> sever. baseMaxHp of that part is 4 (un-fortified).
+    await applyBodyDamage(db, await getUser(db, 'pilgrim'), 4, {
+      cause: 'a bad fall', row: inn.row, col: inn.col, random: () => 0.8
+    });
+    const severed = (await getBodyParts(db, 'pilgrim')).find(p => p.label === 'left leg');
+    assert.equal(severed.severed, 1, 'left leg is severed before regrow');
+    const baseMaxHp = severed.baseMaxHp;
+    const maxBefore = (await db.prepare("SELECT maxHealth FROM users WHERE username = 'pilgrim'").first()).maxHealth;
+
+    // Non-inn room rejects (no stamina spent) — full command path.
+    await updatePresence(db, 'pilgrim', calm.row, calm.col);
+    const staminaPreNonInn = (await db.prepare("SELECT stamina FROM users WHERE username = 'pilgrim'").first()).stamina;
+    await assert.rejects(
+      () => handleChatAction(db, 'pilgrim', calm.row, calm.col, '/regrow left leg'),
+      /Regrowth rites require an inn\./
+    );
+    assert.equal(
+      (await db.prepare("SELECT stamina FROM users WHERE username = 'pilgrim'").first()).stamina,
+      staminaPreNonInn,
+      'non-inn rejection spent no stamina'
+    );
+
+    // At the inn but unpaid -> rejects.
+    await updatePresence(db, 'pilgrim', inn.row, inn.col);
+    await assert.rejects(
+      () => handleChatAction(db, 'pilgrim', inn.row, inn.col, '/regrow left leg'),
+      /pay for inn access/
+    );
+
+    // Pay (grant access directly), then a broke player rejects with no stamina spent.
+    await grantInnAccess(db, 'pilgrim', inn.row, inn.col, worldDay);
+    await db.prepare("UPDATE users SET gold = 10 WHERE username = 'pilgrim'").run();
+    const staminaPreBroke = (await db.prepare("SELECT stamina FROM users WHERE username = 'pilgrim'").first()).stamina;
+    await assert.rejects(
+      () => handleChatAction(db, 'pilgrim', inn.row, inn.col, '/regrow left leg'),
+      /Not enough gold/
+    );
+    assert.equal(
+      (await db.prepare("SELECT stamina FROM users WHERE username = 'pilgrim'").first()).stamina,
+      staminaPreBroke,
+      'broke rejection spent no stamina'
+    );
+
+    // Confirm the full command path's staminaCost (20) + tick advance wiring,
+    // tolerating the inn passive's stamina top-up: a successful /regrow must
+    // advance the tick and leave stamina strictly below the pre-call value.
+    await db.prepare("UPDATE users SET gold = 100 WHERE username = 'pilgrim'").run();
+    const tickBefore = (await db.prepare('SELECT value FROM tick WHERE id = 1').first()).value;
+    const staminaPrePath = (await db.prepare("SELECT stamina FROM users WHERE username = 'pilgrim'").first()).stamina;
+    const pathResult = await handleChatAction(db, 'pilgrim', inn.row, inn.col, '/regrow left leg');
+    assert.equal(pathResult.regrew, 'left leg');
+    const tickAfter = (await db.prepare('SELECT value FROM tick WHERE id = 1').first()).value;
+    assert.equal(tickAfter, tickBefore + 1, 'a successful regrow advanced the tick');
+    const staminaAfterPath = (await db.prepare("SELECT stamina FROM users WHERE username = 'pilgrim'").first()).stamina;
+    assert.ok(staminaAfterPath <= staminaPrePath - 20 + 2, 'regrow spent ~20 stamina (inn may refund 2)');
+    assert.ok(staminaAfterPath < staminaPrePath, 'regrow spent stamina');
+
+    // The first /regrow above consumed the per-day cooldown, so to assert the
+    // EXACT regrow effect we use a fresh user and call handleRegrowCommand (the
+    // perform step, no tick/passive).
+    await seedLiveUser(db, 'mendicant', { health: 30, maxHealth: 30, speed: 1, stamina: 100, maxStamina: 100 });
+    await db.prepare("UPDATE users SET gold = 100 WHERE username = 'mendicant'").run(); // seedLiveUser ignores gold
+    await updatePresence(db, 'mendicant', inn.row, inn.col);
+    await ensureBody(db, await getUser(db, 'mendicant'));
+    await applyBodyDamage(db, await getUser(db, 'mendicant'), 4, {
+      cause: 'a bad fall', row: inn.row, col: inn.col, random: () => 0.8
+    });
+    const mendSevered = (await getBodyParts(db, 'mendicant')).find(p => p.label === 'left leg');
+    const mendBase = mendSevered.baseMaxHp;
+    const mendMaxBefore = (await db.prepare("SELECT maxHealth FROM users WHERE username = 'mendicant'").first()).maxHealth;
+    await grantInnAccess(db, 'mendicant', inn.row, inn.col, worldDay);
+
+    const result = await handleRegrowCommand(db, 'mendicant', inn.row, inn.col, '/regrow left leg');
+    assert.equal(result.regrew, 'left leg');
+
+    const regrown = (await getBodyParts(db, 'mendicant')).find(p => p.label === 'left leg');
+    assert.equal(regrown.severed, 0, 'leg is no longer severed');
+    assert.equal(regrown.hp, 1, 'regrown part returns at hp 1');
+    assert.equal(regrown.maxHp, mendBase, 'regrown part returns at baseMaxHp');
+
+    const after = await db.prepare("SELECT health, maxHealth, gold FROM users WHERE username = 'mendicant'").first();
+    assert.equal(after.maxHealth, mendMaxBefore + mendBase, 'maxHealth restored by exactly baseMaxHp');
+    assert.equal(after.gold, 75, 'regrow cost 25 gold');
+    await assertHpInvariant(db, 'mendicant');
+
+    const message = await db.prepare(
+      "SELECT message FROM messages WHERE message LIKE '%regrows, pale and new%' AND message LIKE 'mendicant%' LIMIT 1"
+    ).first();
+    assert.ok(message, 'regrow emits the rite message');
+
+    // A second regrow the same day is rejected (cooldown), no stamina spent —
+    // back through the full command path.
+    await db.prepare("UPDATE bodyParts SET severed = 1, hp = 0, maxHp = 0 WHERE username = 'mendicant' AND label = 'right leg'").run();
+    const staminaPreSecond = (await db.prepare("SELECT stamina FROM users WHERE username = 'mendicant'").first()).stamina;
+    await assert.rejects(
+      () => handleChatAction(db, 'mendicant', inn.row, inn.col, '/regrow right leg'),
+      /once per day/
+    );
+    assert.equal(
+      (await db.prepare("SELECT stamina FROM users WHERE username = 'mendicant'").first()).stamina,
+      staminaPreSecond,
+      'second-regrow rejection spent no stamina'
+    );
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 006: /regrow restores the BASE maxHp, not a lingering fortified one', async () => {
+  const db = await createMigratedDb();
+  // handleRegrowCommand directly (the perform step, no tick) so the inn's
+  // post-action passive heal can't bump the freshly-regrown 1-hp part and muddy
+  // the BASE-vs-fortified comparison.
+  const { handleRegrowCommand, equipItem, applyBodyDamage, applyBodyHeal, getUser, ensureBody, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    const worldDay = getWorldDay();
+    const inn = findInnRoom(worldDay);
+
+    await seedLiveUser(db, 'relic', { health: 30, maxHealth: 30, speed: 1, stamina: 100, maxStamina: 100 });
+    await db.prepare("UPDATE users SET gold = 100 WHERE username = 'relic'").run(); // seedLiveUser ignores gold
+    await updatePresence(db, 'relic', inn.row, inn.col);
+    await ensureBody(db, await getUser(db, 'relic'));
+
+    // Base left arm maxHp is 4; equip armor with maxHealth 6 -> arm maxHp 10.
+    const armBase = await partRow(db, 'relic', 'left arm');
+    const baseMaxHp = armBase.baseMaxHp;
+    assert.equal(armBase.maxHp, baseMaxHp, 'arm starts at its base maxHp');
+
+    await insertCarriedItem(db, 'relic', { name: 'Bracer', slotType: 'hand', modifiers: { maxHealth: 6 } });
+    await equipItem(db, await getUser(db, 'relic'), 'Bracer', inn.row, inn.col); // left arm
+    await applyBodyHeal(db, await getUser(db, 'relic'), 6, {}); // fill the headroom
+
+    const fortified = await partRow(db, 'relic', 'left arm');
+    assert.equal(fortified.maxHp, baseMaxHp + 6, 'arm is fortified to base + 6');
+    assert.equal(fortified.baseMaxHp, baseMaxHp, 'baseMaxHp untouched by armor');
+
+    // Sever the fortified arm (random 0.5 -> left arm). The Bracer is knocked off.
+    await applyBodyDamage(db, await getUser(db, 'relic'), fortified.maxHp, {
+      cause: 'a cleaver', row: inn.row, col: inn.col, random: () => 0.5
+    });
+    const severed = await partRow(db, 'relic', 'left arm');
+    assert.equal(severed.severed, 1, 'arm is severed');
+    await assertHpInvariant(db, 'relic');
+
+    // Pay inn access, then regrow.
+    await grantInnAccess(db, 'relic', inn.row, inn.col, worldDay);
+    const result = await handleRegrowCommand(db, 'relic', inn.row, inn.col, '/regrow left arm');
+    assert.equal(result.regrew, 'left arm');
+
+    const regrown = await partRow(db, 'relic', 'left arm');
+    assert.equal(regrown.maxHp, baseMaxHp, 'arm returns at BASE maxHp, NOT base + 6');
+    assert.notEqual(regrown.maxHp, baseMaxHp + 6, 'fortified maxHp did not linger');
+    assert.equal(regrown.hp, 1);
+    // Invariant: users.maxHealth == Σ non-severed maxHp still holds.
+    await assertHpInvariant(db, 'relic');
   } finally {
     await db.close();
   }

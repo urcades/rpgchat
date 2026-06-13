@@ -129,6 +129,7 @@
           </section>
           <section class="character-section">
             <h2>Body</h2>
+            <p>${escapeHtml('Stance: ' + (data.stance || 'standing').replace(/^\w/, c => c.toUpperCase()))}</p>
             ${bodyRows.length ? renderRows(bodyRows) : `<p>${escapeHtml('No body information available.')}</p>`}
           </section>
           <section class="character-section">
