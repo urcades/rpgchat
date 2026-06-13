@@ -315,6 +315,33 @@
       return paragraph;
     }
 
+    function setGroundParagraph(parent, groundItems) {
+      const paragraph = document.createElement('p');
+      setText(paragraph, 'Ground: ');
+      groundItems.forEach((item, index) => {
+        if (index > 0) {
+          setText(paragraph, ', ');
+        }
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'room-ground-item';
+        button.textContent = item.name;
+        button.title = `Take ${item.name}`;
+        button.addEventListener('click', () => takeGroundItem(item.name));
+        paragraph.appendChild(button);
+      });
+      parent.appendChild(paragraph);
+      return paragraph;
+    }
+
+    // Clicking a ground item issues the same /take command a player could type —
+    // it routes through the chat endpoint (handleChatAction dispatches /take),
+    // costs stamina, advances the tick, and on success updateAll() refreshes the
+    // room so the item moves from the floor into the player's inventory.
+    function takeGroundItem(itemName) {
+      postForm(`/chat/${row}/${col}`, `message=${encodeURIComponent(`/take ${itemName}`)}`);
+    }
+
     function getRoomDescriptionWithoutLocation(description, rowValue, colValue) {
       return String(description || '').replace(new RegExp(`^Room\\s+${rowValue},\\s*${colValue}\\.\\s*`, 'i'), '');
     }
@@ -336,7 +363,7 @@
         setParagraph(toolbar, `Stock: ${data.stock.map(item => `${item.name} ${item.price}g`).join(', ')}`);
       }
       if (data.groundItems && data.groundItems.length > 0) {
-        setParagraph(toolbar, `Ground: ${data.groundItems.map(item => item.name).join(', ')}`);
+        setGroundParagraph(toolbar, data.groundItems);
       }
       if (data.commands && data.commands.length > 0) {
         setParagraph(toolbar, `Commands: ${data.commands.join(', ')}`);

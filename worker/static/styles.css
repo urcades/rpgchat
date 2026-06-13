@@ -96,7 +96,8 @@ a, button, input, select {
   flex-basis: 100%;
 }
 
-.room-presence-target {
+.room-presence-target,
+.room-ground-item {
   background: none;
   border: 0;
   color: #0645ad;
