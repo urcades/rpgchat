@@ -2278,3 +2278,222 @@ test('Plan 015: invariant fuzz — equip, heal, attack, unequip, equip-elsewhere
     await db.close();
   }
 });
+
+// ---- Plan 005: item templates, starting gear, and drops ----
+
+// Returns mocked random() values in order (then repeats the last), so a test
+// can assert exactly which value each consumer reads.
+function makeSeq(values) {
+  let index = 0;
+  return () => {
+    const value = values[Math.min(index, values.length - 1)];
+    index += 1;
+    return value;
+  };
+}
+
+test('Plan 005: rollNpcDrop respects the chance gate and weighted pick', async () => {
+  const { rollNpcDrop } = require('../utils/items');
+
+  // Chance gate: ambient_hostile drops at 0.15; a high roll fails the gate.
+  assert.equal(rollNpcDrop('ambient_hostile', () => 0.99), null);
+
+  // raid_boss always drops (chance 1.0); the second value picks within the rare
+  // pool. [0.0, 0.0] passes the gate and selects the first rare template.
+  const boss = rollNpcDrop('raid_boss', makeSeq([0.0, 0.0]));
+  assert.equal(boss.rarity, 'rare');
+  assert.equal(boss.templateId, 'wyrmscale_cloak');
+
+  // Unknown kind has no table entry.
+  assert.equal(rollNpcDrop('not_a_kind', () => 0.0), null);
+});
+
+test('Plan 005: defeating an NPC drops loot onto the room floor', async () => {
+  const db = await createMigratedDb();
+  const { createNpcForEvent, handleAttack, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    // Fast, present attacker so the speed contest can be won with a low roll;
+    // strength 1 deals 1 damage, enough to drop a 1-HP NPC in one blow.
+    await seedLiveUser(db, 'looter', { job: 'Fighter', health: 30, maxHealth: 30, speed: 20, strength: 1 });
+    const calm = findCalmRoom(getWorldDay());
+    await updatePresence(db, 'looter', calm.row, calm.col);
+    await createNpcForEvent(db, {
+      username: 'ambient_beast',
+      displayName: 'Ambient Beast',
+      npcKind: 'ambient_hostile',
+      worldEventId: 'test-event',
+      row: calm.row,
+      col: calm.col,
+      health: 1,
+      stamina: 100,
+      speed: 1,
+      strength: 1,
+      intelligence: 1
+    });
+
+    // RNG consumption order for a player killing a bodyless NPC in one blow:
+    //   1) speed contest (0.1 -> hit, attacker far faster)
+    //   2) crit gate in calculateAttackDamage (0.99 -> no crit)
+    //   3) rollNpcDrop chance gate (0.1 < 0.15 -> drops)
+    //   4) rollNpcDrop weighted pick (0.0 -> first common = Rusty Knife)
+    // applyBodyDamage takes the bodyless NPC branch and consumes no random.
+    await withMockedRandom([0.1, 0.99, 0.1, 0.0], () =>
+      handleAttack(db, 'looter', '@ambient_beast', calm.row, calm.col));
+
+    const floorItems = await db.prepare(
+      'SELECT name, ownerUsername, roomRow, roomCol FROM items WHERE ownerUsername IS NULL'
+    ).all();
+    assert.equal(floorItems.results.length, 1);
+    assert.equal(floorItems.results[0].name, 'Rusty Knife');
+    assert.equal(floorItems.results[0].roomRow, calm.row);
+    assert.equal(floorItems.results[0].roomCol, calm.col);
+
+    const dropMessage = await db.prepare(
+      "SELECT message FROM messages WHERE username = 'System' AND message LIKE '%drops%' LIMIT 1"
+    ).first();
+    assert.equal(dropMessage.message, 'Ambient Beast drops Rusty Knife.');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 005: a dying player scatters all carried and equipped items', async () => {
+  const db = await createMigratedDb();
+  const { equipItem, getUser, ensureBody, moveUserToCemetery } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'corpse', { health: 30, maxHealth: 30 });
+    await ensureBody(db, await getUser(db, 'corpse'));
+    // One carried, one equipped.
+    await insertCarriedItem(db, 'corpse', { name: 'Carried Blade', slotType: 'hand' });
+    await insertCarriedItem(db, 'corpse', { name: 'Worn Plate', slotType: 'torso', modifiers: { maxHealth: 5 } });
+    await equipItem(db, await getUser(db, 'corpse'), 'Worn Plate', 4, 7);
+
+    await moveUserToCemetery(db, 'corpse', 'a test fall', 4, 7);
+
+    const items = await db.prepare(
+      "SELECT name, ownerUsername, equippedPartId, roomRow, roomCol FROM items ORDER BY name"
+    ).all();
+    assert.equal(items.results.length, 2);
+    for (const item of items.results) {
+      assert.equal(item.ownerUsername, null, `${item.name} no longer owned`);
+      assert.equal(item.equippedPartId, null, `${item.name} no longer equipped`);
+      assert.equal(item.roomRow, 4);
+      assert.equal(item.roomCol, 7);
+    }
+
+    const scatterMessage = await db.prepare(
+      "SELECT message FROM messages WHERE username = 'System' AND message LIKE '%belongings scatter%' LIMIT 1"
+    ).first();
+    assert.equal(scatterMessage.message, "corpse's belongings scatter across the floor.");
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 005: /take claims a floor item exactly once', async () => {
+  const db = await createMigratedDb();
+  const { handleChatAction, dropItemOnFloor, getUserState, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'grabber', { health: 30, maxHealth: 30 });
+    await seedLiveUser(db, 'rival', { health: 30, maxHealth: 30 });
+    await updatePresence(db, 'grabber', 1, 1);
+    await updatePresence(db, 'rival', 1, 1);
+    await getUserState(db, 'grabber');
+    await getUserState(db, 'rival');
+    await dropItemOnFloor(db, 'rusty_knife', 1, 1);
+
+    const taken = await handleChatAction(db, 'grabber', 1, 1, '/take Rusty Knife');
+    assert.equal(taken.taken, 'Rusty Knife');
+
+    // Now owned (carried), off the floor.
+    const owned = await db.prepare(
+      "SELECT ownerUsername, equippedPartId, roomRow, roomCol FROM items WHERE name = 'Rusty Knife'"
+    ).first();
+    assert.equal(owned.ownerUsername, 'grabber');
+    assert.equal(owned.equippedPartId, null);
+    assert.equal(owned.roomRow, null);
+    assert.equal(owned.roomCol, null);
+
+    // Second /take of the same name rejects (nothing left on the floor).
+    await assert.rejects(
+      () => handleChatAction(db, 'rival', 1, 1, '/take Rusty Knife'),
+      /no such thing here/i
+    );
+
+    const takeMessage = await db.prepare(
+      "SELECT COUNT(*) AS n FROM messages WHERE username = 'System' AND message = 'grabber takes Rusty Knife.'"
+    ).first();
+    assert.equal(takeMessage.n, 1);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 005: signup grants the class signature item, equipped', async () => {
+  const db = await createMigratedDb();
+  const { createItemForOwner, SIGNATURE_ITEMS_BY_JOB } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'newbie', { job: 'Fighter', health: 30, maxHealth: 30 });
+
+    const itemId = await createItemForOwner(db, SIGNATURE_ITEMS_BY_JOB.Fighter, 'newbie', { equip: true });
+    assert.ok(itemId > 0);
+
+    // The granted item is equipped on one of newbie's hand-slotType parts.
+    const equipped = await db.prepare(
+      `SELECT i.name, i.equippedPartId, bp.slotType
+       FROM items i JOIN bodyParts bp ON bp.id = i.equippedPartId
+       WHERE i.ownerUsername = 'newbie' AND i.id = ?`
+    ).bind(itemId).first();
+    assert.equal(equipped.name, 'Iron Cleaver');
+    assert.equal(equipped.slotType, 'hand');
+    assert.ok(equipped.equippedPartId);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 005: granting signature armor folds its HP into the worn part', async () => {
+  const db = await createMigratedDb();
+  const { createItemForOwner, SIGNATURE_ITEMS_BY_JOB, getUser, ensureBody } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'pally', { job: 'Paladin', health: 30, maxHealth: 30 });
+    await ensureBody(db, await getUser(db, 'pally')); // instantiate parts from the stored pool
+    const torsoBefore = await partRow(db, 'pally', 'torso');
+
+    // Oath Plate { maxHealth: 6 } worn on the torso must reuse plan 015's fold.
+    await createItemForOwner(db, SIGNATURE_ITEMS_BY_JOB.Paladin, 'pally', { equip: true });
+
+    const torsoAfter = await partRow(db, 'pally', 'torso');
+    assert.equal(torsoAfter.maxHp, torsoBefore.maxHp + 6, 'torso maxHp rose by the bonus');
+
+    const user = await db.prepare("SELECT health, maxHealth FROM users WHERE username = 'pally'").first();
+    assert.equal(user.maxHealth, 36, 'pool maxHealth 30 -> 36');
+    assert.equal(user.health, 30, 'grant is no free heal');
+    await assertHpInvariant(db, 'pally');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 005: floor items surface in the room payload as groundItems', async () => {
+  const db = await createMigratedDb();
+  const { dropItemOnFloor, getRoomEcology } = await import('../worker/game.mjs');
+
+  try {
+    const calm = findCalmRoom(getWorldDay());
+    await dropItemOnFloor(db, 'padded_vest', calm.row, calm.col);
+
+    const ecology = await getRoomEcology(db, 'observer', calm.row, calm.col);
+    assert.ok(Array.isArray(ecology.groundItems));
+    assert.equal(ecology.groundItems.length, 1);
+    assert.equal(ecology.groundItems[0].name, 'Padded Vest');
+    assert.equal(ecology.groundItems[0].slotType, 'torso');
+  } finally {
+    await db.close();
+  }
+});

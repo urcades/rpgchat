@@ -334,6 +334,9 @@
       if (data.stock && data.stock.length > 0) {
         setParagraph(toolbar, `Stock: ${data.stock.map(item => `${item.name} ${item.price}g`).join(', ')}`);
       }
+      if (data.groundItems && data.groundItems.length > 0) {
+        setParagraph(toolbar, `Ground: ${data.groundItems.map(item => item.name).join(', ')}`);
+      }
       if (data.commands && data.commands.length > 0) {
         setParagraph(toolbar, `Commands: ${data.commands.join(', ')}`);
       }

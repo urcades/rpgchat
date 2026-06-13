@@ -3,6 +3,7 @@ import ecologyModule from '../utils/roomEcology.js';
 import levelingModule from '../utils/leveling.js';
 import worldEventsModule from '../utils/worldEvents.js';
 import bodyModule from '../utils/body.js';
+import itemsModule from '../utils/items.js';
 import { changes, dbAll, dbFirst, dbRun, lastInsertId } from './db.mjs';
 import { elapsedMs, logEvent, measureAsync, nowMs } from './observability.mjs';
 
@@ -38,6 +39,12 @@ const { calculateLevel } = levelingModule;
 const { generateDailyWorldEvents } = worldEventsModule;
 
 const {
+  SIGNATURE_ITEMS_BY_JOB,
+  getTemplate,
+  rollNpcDrop
+} = itemsModule;
+
+const {
   HUMANOID_PLAN,
   MODIFIER_KEYS,
   distributeAcrossPlan,
@@ -71,6 +78,7 @@ const PASSIVE_EFFECT_TYPES = new Set([
 export {
   GRID_SIZE,
   JOBS,
+  SIGNATURE_ITEMS_BY_JOB,
   getEffectiveUser,
   normalizeJob,
   validateRoomCoordinates,
@@ -626,7 +634,7 @@ export async function getRoomEcology(db, username, row, col, worldDay = getWorld
   const currentTick = tickValue === null ? await getCurrentTickValue(db) : tickValue;
   const phase = getPhaseFromTick(currentTick);
   const features = getRoomFeaturesForTick(row, col, currentTick, worldDay);
-  const [traces, innAccess, activeRound, presence, event] = await Promise.all([
+  const [traces, innAccess, activeRound, presence, event, groundItems] = await Promise.all([
     dbAll(
       db,
       `SELECT id, roomRow, roomCol, traceType, intensity, attacker, target, createdTick, expiryTick, worldDay, createdAt
@@ -641,7 +649,8 @@ export async function getRoomEcology(db, username, row, col, worldDay = getWorld
     getRoomAccessState(db, username, row, col, currentTick, worldDay),
     getActiveRound(db, row, col, worldDay, currentTick),
     getRoomPresence(db, row, col, worldDay),
-    getActiveRoomEvent(db, row, col, worldDay)
+    getActiveRoomEvent(db, row, col, worldDay),
+    getFloorItems(db, row, col)
   ]);
   const traceSummary = summarizeTraces(traces);
   const effectPayload = getRoomEffectPayload({ row, col, worldDay, features, innAccess, activeRound });
@@ -656,6 +665,7 @@ export async function getRoomEcology(db, username, row, col, worldDay = getWorld
     traceSummary,
     presence,
     event,
+    groundItems,
     description: composeRoomDescription({ row, col, phase, features, traceSummary }),
     ...effectPayload
   };
@@ -958,6 +968,10 @@ export async function moveUserToCemetery(db, username, cause, row, col, options 
   await dbRun(db, 'DELETE FROM users WHERE username = ?', [username]);
   await dbRun(db, 'DELETE FROM roomPresence WHERE username = ?', [username]);
   await dbRun(db, 'DELETE FROM statusEffects WHERE username = ?', [username]);
+  const droppedCount = await dropPlayerItemsOnDeath(db, username, row, col);
+  if (droppedCount > 0) {
+    await emitSystemMessage(db, row, col, `${username}'s belongings scatter across the floor.`, options.deferredSystemMessages);
+  }
   await dbRun(db, 'DELETE FROM bodyParts WHERE username = ?', [username]);
   await emitSystemMessage(db, row, col, `${username} has died from ${cause}.`, options.deferredSystemMessages);
   return true;
@@ -1311,6 +1325,12 @@ async function defeatNpc(db, npc, { killer, row, col, currentTick, deferredSyste
   await dbRun(db, 'UPDATE worldEventEntities SET lastDefeatedTick = ? WHERE username = ?', [currentTick, npc.username]);
   await emitSystemMessage(db, row, col, `${npc.displayName || npc.username} is defeated by ${killer}.`, deferredSystemMessages);
 
+  const drop = rollNpcDrop(npc.npcKind);
+  if (drop) {
+    await dropItemOnFloor(db, drop.templateId, row, col);
+    await emitSystemMessage(db, row, col, `${npc.displayName || npc.username} drops ${drop.name}.`, deferredSystemMessages);
+  }
+
   if (event && ['raid', 'lesser'].includes(event.eventType) && npc.npcKind === 'raid_boss') {
     await awardEventVictory(db, event, row, col, currentTick, { deferredSystemMessages });
     return;
@@ -1540,12 +1560,13 @@ async function findOwnedUnequippedItem(db, username, itemName) {
   );
 }
 
-export async function equipItem(db, user, itemName, row, col) {
-  const item = await findOwnedUnequippedItem(db, user.username, itemName);
-  if (!item) {
-    throw new ActionError("You aren't carrying that.");
-  }
-
+// Shared equip core: attach an ALREADY-OWNED item row to a matching body part
+// and fold its HP gear (plan 015). The single write path for both /equip (which
+// adds a system message afterward) and createItemForOwner's silent grant — so
+// the candidate-part selection, swap-off-occupant HP accounting, attach, and
+// applyPartMaxHpDelta(+bonus) can't drift between the two callers. `item` must
+// have id, slotType, and modifiers. Returns { partId, partLabel }.
+async function attachItemToBody(db, user, item) {
   await ensureBody(db, user);
   const candidates = await dbAll(
     db,
@@ -1601,8 +1622,19 @@ export async function equipItem(db, user, itemName, row, col) {
   // headroom but does NOT heal; a negative bonus clamps hp/health down.
   await applyPartMaxHpDelta(db, user.username, target.id, itemMaxHealthBonus(item));
 
-  await insertSystemMessage(db, row, col, `${user.username} equips ${item.name} on their ${target.label}.`);
-  return { item, partId: target.id, partLabel: target.label };
+  return { partId: target.id, partLabel: target.label };
+}
+
+export async function equipItem(db, user, itemName, row, col) {
+  const item = await findOwnedUnequippedItem(db, user.username, itemName);
+  if (!item) {
+    throw new ActionError("You aren't carrying that.");
+  }
+
+  const { partId, partLabel } = await attachItemToBody(db, user, item);
+
+  await insertSystemMessage(db, row, col, `${user.username} equips ${item.name} on their ${partLabel}.`);
+  return { item, partId, partLabel };
 }
 
 export async function unequipItem(db, user, ref, row, col) {
@@ -1635,6 +1667,106 @@ export async function unequipItem(db, user, ref, row, col) {
   await dbRun(db, 'UPDATE items SET equippedPartId = NULL WHERE id = ?', [equipped.id]);
   await insertSystemMessage(db, row, col, `${user.username} stows ${equipped.name}.`);
   return { item: { id: equipped.id, name: equipped.name }, partLabel: equipped.partLabel };
+}
+
+// Mint an item from a template and give it to a player. With { equip: true }
+// the end state is IDENTICAL to the player carrying it and running /equip —
+// including plan 015's HP fold via the shared attachItemToBody — but SILENT (no
+// system message) and with NO room needed (signup grants gear off-grid).
+// Returns the inserted item id.
+export async function createItemForOwner(db, templateId, username, { equip = false } = {}) {
+  const template = getTemplate(templateId);
+  if (!template) {
+    throw new ActionError(`Unknown item template: ${templateId}`);
+  }
+  const result = await dbRun(
+    db,
+    `INSERT INTO items (templateId, name, slotType, rarity, modifiers, ownerUsername)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [template.templateId, template.name, template.slotType, template.rarity, JSON.stringify(template.modifiers || {}), username]
+  );
+  const itemId = lastInsertId(result);
+
+  if (equip) {
+    const user = await getUser(db, username);
+    // attachItemToBody needs id/slotType/modifiers; reuse the template values.
+    await attachItemToBody(db, user, {
+      id: itemId,
+      slotType: template.slotType,
+      modifiers: JSON.stringify(template.modifiers || {})
+    });
+  }
+
+  return itemId;
+}
+
+// Drop a fresh template-minted item onto a room floor (ownerUsername NULL).
+// Used for NPC defeat loot.
+export async function dropItemOnFloor(db, templateId, row, col) {
+  const template = getTemplate(templateId);
+  if (!template) {
+    return null;
+  }
+  await dbRun(
+    db,
+    `INSERT INTO items (templateId, name, slotType, rarity, modifiers, ownerUsername, roomRow, roomCol)
+     VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
+    [template.templateId, template.name, template.slotType, template.rarity, JSON.stringify(template.modifiers || {}), row, col]
+  );
+}
+
+// Full-loot on death: every item the player owns (carried OR equipped) scatters
+// to the room floor where they fell. No HP accounting — the body is deleted on
+// death, and a taker re-applies any bonus fresh via /equip. Returns how many
+// item rows were scattered.
+export async function dropPlayerItemsOnDeath(db, username, row, col) {
+  const result = await dbRun(
+    db,
+    `UPDATE items SET ownerUsername = NULL, equippedPartId = NULL, roomRow = ?, roomCol = ?
+     WHERE ownerUsername = ?`,
+    [row, col, username]
+  );
+  return changes(result);
+}
+
+// Items lying on a room floor (ownerUsername NULL), for the room payload.
+export async function getFloorItems(db, row, col) {
+  return dbAll(
+    db,
+    `SELECT id, name, slotType, rarity, modifiers FROM items
+     WHERE ownerUsername IS NULL AND roomRow = ? AND roomCol = ?
+     ORDER BY id DESC LIMIT 20`,
+    [row, col]
+  );
+}
+
+// Pick a floor item up by name into the player's pack (carried, NOT equipped —
+// no HP fold here). The claim is a conditional update so two players racing for
+// the same item can't both win: only the one whose UPDATE still saw
+// ownerUsername NULL takes it.
+export async function takeItem(db, username, itemName, row, col) {
+  const item = await dbFirst(
+    db,
+    `SELECT * FROM items
+     WHERE ownerUsername IS NULL AND roomRow = ? AND roomCol = ? AND LOWER(name) = LOWER(?)
+     ORDER BY id ASC
+     LIMIT 1`,
+    [row, col, itemName]
+  );
+  if (!item) {
+    throw new ActionError('There is no such thing here.');
+  }
+  const result = await dbRun(
+    db,
+    `UPDATE items SET ownerUsername = ?, roomRow = NULL, roomCol = NULL
+     WHERE id = ? AND ownerUsername IS NULL`,
+    [username, item.id]
+  );
+  if (changes(result) === 0) {
+    throw new ActionError('Someone snatched it first.');
+  }
+  await insertSystemMessage(db, row, col, `${username} takes ${item.name}.`);
+  return { item: { id: item.id, name: item.name } };
 }
 
 async function emitConditionTransitions(db, username, beforeParts, afterParts, row, col) {
@@ -2683,6 +2815,15 @@ export async function handleUnequipCommand(db, username, row, col, message) {
   return { unequipped: item.name };
 }
 
+export async function handleTakeCommand(db, username, row, col, message) {
+  const rest = commandRest(message, '/take');
+  if (!rest) {
+    throw new ActionError('Use /take <item name>.');
+  }
+  const { item } = await takeItem(db, username, rest, row, col);
+  return { taken: item.name };
+}
+
 export async function handleChatAction(db, username, row, col, message) {
   if (message.trim().toLowerCase().startsWith('/roll')) {
     return runPlayerAction(db, {
@@ -2708,6 +2849,15 @@ export async function handleChatAction(db, username, row, col, message) {
       username,
       staminaCost: 1,
       perform: async () => handleUnequipCommand(db, username, row, col, message),
+      advanceTick: () => advanceGlobalTick(db)
+    });
+  }
+
+  if (message.trim().toLowerCase().startsWith('/take')) {
+    return runPlayerAction(db, {
+      username,
+      staminaCost: 1,
+      perform: async () => handleTakeCommand(db, username, row, col, message),
       advanceTick: () => advanceGlobalTick(db)
     });
   }

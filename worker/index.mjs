@@ -11,7 +11,9 @@ import { dbAll, dbFirst, dbRun } from './db.mjs';
 import {
   ActionError,
   JOBS,
+  SIGNATURE_ITEMS_BY_JOB,
   buildStartingStats,
+  createItemForOwner,
   getCurrentTickValue,
   getMessages,
   getActiveWorldEvents,
@@ -397,6 +399,9 @@ app.post('/signup', async c => {
         stats.intelligence
       ]
     );
+
+    // Grant the class's signature item, equipped (silent, no room needed).
+    await createItemForOwner(c.env.DB, SIGNATURE_ITEMS_BY_JOB[job], username, { equip: true });
 
     return c.redirect('/');
   } catch (err) {
