@@ -1655,9 +1655,42 @@ async function calculateAttackDamage(db, attacker, targetUsername, currentTick) 
   return { damage, isCriticalAttack };
 }
 
-export async function validateAttackTargets(db, message) {
-  const users = await dbAll(db, 'SELECT username FROM users');
-  const targets = users.filter(user => message.includes(user.username));
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export async function validateAttackTargets(db, message, row, col, attackerUsername) {
+  const worldDay = getWorldDay();
+  const occupants = await dbAll(
+    db,
+    `SELECT u.username
+     FROM roomPresence rp
+     JOIN users u ON u.username = rp.username
+     WHERE rp.roomRow = ?
+       AND rp.roomCol = ?
+       AND rp.worldDay = ?
+       AND rp.username != 'System'
+       AND u.username != ?
+       AND (u.isNpc = 1 OR rp.lastSeenAt >= datetime('now', ?))`,
+    [row, col, worldDay, attackerUsername, `-${PRESENCE_MAX_AGE_SECONDS} seconds`]
+  );
+
+  const mentioned = [...message.matchAll(/@([A-Za-z0-9_-]+)/g)].map(m => m[1]);
+  if (mentioned.length > 0) {
+    const byName = new Map(occupants.map(user => [user.username, user]));
+    const targets = [...new Set(mentioned)]
+      .map(name => byName.get(name))
+      .filter(Boolean);
+    if (targets.length === 0) {
+      throw new ActionError('No such target here.');
+    }
+    return targets;
+  }
+
+  const targets = occupants.filter(user => {
+    const pattern = new RegExp(`(^|[^A-Za-z0-9_-])${escapeRegExp(user.username)}([^A-Za-z0-9_-]|$)`);
+    return pattern.test(message);
+  });
   if (targets.length === 0) {
     throw new ActionError('Attack needs a target name.');
   }
@@ -1669,7 +1702,7 @@ export async function handleAttack(db, username, message, row, col, options = {}
   const createdTick = currentTick + 1;
   const worldDay = getWorldDay();
   const attacker = await getUser(db, username);
-  const targets = await validateAttackTargets(db, message);
+  const targets = await validateAttackTargets(db, message, row, col, username);
   const attackMessages = [];
 
   for (const user of targets) {
@@ -2011,7 +2044,7 @@ export async function handleAttackAction(db, username, row, col, message) {
   return runPlayerAction(db, {
     username,
     staminaCost: 1,
-    validate: async () => validateAttackTargets(db, message),
+    validate: async () => validateAttackTargets(db, message, row, col, username),
     perform: async () => {
       const deferredSystemMessages = [];
       const updatedMessage = await handleAttack(db, username, message, row, col, { deferredSystemMessages });
