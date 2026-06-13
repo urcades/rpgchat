@@ -1415,6 +1415,61 @@ function parseItemModifiers(raw) {
   }
 }
 
+// The integer maxHealth an item contributes to the body part it's worn on.
+// Single source of truth for plan 015's structural HP gear: 0 when absent/NaN.
+// May be negative (e.g. Mage's Humming Focus -3), which lowers the part's cap.
+function itemMaxHealthBonus(item) {
+  const parsed = parseItemModifiers(item && item.modifiers);
+  const value = Math.trunc(Number(parsed.maxHealth));
+  return Number.isFinite(value) ? value : 0;
+}
+
+// Move an item's maxHealth bonus into (delta > 0) or out of (delta < 0) the
+// part it's worn on, mirroring users.maxHealth and the EXACT hp the part loses
+// onto users.health. The bonus lives in exactly one place at a time — this is
+// the only write path for it, so equip and unequip can't drift. Floors caps at
+// 0. Critically, users.health drops by precisely the per-part hp destroyed (a
+// negative delta can clamp the part's hp), never by a coarse MIN-to-maxHealth,
+// so users.health == Σ hp stays exact even when other parts hold the surplus.
+async function applyPartMaxHpDelta(db, username, partId, delta) {
+  if (!delta) {
+    return;
+  }
+  const before = await dbFirst(db, 'SELECT hp FROM bodyParts WHERE id = ?', [partId]);
+  const hpBefore = before ? Math.max(0, Math.floor(before.hp || 0)) : 0;
+
+  await dbRun(
+    db,
+    'UPDATE bodyParts SET maxHp = MAX(maxHp + ?, 0) WHERE id = ?',
+    [delta, partId]
+  );
+  // A negative delta can push hp above the lowered cap; clamp it down.
+  await dbRun(
+    db,
+    'UPDATE bodyParts SET hp = MIN(hp, maxHp) WHERE id = ?',
+    [partId]
+  );
+
+  const after = await dbFirst(db, 'SELECT hp FROM bodyParts WHERE id = ?', [partId]);
+  const hpAfter = after ? Math.max(0, Math.floor(after.hp || 0)) : 0;
+  const hpLost = hpBefore - hpAfter; // >= 0; only a negative delta destroys hp.
+
+  await dbRun(
+    db,
+    'UPDATE users SET maxHealth = MAX(maxHealth + ?, 0) WHERE username = ?',
+    [delta, username]
+  );
+  // Mirror the exact hp the part shed onto users.health (floor 0). Equip with a
+  // positive bonus destroys nothing (hpLost 0), so health is untouched.
+  if (hpLost > 0) {
+    await dbRun(
+      db,
+      'UPDATE users SET health = MAX(health - ?, 0) WHERE username = ?',
+      [hpLost, username]
+    );
+  }
+}
+
 // Owned items joined to the equipped part's label; equipped rows first.
 export async function getInventory(db, username) {
   return dbAll(
@@ -1475,7 +1530,7 @@ export async function getConditionAndGearModifiers(db, username) {
 async function findOwnedUnequippedItem(db, username, itemName) {
   return dbFirst(
     db,
-    `SELECT id, name, slotType FROM items
+    `SELECT id, name, slotType, modifiers FROM items
      WHERE ownerUsername = ? AND equippedPartId IS NULL
        AND roomRow IS NULL AND roomCol IS NULL
        AND LOWER(name) = LOWER(?)
@@ -1516,6 +1571,17 @@ export async function equipItem(db, user, itemName, row, col) {
   let target = candidates.find(part => !occupiedIds.has(part.id));
   if (!target) {
     target = candidates[0];
+    // Swap = unequip-then-equip for HP accounting: the swapped-off item's
+    // bonus must leave the part BEFORE the new item's bonus enters, or the
+    // part would keep the old armor's HP. Remove every occupant's bonus first.
+    const occupants = await dbAll(
+      db,
+      'SELECT modifiers FROM items WHERE equippedPartId = ?',
+      [target.id]
+    );
+    for (const occupant of occupants) {
+      await applyPartMaxHpDelta(db, user.username, target.id, -itemMaxHealthBonus(occupant));
+    }
     await dbRun(
       db,
       'UPDATE items SET equippedPartId = NULL WHERE equippedPartId = ?',
@@ -1530,16 +1596,23 @@ export async function equipItem(db, user, itemName, row, col) {
     [target.id, item.id]
   );
 
+  // Fold this item's HP gear into the worn part (structural, plan 015): raise
+  // the part's maxHp and users.maxHealth by the bonus. A positive bonus opens
+  // headroom but does NOT heal; a negative bonus clamps hp/health down.
+  await applyPartMaxHpDelta(db, user.username, target.id, itemMaxHealthBonus(item));
+
   await insertSystemMessage(db, row, col, `${user.username} equips ${item.name} on their ${target.label}.`);
   return { item, partId: target.id, partLabel: target.label };
 }
 
 export async function unequipItem(db, user, ref, row, col) {
   await ensureBody(db, user);
-  // ref may name the item OR the body part (case-insensitive).
+  // ref may name the item OR the body part (case-insensitive). Pull the part's
+  // id/severed and the item's modifiers too, so we can reverse the HP gear
+  // (plan 015) BEFORE clearing equippedPartId.
   const equipped = await dbFirst(
     db,
-    `SELECT i.id, i.name, bp.label AS partLabel
+    `SELECT i.id, i.name, i.modifiers, bp.id AS partId, bp.label AS partLabel, bp.severed
      FROM items i
      JOIN bodyParts bp ON bp.id = i.equippedPartId
      WHERE i.ownerUsername = ? AND i.equippedPartId IS NOT NULL
@@ -1550,6 +1623,13 @@ export async function unequipItem(db, user, ref, row, col) {
   );
   if (!equipped) {
     throw new ActionError('Nothing equipped there.');
+  }
+
+  // Remove this item's HP gear from the part it's leaving — inverse of equip's
+  // applyPartMaxHpDelta. A severed part already shed its maxHp (including the
+  // gear) on sever, so skip it there to avoid double-subtracting.
+  if (!equipped.severed) {
+    await applyPartMaxHpDelta(db, user.username, equipped.partId, -itemMaxHealthBonus(equipped));
   }
 
   await dbRun(db, 'UPDATE items SET equippedPartId = NULL WHERE id = ?', [equipped.id]);

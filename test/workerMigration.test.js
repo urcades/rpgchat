@@ -1960,7 +1960,7 @@ test('One item per part: a second INSERT on the same part is rejected', async ()
   }
 });
 
-test('maxHealth gear is inert this plan: it does not raise effective maxHealth or show as a gear bonus', async () => {
+test('maxHealth gear is structural (plan 015): it raises effective maxHealth via stored max but never appears as a gear bonus', async () => {
   const db = await createMigratedDb();
   const { handleChatAction, getUserState, updatePresence } = await import('../worker/game.mjs');
 
@@ -1974,10 +1974,306 @@ test('maxHealth gear is inert this plan: it does not raise effective maxHealth o
     await handleChatAction(db, 'plated', 1, 1, '/equip Iron Plate');
 
     const withGear = await getUserState(db, 'plated');
-    // The dead-stat guard: maxHealth gear is carried in the row but never applied
-    // to the effective layer (plan 015 makes it real via part maxHp).
-    assert.equal(withGear.effectiveStats.maxHealth, baselineMaxHealth);
+    // Plan 015: maxHealth gear is now real and STRUCTURAL. Equip folds the +9
+    // into the torso's maxHp and into stored users.maxHealth, so effective
+    // maxHealth rises by exactly the bonus.
+    assert.equal(withGear.effectiveStats.maxHealth, baselineMaxHealth + 9);
+    // The effective-layer guard is still in force: gear maxHealth must NOT ride
+    // getEquippedModifiers (that would double-count on top of the structural
+    // contribution). So it never surfaces as a gearBonus.
     assert.equal(withGear.gearBonuses.maxHealth, undefined);
+  } finally {
+    await db.close();
+  }
+});
+
+// --- Plan 015: on-part gear HP ---------------------------------------------
+// The invariant (plan 004), re-asserted after every HP-gear write path:
+//   users.health == Σ bodyParts.hp
+//   users.maxHealth == Σ (non-severed bodyParts.maxHp)
+async function assertHpInvariant(db, username) {
+  const user = await db.prepare('SELECT health, maxHealth FROM users WHERE username = ?')
+    .bind(username).first();
+  const sums = await db.prepare(
+    `SELECT COALESCE(SUM(hp), 0) AS hpSum,
+            COALESCE(SUM(CASE WHEN severed = 0 THEN maxHp ELSE 0 END), 0) AS maxHpSum
+     FROM bodyParts WHERE username = ?`
+  ).bind(username).first();
+  assert.equal(user.health, sums.hpSum, `health (${user.health}) == Σ hp (${sums.hpSum})`);
+  assert.equal(
+    user.maxHealth,
+    sums.maxHpSum,
+    `maxHealth (${user.maxHealth}) == Σ non-severed maxHp (${sums.maxHpSum})`
+  );
+}
+
+async function partRow(db, username, label) {
+  return db.prepare('SELECT id, hp, maxHp, severed FROM bodyParts WHERE username = ? AND label = ?')
+    .bind(username, label).first();
+}
+
+test('Plan 015: equipping HP gear raises the worn part and the pool without a free heal', async () => {
+  const db = await createMigratedDb();
+  const { equipItem, getUser, ensureBody } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'fortify', { health: 30, maxHealth: 30 });
+    const seeded = await getUser(db, 'fortify');
+    await ensureBody(db, seeded); // instantiate parts from the stored pool
+
+    const torsoBefore = await partRow(db, 'fortify', 'torso');
+    await assertHpInvariant(db, 'fortify');
+
+    await insertCarriedItem(db, 'fortify', { name: 'Iron Plate', slotType: 'torso', modifiers: { maxHealth: 9 } });
+    await equipItem(db, await getUser(db, 'fortify'), 'Iron Plate', 1, 1);
+
+    const torsoAfter = await partRow(db, 'fortify', 'torso');
+    assert.equal(torsoAfter.maxHp, torsoBefore.maxHp + 9, 'torso maxHp rose by exactly the bonus');
+    assert.equal(torsoAfter.hp, torsoBefore.hp, 'equip is no free heal: hp unchanged');
+
+    const user = await db.prepare("SELECT health, maxHealth FROM users WHERE username = 'fortify'").first();
+    assert.equal(user.maxHealth, 39, 'pool maxHealth 30 -> 39');
+    assert.equal(user.health, 30, 'health unchanged by equip');
+    await assertHpInvariant(db, 'fortify');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 015: a heal fills the headroom opened by HP gear (no longer a dead stat)', async () => {
+  const db = await createMigratedDb();
+  const { equipItem, applyBodyHeal, getUser, ensureBody } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'topup', { health: 30, maxHealth: 30 });
+    await ensureBody(db, await getUser(db, 'topup'));
+
+    await insertCarriedItem(db, 'topup', { name: 'Iron Plate', slotType: 'torso', modifiers: { maxHealth: 9 } });
+    await equipItem(db, await getUser(db, 'topup'), 'Iron Plate', 1, 1);
+
+    // Full at 30, capped at 39 now; heal 20 should fill exactly 9 into the new headroom.
+    const healed = await applyBodyHeal(db, await getUser(db, 'topup'), 20, {});
+    assert.equal(healed, 39, 'heal fills up to the fortified cap of 39');
+    const user = await db.prepare("SELECT health, maxHealth FROM users WHERE username = 'topup'").first();
+    assert.equal(user.health, 39);
+    assert.equal(user.maxHealth, 39);
+    await assertHpInvariant(db, 'topup');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 015: unequipping HP gear reverses the part and pool exactly, clamping overfill', async () => {
+  const db = await createMigratedDb();
+  const { equipItem, unequipItem, applyBodyHeal, getUser, ensureBody } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'doff', { health: 30, maxHealth: 30 });
+    await ensureBody(db, await getUser(db, 'doff'));
+    const torsoBase = await partRow(db, 'doff', 'torso');
+
+    await insertCarriedItem(db, 'doff', { name: 'Iron Plate', slotType: 'torso', modifiers: { maxHealth: 9 } });
+    await equipItem(db, await getUser(db, 'doff'), 'Iron Plate', 1, 1);
+    // Fill the new headroom so the unequip clamp has something to bite on.
+    await applyBodyHeal(db, await getUser(db, 'doff'), 9, {});
+    assert.equal((await db.prepare("SELECT health FROM users WHERE username = 'doff'").first()).health, 39);
+
+    await unequipItem(db, await getUser(db, 'doff'), 'Iron Plate', 1, 1);
+
+    const torsoAfter = await partRow(db, 'doff', 'torso');
+    assert.equal(torsoAfter.maxHp, torsoBase.maxHp, 'torso maxHp returns to base (lossless round-trip)');
+    assert.equal(torsoAfter.hp, torsoBase.maxHp, 'torso hp clamped down to its base maxHp');
+    const user = await db.prepare("SELECT health, maxHealth FROM users WHERE username = 'doff'").first();
+    assert.equal(user.maxHealth, 30, 'pool maxHealth back to 30');
+    assert.equal(user.health, 30, 'health clamped from 39 down to 30');
+    await assertHpInvariant(db, 'doff');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 015: negative HP gear lowers the worn part and clamps, and unequip restores it', async () => {
+  const db = await createMigratedDb();
+  const { equipItem, unequipItem, getUser, ensureBody } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'mage', { health: 30, maxHealth: 30 });
+    await ensureBody(db, await getUser(db, 'mage'));
+    const armBase = await partRow(db, 'mage', 'left arm'); // hand slot, maxHp 4 at pool 30
+
+    await insertCarriedItem(db, 'mage', { name: 'Humming Focus', slotType: 'hand', modifiers: { maxHealth: -3 } });
+    await equipItem(db, await getUser(db, 'mage'), 'Humming Focus', 1, 1); // left arm (empty-preferred)
+
+    const armAfter = await partRow(db, 'mage', 'left arm');
+    assert.equal(armAfter.maxHp, armBase.maxHp - 3, 'arm maxHp dropped by 3');
+    assert.equal(armAfter.hp, armBase.maxHp - 3, 'arm hp clamped to the lowered cap');
+    const lowered = await db.prepare("SELECT health, maxHealth FROM users WHERE username = 'mage'").first();
+    assert.equal(lowered.maxHealth, 27, 'pool maxHealth 30 -> 27');
+    assert.equal(lowered.health, 27, 'health clamped to 27');
+    await assertHpInvariant(db, 'mage');
+
+    // Unequip a negative-bonus item RAISES the cap back; hp stays (headroom opens).
+    await unequipItem(db, await getUser(db, 'mage'), 'Humming Focus', 1, 1);
+    const armRestored = await partRow(db, 'mage', 'left arm');
+    assert.equal(armRestored.maxHp, armBase.maxHp, 'arm maxHp restored');
+    assert.equal(armRestored.hp, armBase.maxHp - 3, 'hp unchanged on unequip (no auto-heal)');
+    const restored = await db.prepare("SELECT health, maxHealth FROM users WHERE username = 'mage'").first();
+    assert.equal(restored.maxHealth, 30, 'pool maxHealth restored to 30');
+    assert.equal(restored.health, 27, 'health stays at 27 (headroom opens, no free heal)');
+    await assertHpInvariant(db, 'mage');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 015: severing an armored limb takes the fortified maxHp with it and drops the item', async () => {
+  const db = await createMigratedDb();
+  const { equipItem, applyBodyHeal, applyBodyDamage, getUser, ensureBody } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'gallant', { health: 30, maxHealth: 30 });
+    await ensureBody(db, await getUser(db, 'gallant'));
+
+    await insertCarriedItem(db, 'gallant', { name: 'Vambrace', slotType: 'hand', modifiers: { maxHealth: 9 } });
+    await equipItem(db, await getUser(db, 'gallant'), 'Vambrace', 4, 5); // left arm
+    // Fill so the arm is at its fortified cap (base 4 + 9 = 13).
+    await applyBodyHeal(db, await getUser(db, 'gallant'), 9, {});
+    const armFort = await partRow(db, 'gallant', 'left arm');
+    assert.equal(armFort.maxHp, 13, 'arm fortified to base 4 + gear 9');
+    assert.equal(armFort.hp, 13);
+    await assertHpInvariant(db, 'gallant');
+
+    const maxBeforeSever = (await db.prepare("SELECT maxHealth FROM users WHERE username = 'gallant'").first()).maxHealth;
+    // Sever the left arm. With the arm fortified to 13 the weight ranges shift,
+    // but cumulative torso[0,9) head[9,13) neck[13,14) left-arm[14,27) of total
+    // 39 still puts random 0.5 (roll 19.5) on the left arm. 13 damage drives it
+    // 13->0 and severs it.
+    const sever = await applyBodyDamage(db, await getUser(db, 'gallant'), 13, {
+      cause: 'a greataxe', row: 4, col: 5, random: () => 0.5
+    });
+    assert.deepEqual(sever.severedLabels, ['left arm']);
+
+    const armSevered = await partRow(db, 'gallant', 'left arm');
+    assert.equal(armSevered.severed, 1);
+    const maxAfter = (await db.prepare("SELECT maxHealth FROM users WHERE username = 'gallant'").first()).maxHealth;
+    assert.equal(maxAfter, maxBeforeSever - 13, 'maxHealth dropped by the FULL fortified maxHp (base + gear)');
+
+    // The armor clattered to the floor: no owner, no part, room set.
+    const floored = await db.prepare("SELECT ownerUsername, equippedPartId, roomRow, roomCol FROM items WHERE name = 'Vambrace'").first();
+    assert.equal(floored.ownerUsername, null);
+    assert.equal(floored.equippedPartId, null);
+    assert.equal(floored.roomRow, 4);
+    assert.equal(floored.roomCol, 5);
+    await assertHpInvariant(db, 'gallant');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 015: re-equipping a severed-and-floored armor applies its bonus exactly once', async () => {
+  const db = await createMigratedDb();
+  const { equipItem, applyBodyHeal, applyBodyDamage, getUser, ensureBody } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'reclaim', { health: 30, maxHealth: 30 });
+    await ensureBody(db, await getUser(db, 'reclaim'));
+
+    await insertCarriedItem(db, 'reclaim', { name: 'Vambrace', slotType: 'hand', modifiers: { maxHealth: 9 } });
+    await equipItem(db, await getUser(db, 'reclaim'), 'Vambrace', 4, 5); // left arm
+    await applyBodyHeal(db, await getUser(db, 'reclaim'), 9, {}); // fill arm to 13
+
+    // Sever the left arm; the Vambrace drops to the floor (owner NULL).
+    await applyBodyDamage(db, await getUser(db, 'reclaim'), 13, {
+      cause: 'a cleaver', row: 4, col: 5, random: () => 0.5
+    });
+    await assertHpInvariant(db, 'reclaim');
+
+    const rightArmBase = await partRow(db, 'reclaim', 'right arm'); // surviving hand part
+    const maxAfterSever = (await db.prepare("SELECT maxHealth FROM users WHERE username = 'reclaim'").first()).maxHealth;
+
+    // Take the floored item back and equip on the surviving right arm.
+    const itemId = (await db.prepare("SELECT id FROM items WHERE name = 'Vambrace'").first()).id;
+    await db.prepare('UPDATE items SET ownerUsername = ?, roomRow = NULL, roomCol = NULL WHERE id = ?')
+      .bind('reclaim', itemId).run();
+    await equipItem(db, await getUser(db, 'reclaim'), 'Vambrace', 4, 5); // right arm (left is severed)
+
+    const rightArmAfter = await partRow(db, 'reclaim', 'right arm');
+    assert.equal(rightArmAfter.maxHp, rightArmBase.maxHp + 9, 'bonus applied once, not twice');
+    const maxFinal = (await db.prepare("SELECT maxHealth FROM users WHERE username = 'reclaim'").first()).maxHealth;
+    assert.equal(maxFinal, maxAfterSever + 9, 'pool rose by exactly one +9 on re-equip');
+    await assertHpInvariant(db, 'reclaim');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 015: swapping HP gear on a full part keeps exactly one bonus, not two', async () => {
+  const db = await createMigratedDb();
+  const { equipItem, getUser, ensureBody } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'swapper', { health: 30, maxHealth: 30 });
+    await ensureBody(db, await getUser(db, 'swapper'));
+    const leftBase = await partRow(db, 'swapper', 'left arm');
+    const rightBase = await partRow(db, 'swapper', 'right arm');
+
+    await insertCarriedItem(db, 'swapper', { name: 'Bracer A', slotType: 'hand', modifiers: { maxHealth: 9 } });
+    await insertCarriedItem(db, 'swapper', { name: 'Bracer B', slotType: 'hand', modifiers: { maxHealth: 9 } });
+    await insertCarriedItem(db, 'swapper', { name: 'Bracer C', slotType: 'hand', modifiers: { maxHealth: 9 } });
+
+    await equipItem(db, await getUser(db, 'swapper'), 'Bracer A', 1, 1); // left arm
+    await equipItem(db, await getUser(db, 'swapper'), 'Bracer B', 1, 1); // right arm
+    // Both arms full; equipping C swaps the first candidate (left arm).
+    await equipItem(db, await getUser(db, 'swapper'), 'Bracer C', 1, 1);
+
+    const leftAfter = await partRow(db, 'swapper', 'left arm');
+    assert.equal(leftAfter.maxHp, leftBase.maxHp + 9, 'swapped part carries exactly ONE +9 (A removed, C added)');
+    const rightAfter = await partRow(db, 'swapper', 'right arm');
+    assert.equal(rightAfter.maxHp, rightBase.maxHp + 9, 'untouched arm still +9 from B');
+
+    // Bracer A is carried again and contributes nothing.
+    const bracerA = await db.prepare("SELECT equippedPartId FROM items WHERE name = 'Bracer A'").first();
+    assert.equal(bracerA.equippedPartId, null);
+    // Pool reflects exactly two +9 bonuses across two arms (not three).
+    const user = await db.prepare("SELECT maxHealth FROM users WHERE username = 'swapper'").first();
+    assert.equal(user.maxHealth, 30 + 18, 'pool = base 30 + two equipped +9');
+    await assertHpInvariant(db, 'swapper');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 015: invariant fuzz — equip, heal, attack, unequip, equip-elsewhere stays balanced', async () => {
+  const db = await createMigratedDb();
+  const { equipItem, unequipItem, applyBodyHeal, applyBodyDamage, getUser, ensureBody } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'fuzz', { health: 30, maxHealth: 30 });
+    await ensureBody(db, await getUser(db, 'fuzz'));
+    await assertHpInvariant(db, 'fuzz');
+
+    await insertCarriedItem(db, 'fuzz', { name: 'Plate', slotType: 'torso', modifiers: { maxHealth: 9 } });
+    await insertCarriedItem(db, 'fuzz', { name: 'Greave', slotType: 'leg', modifiers: { maxHealth: 4 } });
+
+    // 1. equip torso armor
+    await equipItem(db, await getUser(db, 'fuzz'), 'Plate', 1, 1);
+    await assertHpInvariant(db, 'fuzz');
+
+    // 2. heal into the new headroom
+    await applyBodyHeal(db, await getUser(db, 'fuzz'), 6, {});
+    await assertHpInvariant(db, 'fuzz');
+
+    // 3. take a non-severing hit (3 damage to a part)
+    await applyBodyDamage(db, await getUser(db, 'fuzz'), 3, { cause: 'a jab', random: () => 0.5 });
+    await assertHpInvariant(db, 'fuzz');
+
+    // 4. unequip the torso armor (clamps maxHealth/health back down)
+    await unequipItem(db, await getUser(db, 'fuzz'), 'Plate', 1, 1);
+    await assertHpInvariant(db, 'fuzz');
+
+    // 5. equip elsewhere (a leg)
+    await equipItem(db, await getUser(db, 'fuzz'), 'Greave', 1, 1);
+    await assertHpInvariant(db, 'fuzz');
   } finally {
     await db.close();
   }
