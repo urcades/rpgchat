@@ -203,9 +203,13 @@ export async function payInnAccess(db, username, row, col) {
   }
 
   const user = await getUser(db, username);
-  assertAction(user.gold >= currentAccess.fee, 'Not enough gold', 402);
+  const goldUpdate = await dbRun(
+    db,
+    'UPDATE users SET gold = gold - ? WHERE username = ? AND gold >= ?',
+    [currentAccess.fee, username, currentAccess.fee]
+  );
+  assertAction(changes(goldUpdate) > 0, 'Not enough gold', 402);
 
-  await dbRun(db, 'UPDATE users SET gold = gold - ? WHERE username = ?', [currentAccess.fee, username]);
   await dbRun(
     db,
     `INSERT OR REPLACE INTO roomAccess
@@ -244,6 +248,8 @@ export async function cleanupOldWorldDayData(db, worldDay = getWorldDay()) {
   await dbRun(db, 'DELETE FROM gamblingEntries WHERE roundId IN (SELECT id FROM gamblingRounds WHERE worldDay != ?)', [worldDay]);
   await dbRun(db, 'DELETE FROM gamblingRounds WHERE worldDay != ?', [worldDay]);
   await dbRun(db, 'DELETE FROM roomTraces WHERE worldDay != ?', [worldDay]);
+  await dbRun(db, 'DELETE FROM sessions WHERE expiresAt <= CURRENT_TIMESTAMP');
+  await dbRun(db, "DELETE FROM messages WHERE timestamp < datetime('now', '-7 days')");
 }
 
 export async function updatePresence(db, username, row, col) {

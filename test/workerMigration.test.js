@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const sqlite3 = require('sqlite3').verbose();
-const { getWorldDay, generateRoomFeatures } = require('../utils/roomEcology');
+const { getWorldDay, generateRoomFeatures, calculateInnFee } = require('../utils/roomEcology');
 
 function createSqliteD1() {
   const raw = new sqlite3.Database(':memory:');
@@ -1246,6 +1246,107 @@ test('Worker attacks ignore stale players who left the room', async () => {
 
     const victim = await db.prepare("SELECT health FROM users WHERE username = 'victim'").first();
     assert.equal(victim.health, 12);
+  } finally {
+    await db.close();
+  }
+});
+
+function findInnRoom(worldDay) {
+  for (let row = 1; row <= 16; row += 1) {
+    for (let col = 1; col <= 16; col += 1) {
+      const features = generateRoomFeatures(row, col, worldDay);
+      if (features.some(feature => feature.effect?.type === 'inn')) {
+        return { row, col };
+      }
+    }
+  }
+  throw new Error('No inn room found for ' + worldDay);
+}
+
+test('Inn payment cannot overdraw a player below zero gold', async () => {
+  const db = await createMigratedDb();
+  const { payInnAccess } = await import('../worker/game.mjs');
+  const worldDay = getWorldDay();
+  const { row, col } = findInnRoom(worldDay);
+  const fee = calculateInnFee(row, col, worldDay);
+
+  try {
+    await db.prepare(
+      "INSERT INTO users (username, password, gold) VALUES ('innguest', 'pw', ?)"
+    ).bind(fee - 1).run();
+
+    await assert.rejects(
+      () => payInnAccess(db, 'innguest', row, col),
+      /Not enough gold/
+    );
+    const afterReject = await db.prepare(
+      'SELECT gold FROM users WHERE username = ?'
+    ).bind('innguest').first();
+    assert.equal(afterReject.gold, fee - 1);
+
+    await db.prepare(
+      'UPDATE users SET gold = ? WHERE username = ?'
+    ).bind(fee, 'innguest').run();
+
+    const paid = await payInnAccess(db, 'innguest', row, col);
+    assert.equal(paid.paid, true);
+    const afterPay = await db.prepare(
+      'SELECT gold FROM users WHERE username = ?'
+    ).bind('innguest').first();
+    assert.equal(afterPay.gold, 0);
+    const access = await db.prepare(
+      'SELECT username FROM roomAccess WHERE username = ? AND roomRow = ? AND roomCol = ? AND worldDay = ?'
+    ).bind('innguest', row, col, worldDay).first();
+    assert.ok(access);
+
+    const again = await payInnAccess(db, 'innguest', row, col);
+    assert.equal(again.paid, true);
+    const afterRepeat = await db.prepare(
+      'SELECT gold FROM users WHERE username = ?'
+    ).bind('innguest').first();
+    assert.equal(afterRepeat.gold, 0);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Daily cleanup prunes expired sessions but keeps live ones', async () => {
+  const db = await createMigratedDb();
+  const { cleanupOldWorldDayData } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      "INSERT INTO sessions (id, username, expiresAt) VALUES ('dead-session', 'a', datetime('now', '-1 hour'))"
+    ).run();
+    await db.prepare(
+      "INSERT INTO sessions (id, username, expiresAt) VALUES ('live-session', 'b', datetime('now', '+1 hour'))"
+    ).run();
+
+    await cleanupOldWorldDayData(db);
+
+    const remaining = await db.prepare('SELECT id FROM sessions ORDER BY id').all();
+    assert.deepEqual(remaining.results.map(row => row.id), ['live-session']);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Daily cleanup prunes messages older than seven days', async () => {
+  const db = await createMigratedDb();
+  const { cleanupOldWorldDayData } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      "INSERT INTO messages (roomRow, roomCol, username, message, timestamp) VALUES (1, 1, 'old', 'stale', datetime('now', '-8 days'))"
+    ).run();
+    await db.prepare(
+      "INSERT INTO messages (roomRow, roomCol, username, message, timestamp) VALUES (1, 1, 'fresh', 'recent', datetime('now'))"
+    ).run();
+
+    await cleanupOldWorldDayData(db);
+
+    const remaining = await db.prepare('SELECT username FROM messages ORDER BY id').all();
+    assert.deepEqual(remaining.results.map(row => row.username), ['fresh']);
   } finally {
     await db.close();
   }
