@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const sqlite3 = require('sqlite3').verbose();
+const { getWorldDay, generateRoomFeatures, calculateInnFee } = require('../utils/roomEcology');
 
 function createSqliteD1() {
   const raw = new sqlite3.Database(':memory:');
@@ -84,6 +85,24 @@ async function withMockedRandom(values, callback) {
   } finally {
     Math.random = originalRandom;
   }
+}
+
+function findCalmRoom(worldDay) {
+  for (let row = 1; row <= 16; row += 1) {
+    for (let col = 1; col <= 16; col += 1) {
+      const features = generateRoomFeatures(row, col, worldDay);
+      // poison_marsh / moon_room can kill the 1-HP victim during the tick;
+      // echo_chamber consumes a Math.random() in processEchoChamber
+      // (worker/game.mjs, `Math.random() >= 0.35`) BEFORE the speed contest,
+      // desynchronizing withMockedRandom's value sequence.
+      const hazardous = features.some(feature =>
+        ['poison_marsh', 'moon_room', 'echo_chamber'].includes(feature.effect?.type));
+      if (!hazardous) {
+        return { row, col };
+      }
+    }
+  }
+  throw new Error('No calm room found for ' + worldDay);
 }
 
 test('Speed hit chance uses a clamped contested curve', async () => {
@@ -432,7 +451,7 @@ test('Raid event completion awards XP, gold, and achievement to present players 
        VALUES ('raider', 'pw', 'Novice', 20, 20, 100, 100, 20, 80, 1)`
     ).run();
 
-    const { raid } = await ensureDailyWorldEvents(db, '2026-05-29', 1);
+    const { raid } = await ensureDailyWorldEvents(db, getWorldDay(), 1);
     await updatePresence(db, 'raider', raid.roomRow, raid.roomCol);
     const before = await getRoomEcology(db, 'raider', raid.roomRow, raid.roomCol);
     const boss = before.presence.find(entity => entity.npcKind === 'raid_boss');
@@ -465,7 +484,7 @@ test('Raid event completion awards XP, gold, and achievement to present players 
 
 test('Player and NPC kills are recorded with defeated level and XP gained', async () => {
   const db = await createMigratedDb();
-  const { handleAttack } = await import('../worker/game.mjs');
+  const { handleAttack, updatePresence } = await import('../worker/game.mjs');
 
   try {
     await db.prepare(
@@ -488,6 +507,10 @@ test('Player and NPC kills are recorded with defeated level and XP gained', asyn
         (eventId, username, entityKind, rewardExperience, rewardGold)
        VALUES ('hostile_test', 'npc_scout', 'hostile', 8, 1)`
     ).run();
+
+    await updatePresence(db, 'fighter', 2, 3);
+    await updatePresence(db, 'rival', 2, 3);
+    await updatePresence(db, 'npc_scout', 2, 3);
 
     await withMockedRandom([0.1, 0.99], () => handleAttack(db, 'fighter', '@rival', 2, 3));
     await withMockedRandom([0.1, 0.99], () => handleAttack(db, 'fighter', '@npc_scout', 2, 3));
@@ -519,7 +542,7 @@ test('Player and NPC kills are recorded with defeated level and XP gained', asyn
 
 test('Killing attack messages are shown before defeat and death system messages', async () => {
   const db = await createMigratedDb();
-  const { getMessages, handleAttackAction } = await import('../worker/game.mjs');
+  const { getMessages, handleAttackAction, updatePresence } = await import('../worker/game.mjs');
 
   try {
     await db.prepare(
@@ -542,6 +565,10 @@ test('Killing attack messages are shown before defeat and death system messages'
         (eventId, username, entityKind, rewardExperience, rewardGold)
        VALUES ('hostile_test', 'npc_scout', 'hostile', 8, 1)`
     ).run();
+
+    await updatePresence(db, 'fighter', 2, 3);
+    await updatePresence(db, 'rival', 2, 3);
+    await updatePresence(db, 'npc_scout', 2, 3);
 
     await withMockedRandom([0.1, 0.99], () => handleAttackAction(db, 'fighter', 2, 3, '@npc_scout'));
 
@@ -581,14 +608,15 @@ test('Hostile NPC room action can kill a present player through the normal cemet
         (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
        VALUES ('victim', 'pw', 'Novice', 1, 10, 100, 100, 1, 1, 1)`
     ).run();
-    await updatePresence(db, 'victim', 1, 1);
+    const calm = findCalmRoom(getWorldDay());
+    await updatePresence(db, 'victim', calm.row, calm.col);
     await createNpcForEvent(db, {
       username: 'raid_brute_test',
       displayName: 'Raid Brute',
       npcKind: 'raid_add',
       worldEventId: 'test-event',
-      row: 1,
-      col: 1,
+      row: calm.row,
+      col: calm.col,
       health: 10,
       stamina: 100,
       speed: 20,
@@ -596,7 +624,7 @@ test('Hostile NPC room action can kill a present player through the normal cemet
       intelligence: 1
     });
 
-    await withMockedRandom([0.1, 0.99], () => runHostileRoomAction(db, 1, 1));
+    await withMockedRandom([0.1, 0.99], () => runHostileRoomAction(db, calm.row, calm.col));
 
     const livePlayer = await db.prepare("SELECT username FROM users WHERE username = 'victim'").first();
     const grave = await db.prepare("SELECT username, cause FROM cemetery WHERE username = 'victim'").first();
@@ -611,7 +639,7 @@ test('Hostile NPC room action can kill a present player through the normal cemet
 
 test('Worker attacks can miss through speed contest without damaging the target', async () => {
   const db = await createMigratedDb();
-  const { getCurrentTickValue, getMessages, handleAttackAction } = await import('../worker/game.mjs');
+  const { getCurrentTickValue, getMessages, handleAttackAction, updatePresence } = await import('../worker/game.mjs');
 
   try {
     await db.prepare(
@@ -624,6 +652,9 @@ test('Worker attacks can miss through speed contest without damaging the target'
         (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
        VALUES ('quick', 'pw', 'Novice', 12, 12, 100, 100, 20, 1, 1)`
     ).run();
+
+    await updatePresence(db, 'slow', 1, 1);
+    await updatePresence(db, 'quick', 1, 1);
 
     await withMockedRandom([0.99, 0.99], () => handleAttackAction(db, 'slow', 1, 1, '@quick'));
 
@@ -644,7 +675,7 @@ test('Worker attacks can miss through speed contest without damaging the target'
 
 test('Worker attacks that pass speed contest still use strength damage', async () => {
   const db = await createMigratedDb();
-  const { handleAttackAction } = await import('../worker/game.mjs');
+  const { handleAttackAction, updatePresence } = await import('../worker/game.mjs');
 
   try {
     await db.prepare(
@@ -657,6 +688,9 @@ test('Worker attacks that pass speed contest still use strength damage', async (
         (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
        VALUES ('slow_target', 'pw', 'Novice', 12, 12, 100, 100, 1, 1, 1)`
     ).run();
+
+    await updatePresence(db, 'fast', 1, 1);
+    await updatePresence(db, 'slow_target', 1, 1);
 
     await withMockedRandom([0.1, 0.99, 0.99], () => handleAttackAction(db, 'fast', 1, 1, '@slow_target'));
 
@@ -851,7 +885,7 @@ test('Worker helpful and neutral class skills bypass speed contests', async () =
 
 test('Worker missed attacks do not consume mark or ward until a later hit', async () => {
   const db = await createMigratedDb();
-  const { handleAttackAction } = await import('../worker/game.mjs');
+  const { handleAttackAction, updatePresence } = await import('../worker/game.mjs');
 
   try {
     await db.prepare(
@@ -868,6 +902,9 @@ test('Worker missed attacks do not consume mark or ward until a later hit', asyn
         ('target', 'assassin', 'marked', 2, 0, 10, 1, 1, 'assassin'),
         ('target', 'paladin', 'ward', 2, 0, 10, 1, 1, 'paladin')`
     ).run();
+
+    await updatePresence(db, 'attacker', 1, 1);
+    await updatePresence(db, 'target', 1, 1);
 
     await withMockedRandom([0.99], () => handleAttackAction(db, 'attacker', 1, 1, '@target'));
 
@@ -1084,4 +1121,233 @@ test('local development URLs canonicalize localhost to 127.0.0.1', async () => {
     canonicalLocalRequestUrl('https://example.com/chat/1/1'),
     null
   );
+});
+
+test('Worker attacks reject targets in a different room', async () => {
+  const db = await createMigratedDb();
+  const { handleAttack, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
+       VALUES ('attacker', 'pw', 'Novice', 12, 12, 100, 100, 20, 12, 1)`
+    ).run();
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
+       VALUES ('victim', 'pw', 'Novice', 12, 12, 100, 100, 1, 1, 1)`
+    ).run();
+
+    await updatePresence(db, 'attacker', 2, 2);
+    await updatePresence(db, 'victim', 5, 5);
+
+    await assert.rejects(
+      () => withMockedRandom([0.1, 0.99, 0.99], () => handleAttack(db, 'attacker', '@victim', 2, 2)),
+      /No such target here/
+    );
+
+    const victim = await db.prepare("SELECT health FROM users WHERE username = 'victim'").first();
+    assert.equal(victim.health, 12);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Worker attacks match whole names instead of substrings', async () => {
+  const db = await createMigratedDb();
+  const { handleAttack, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
+       VALUES ('striker', 'pw', 'Novice', 12, 12, 100, 100, 20, 12, 1)`
+    ).run();
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
+       VALUES ('a', 'pw', 'Novice', 12, 12, 100, 100, 1, 1, 1)`
+    ).run();
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
+       VALUES ('ab', 'pw', 'Novice', 12, 12, 100, 100, 1, 1, 1)`
+    ).run();
+
+    await updatePresence(db, 'striker', 1, 1);
+    await updatePresence(db, 'a', 1, 1);
+    await updatePresence(db, 'ab', 1, 1);
+
+    await withMockedRandom([0.1, 0.99, 0.99], () => handleAttack(db, 'striker', 'attacking ab now', 1, 1));
+
+    const userA = await db.prepare("SELECT health FROM users WHERE username = 'a'").first();
+    const userAb = await db.prepare("SELECT health FROM users WHERE username = 'ab'").first();
+    assert.equal(userA.health, 12);
+    assert.ok(userAb.health < 12, `expected ab to take damage, health was ${userAb.health}`);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Worker attacks cannot target the System account', async () => {
+  const db = await createMigratedDb();
+  const { handleAttack, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
+       VALUES ('attacker', 'pw', 'Novice', 12, 12, 100, 100, 20, 12, 1)`
+    ).run();
+
+    await updatePresence(db, 'attacker', 1, 1);
+    await updatePresence(db, 'System', 1, 1);
+
+    await assert.rejects(
+      () => withMockedRandom([0.1, 0.99, 0.99], () => handleAttack(db, 'attacker', '@System die', 1, 1)),
+      /No such target here/
+    );
+
+    const system = await db.prepare("SELECT health FROM users WHERE username = 'System'").first();
+    assert.equal(system.health, 9999);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Worker attacks ignore stale players who left the room', async () => {
+  const db = await createMigratedDb();
+  const { handleAttack, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
+       VALUES ('attacker', 'pw', 'Novice', 12, 12, 100, 100, 20, 12, 1)`
+    ).run();
+    await db.prepare(
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence)
+       VALUES ('victim', 'pw', 'Novice', 12, 12, 100, 100, 1, 1, 1)`
+    ).run();
+
+    await updatePresence(db, 'attacker', 1, 1);
+    await db.prepare(
+      `INSERT INTO roomPresence
+        (username, roomRow, roomCol, lastSeenTick, worldDay, lastSeenAt)
+       VALUES ('victim', 1, 1, 0, ?, datetime('now', '-120 seconds'))`
+    ).bind(getWorldDay()).run();
+
+    await assert.rejects(
+      () => withMockedRandom([0.1, 0.99, 0.99], () => handleAttack(db, 'attacker', '@victim', 1, 1)),
+      /No such target here/
+    );
+
+    const victim = await db.prepare("SELECT health FROM users WHERE username = 'victim'").first();
+    assert.equal(victim.health, 12);
+  } finally {
+    await db.close();
+  }
+});
+
+function findInnRoom(worldDay) {
+  for (let row = 1; row <= 16; row += 1) {
+    for (let col = 1; col <= 16; col += 1) {
+      const features = generateRoomFeatures(row, col, worldDay);
+      if (features.some(feature => feature.effect?.type === 'inn')) {
+        return { row, col };
+      }
+    }
+  }
+  throw new Error('No inn room found for ' + worldDay);
+}
+
+test('Inn payment cannot overdraw a player below zero gold', async () => {
+  const db = await createMigratedDb();
+  const { payInnAccess } = await import('../worker/game.mjs');
+  const worldDay = getWorldDay();
+  const { row, col } = findInnRoom(worldDay);
+  const fee = calculateInnFee(row, col, worldDay);
+
+  try {
+    await db.prepare(
+      "INSERT INTO users (username, password, gold) VALUES ('innguest', 'pw', ?)"
+    ).bind(fee - 1).run();
+
+    await assert.rejects(
+      () => payInnAccess(db, 'innguest', row, col),
+      /Not enough gold/
+    );
+    const afterReject = await db.prepare(
+      'SELECT gold FROM users WHERE username = ?'
+    ).bind('innguest').first();
+    assert.equal(afterReject.gold, fee - 1);
+
+    await db.prepare(
+      'UPDATE users SET gold = ? WHERE username = ?'
+    ).bind(fee, 'innguest').run();
+
+    const paid = await payInnAccess(db, 'innguest', row, col);
+    assert.equal(paid.paid, true);
+    const afterPay = await db.prepare(
+      'SELECT gold FROM users WHERE username = ?'
+    ).bind('innguest').first();
+    assert.equal(afterPay.gold, 0);
+    const access = await db.prepare(
+      'SELECT username FROM roomAccess WHERE username = ? AND roomRow = ? AND roomCol = ? AND worldDay = ?'
+    ).bind('innguest', row, col, worldDay).first();
+    assert.ok(access);
+
+    const again = await payInnAccess(db, 'innguest', row, col);
+    assert.equal(again.paid, true);
+    const afterRepeat = await db.prepare(
+      'SELECT gold FROM users WHERE username = ?'
+    ).bind('innguest').first();
+    assert.equal(afterRepeat.gold, 0);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Daily cleanup prunes expired sessions but keeps live ones', async () => {
+  const db = await createMigratedDb();
+  const { cleanupOldWorldDayData } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      "INSERT INTO sessions (id, username, expiresAt) VALUES ('dead-session', 'a', datetime('now', '-1 hour'))"
+    ).run();
+    await db.prepare(
+      "INSERT INTO sessions (id, username, expiresAt) VALUES ('live-session', 'b', datetime('now', '+1 hour'))"
+    ).run();
+
+    await cleanupOldWorldDayData(db);
+
+    const remaining = await db.prepare('SELECT id FROM sessions ORDER BY id').all();
+    assert.deepEqual(remaining.results.map(row => row.id), ['live-session']);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Daily cleanup prunes messages older than seven days', async () => {
+  const db = await createMigratedDb();
+  const { cleanupOldWorldDayData } = await import('../worker/game.mjs');
+
+  try {
+    await db.prepare(
+      "INSERT INTO messages (roomRow, roomCol, username, message, timestamp) VALUES (1, 1, 'old', 'stale', datetime('now', '-8 days'))"
+    ).run();
+    await db.prepare(
+      "INSERT INTO messages (roomRow, roomCol, username, message, timestamp) VALUES (1, 1, 'fresh', 'recent', datetime('now'))"
+    ).run();
+
+    await cleanupOldWorldDayData(db);
+
+    const remaining = await db.prepare('SELECT username FROM messages ORDER BY id').all();
+    assert.deepEqual(remaining.results.map(row => row.username), ['fresh']);
+  } finally {
+    await db.close();
+  }
 });
