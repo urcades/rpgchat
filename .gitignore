@@ -25,3 +25,10 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# Claude Code agent worktrees and session data (must never be committed —
+# .claude/worktrees holds live git worktrees)
+.claude/
+
+# Local planning / design docs kept out of the public repo
+plans/
