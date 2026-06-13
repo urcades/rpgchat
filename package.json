@@ -9,6 +9,7 @@
     "check": "wrangler deploy --dry-run",
     "check:migrations": "node scripts/check-migrations.mjs",
     "smoke": "node scripts/smoke.mjs",
+    "combat-smoke": "node scripts/combat-smoke.mjs",
     "predeploy": "npm run db:migrate:remote",
     "deploy": "wrangler deploy",
     "postdeploy": "npm run smoke",

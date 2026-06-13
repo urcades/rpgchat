@@ -10,9 +10,15 @@ production — see [Why this exists](#why-this-exists).
 npm test                 # 1. unit + in-memory integration tests
 npm run check:migrations # 2. is the REMOTE D1 schema behind the code? (the gap that bit us)
 npm run deploy           # 3. applies remote migrations → deploys → runs the live smoke test
-/qa https://rpgchat-worker.organelle.workers.dev   # 4. browser-driven gameplay QA (gstack)
-/improve                 # 5. read-only advisory audit + improvement plan
+npm run combat-smoke     # 4. two-account live PvP: attack → called shot → sever → drop
+/qa https://rpgchat-worker.organelle.workers.dev   # 5. browser-driven gameplay QA (gstack)
+/improve                 # 6. read-only advisory audit + improvement plan
 ```
+
+Steps 1–3 also run automatically in CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)):
+every push/PR runs the test suite + a credential-free bundle check, and a push to
+`main` auto-deploys (migrate → deploy → smoke) once you set the `CLOUDFLARE_API_TOKEN`
+repo secret. Until that secret exists, the deploy job skips cleanly.
 
 If `npm run deploy` is too coupled for your taste, the equivalent manual sequence is:
 
@@ -74,6 +80,30 @@ npx wrangler d1 execute DB --remote --command \
 ```
 
 (the next smoke run re-creates it).
+
+## The combat smoke test
+
+`scripts/combat-smoke.mjs` is the heavier counterpart: it stands up **two** throwaway
+accounts (unique-suffixed per run, so re-runs never reuse a corpse) and drives a real
+fight — attacker aims a called shot at the victim's left arm until it severs, which
+drops the Fighter's Iron Cleaver to the floor. It asserts the core combat invariants
+that solo smoke can't reach: a hit landed, victim total health dropped, the *aimed*
+part took the damage, attacker stamina was spent, and the severed limb's gear dropped
+into the room's `groundItems`.
+
+```bash
+npm run combat-smoke                              # production
+node scripts/combat-smoke.mjs http://localhost:8787
+MAX_ATTACKS=120 npm run combat-smoke             # force a sever if RNG is unlucky
+```
+
+Because it's destructive and leaves throwaway accounts behind, sweep them up
+occasionally:
+
+```bash
+npx wrangler d1 execute DB --remote --command \
+  "DELETE FROM users WHERE username LIKE 'qa_atk_%' OR username LIKE 'qa_vic_%'"
+```
 
 ## Why this exists
 
