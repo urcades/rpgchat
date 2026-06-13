@@ -32,3 +32,4 @@ Thumbs.db
 
 # Local planning / design docs kept out of the public repo
 plans/
+.gstack/
