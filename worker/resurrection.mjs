@@ -1,4 +1,4 @@
-import { dbFirst, dbRun } from './db.mjs';
+import { changes, dbFirst, dbRun } from './db.mjs';
 
 function appendClientReferenceId(paymentLinkUrl, token) {
   const url = new URL(paymentLinkUrl);
@@ -53,7 +53,24 @@ export async function fulfillResurrectionCheckout(db, token, stripeSessionId) {
   if (!request) {
     return { revived: false, reason: 'request_not_found' };
   }
-  if (request.status !== 'pending') {
+
+  // Atomically claim the request: only one caller can flip pending -> completed.
+  // Every side effect below runs ONLY for the winner, so a retried or concurrent
+  // webhook for the same token is a clean no-op (already_completed) instead of
+  // both passing a stale status read and then colliding on the user INSERT,
+  // which would throw a PK violation and leave the grave deleted but the request
+  // unfinished. The conditional WHERE + changes() check is the single gate.
+  const claim = await dbRun(
+    db,
+    `UPDATE resurrectionRequests
+     SET status = 'completed',
+         stripeSessionId = ?,
+         completedAt = CURRENT_TIMESTAMP
+     WHERE token = ?
+       AND status = 'pending'`,
+    [stripeSessionId || null, token]
+  );
+  if (changes(claim) !== 1) {
     return { revived: false, reason: 'already_completed' };
   }
 
@@ -66,14 +83,11 @@ export async function fulfillResurrectionCheckout(db, token, stripeSessionId) {
     [request.graveId, request.username]
   );
   if (!grave) {
+    // Already claimed above; record the terminal state so it isn't retried.
     await dbRun(
       db,
-      `UPDATE resurrectionRequests
-       SET status = 'missing_grave',
-           stripeSessionId = ?,
-           completedAt = CURRENT_TIMESTAMP
-       WHERE token = ?`,
-      [stripeSessionId || null, token]
+      `UPDATE resurrectionRequests SET status = 'missing_grave' WHERE token = ?`,
+      [token]
     );
     return { revived: false, reason: 'grave_not_found' };
   }
@@ -90,16 +104,6 @@ export async function fulfillResurrectionCheckout(db, token, stripeSessionId) {
   }
 
   await dbRun(db, 'DELETE FROM cemetery WHERE id = ?', [grave.id]);
-  await dbRun(
-    db,
-    `UPDATE resurrectionRequests
-     SET status = 'completed',
-         stripeSessionId = ?,
-         completedAt = CURRENT_TIMESTAMP
-     WHERE token = ?
-       AND status = 'pending'`,
-    [stripeSessionId || null, token]
-  );
   await dbRun(
     db,
     `UPDATE sessions

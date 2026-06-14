@@ -51,7 +51,7 @@ STOP conditions; update the row when done.
 
 | Plan | Finding | Title | Priority | Effort | Risk | Depends on | Status |
 |------|---------|-------|----------|--------|------|------------|--------|
-| [001](001-resurrection-idempotency-and-webhook-tests.md) | R1+R2 | Idempotent resurrection fulfillment + Stripe path tests | P1 | M | MED | — | TODO |
+| [001](001-resurrection-idempotency-and-webhook-tests.md) | R1+R2 | Idempotent resurrection fulfillment + Stripe path tests | P1 | M | MED | — | DONE (2026-06-14, `worker/resurrection.mjs` claim-first + 5 tests incl. concurrency; Part A only — Part B signature-verifier extraction deferred) |
 | [002](002-extract-test-d1-shim.md) | T2 | Extract shared test D1 shim | P2 | S | LOW | — | TODO |
 | [003](003-action-path-test-coverage.md) | R4 | Tests for job-change / leveling / inn handlers | P2 | S | 002 (soft) | TODO |
 | [004](004-async-error-boundaries.md) | R3 | Error boundaries + structured logging on async paths | P2 | M | — | TODO |
