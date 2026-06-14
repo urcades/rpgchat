@@ -5,6 +5,7 @@ import worldEventsModule from '../utils/worldEvents.js';
 import bodyModule from '../utils/body.js';
 import itemsModule from '../utils/items.js';
 import abilitiesModule from '../utils/abilities.js';
+import progressionModule from '../utils/progressionGrid.js';
 import { changes, dbAll, dbFirst, dbRun, lastInsertId } from './db.mjs';
 import { elapsedMs, logEvent, measureAsync, nowMs } from './observability.mjs';
 
@@ -21,6 +22,13 @@ const {
   getInnateAbilityIds,
   resolveAbilityStaminaCost
 } = abilitiesModule;
+
+const {
+  getAllNodes: getAllGridNodes,
+  getNode: getGridNode,
+  getNeighbors: getGridNeighbors,
+  getEntryNodeIds: getGridEntryNodeIds
+} = progressionModule;
 
 const {
   GRID_SIZE,
@@ -732,7 +740,7 @@ export async function getRoomEcology(db, username, row, col, worldDay = getWorld
 export async function getUserState(db, username) {
   const user = await dbFirst(
     db,
-    'SELECT username, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold, experience, attributePoints, displayName, stance FROM users WHERE username = ? AND isNpc = 0',
+    'SELECT username, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold, experience, attributePoints, skillPoints, displayName, stance FROM users WHERE username = ? AND isNpc = 0',
     [username]
   );
   if (!user) {
@@ -1661,15 +1669,171 @@ export async function getEquippedModifiers(db, username) {
 // every site that previously fed getBodyConditionModifiers / bodyPenaltyModifiers
 // into getEffectiveUser, so wounds and gear ride one modifier channel.
 export async function getConditionAndGearModifiers(db, username) {
-  const [condition, gear] = await Promise.all([
+  const [condition, gear, progression] = await Promise.all([
     getBodyConditionModifiers(db, username),
-    getEquippedModifiers(db, username)
+    getEquippedModifiers(db, username),
+    getProgressionModifiers(db, username)
   ]);
   const combined = {};
   for (const key of MODIFIER_KEYS) {
-    combined[key] = (Number(condition[key]) || 0) + (Number(gear[key]) || 0);
+    combined[key] = (Number(condition[key]) || 0) + (Number(gear[key]) || 0) + (Number(progression[key]) || 0);
   }
   return combined;
+}
+
+// --- Plan 019: progression grid -------------------------------------------
+// Skill Points (1/level, separate from attribute points) unlock nodes on ONE
+// shared board. Unlocks are DERIVED state: a row in playerProgressionNodes; node
+// effects recompute from the unlocked set (so respec is just deleting the rows).
+
+// The PAID nodes a player has unlocked. A class's entry node is implicit (derived
+// from job) and never stored, so it's added back where the full set is needed.
+async function getStoredUnlockedNodeIds(db, username) {
+  const rows = await dbAll(db, 'SELECT nodeId FROM playerProgressionNodes WHERE username = ?', [username]);
+  return rows.map(row => row.nodeId);
+}
+
+// The full unlocked set (entry node[s] for the class + paid unlocks) — used for
+// adjacency checks and the board render.
+async function getUnlockedNodeIds(db, username, job) {
+  const stored = await getStoredUnlockedNodeIds(db, username);
+  return Array.from(new Set([...getGridEntryNodeIds(normalizeJob(job)), ...stored]));
+}
+
+// Stat deltas from unlocked `stat` and `passive` nodes, folded into the effective
+// layer via getConditionAndGearModifiers so they reach combat AND display at once.
+// Entry nodes carry no effect, so only stored (paid) unlocks contribute. Passives
+// are binary: a board passive the class ALREADY has innately (folded by
+// getEffectiveUser) is skipped so it never stacks twice.
+async function getProgressionModifiers(db, username) {
+  const stored = await getStoredUnlockedNodeIds(db, username);
+  if (!stored.length) {
+    return {};
+  }
+  const user = await getUser(db, username);
+  const innatePassives = new Set(
+    getInnateAbilityIds(normalizeJob(user.job)).filter(id => {
+      const ability = getAbility(id);
+      return ability && ability.kind === 'passive';
+    })
+  );
+  const modifiers = {};
+  for (const nodeId of stored) {
+    const node = getGridNode(nodeId);
+    if (!node || !node.effect) continue;
+    if (node.effect.kind === 'stat') {
+      modifiers[node.effect.stat] = (modifiers[node.effect.stat] || 0) + Number(node.effect.amount || 0);
+    } else if (node.effect.kind === 'passive') {
+      if (innatePassives.has(node.effect.abilityId)) continue; // already folded by getEffectiveUser
+      const ability = getAbility(node.effect.abilityId);
+      for (const [stat, delta] of Object.entries((ability && ability.statEffects) || {})) {
+        modifiers[stat] = (modifiers[stat] || 0) + Number(delta || 0);
+      }
+    }
+  }
+  return modifiers;
+}
+
+// Active abilities granted by unlocked `grant_ability` nodes (board-sourced),
+// unioned with item-granted abilities in getGrantedAbilityIds.
+async function getProgressionGrantedAbilityIds(db, username) {
+  const stored = await getStoredUnlockedNodeIds(db, username);
+  const granted = [];
+  for (const nodeId of stored) {
+    const node = getGridNode(nodeId);
+    if (node && node.effect && node.effect.kind === 'grant_ability') {
+      const abilityId = node.effect.abilityId;
+      if (getAbility(abilityId) && !granted.includes(abilityId)) granted.push(abilityId);
+    }
+  }
+  return granted;
+}
+
+// The board state for the UI: every node tagged unlocked / unlockable / locked.
+export async function getProgressionGrid(db, username) {
+  const user = await getUser(db, username);
+  const job = normalizeJob(user.job);
+  const skillPoints = Number(user.skillPoints || 0);
+  const unlocked = new Set(await getUnlockedNodeIds(db, username, job));
+  const nodes = getAllGridNodes().map(node => {
+    const isUnlocked = unlocked.has(node.id);
+    const onFrontier = getGridNeighbors(node.id).some(neighborId => unlocked.has(neighborId));
+    const cost = node.cost || 0;
+    return {
+      id: node.id,
+      label: node.label,
+      x: node.x,
+      y: node.y,
+      cost,
+      effect: node.effect,
+      entryFor: node.entryFor || null,
+      neighbors: getGridNeighbors(node.id),
+      state: isUnlocked ? 'unlocked' : (onFrontier && skillPoints >= cost ? 'unlockable' : 'locked')
+    };
+  });
+  return { skillPoints, job, nodes };
+}
+
+// Unlock a node: claim-first (the PK guards double-unlock races), then spend —
+// releasing the claim if the spend fails. Mirrors the resurrection claim-before-
+// side-effects ordering (advisor-plans/001).
+export async function unlockProgressionNode(db, username, nodeId) {
+  const node = getGridNode(nodeId);
+  assertAction(node, 'Unknown node.', 404);
+  const user = await getUser(db, username);
+  const job = normalizeJob(user.job);
+  const unlocked = new Set(await getUnlockedNodeIds(db, username, job));
+  assertAction(!unlocked.has(nodeId), 'That node is already unlocked.', 400);
+  assertAction(getGridNeighbors(nodeId).some(neighborId => unlocked.has(neighborId)), 'That node is not reachable yet.', 400);
+
+  const cost = node.cost || 0;
+  const claim = await dbRun(
+    db,
+    'INSERT OR IGNORE INTO playerProgressionNodes (username, nodeId, unlockedTick) VALUES (?, ?, ?)',
+    [username, nodeId, await getCurrentTickValue(db)]
+  );
+  assertAction(changes(claim) > 0, 'That node is already unlocked.', 400);
+
+  const spent = await dbRun(
+    db,
+    'UPDATE users SET skillPoints = skillPoints - ? WHERE username = ? AND skillPoints >= ? AND isNpc = 0',
+    [cost, username, cost]
+  );
+  if (changes(spent) === 0) {
+    await dbRun(db, 'DELETE FROM playerProgressionNodes WHERE username = ? AND nodeId = ?', [username, nodeId]);
+    throw new ActionError('Not enough skill points.', 400);
+  }
+  return getProgressionGrid(db, username);
+}
+
+const RESPEC_GOLD_COST = 50;
+
+// Respec at a guild (where class reselection already lives): pay gold, wipe all
+// paid unlocks, refund the spent points. Effects revert automatically (derived).
+export async function respecProgression(db, username, row, col) {
+  const worldDay = getWorldDay();
+  const tickValue = await getCurrentTickValue(db);
+  assertAction(roomHasEffect(row, col, tickValue, 'guild', worldDay), 'You can only respec at a guild.', 400);
+
+  const stored = await getStoredUnlockedNodeIds(db, username);
+  assertAction(stored.length > 0, 'You have no unlocked nodes to respec.', 400);
+  const refund = stored.reduce((sum, id) => {
+    const node = getGridNode(id);
+    return sum + (node ? (node.cost || 0) : 0);
+  }, 0);
+
+  const paid = await dbRun(
+    db,
+    'UPDATE users SET gold = gold - ? WHERE username = ? AND gold >= ? AND isNpc = 0',
+    [RESPEC_GOLD_COST, username, RESPEC_GOLD_COST]
+  );
+  assertAction(changes(paid) > 0, `Respec costs ${RESPEC_GOLD_COST} gold.`, 400);
+
+  await dbRun(db, 'DELETE FROM playerProgressionNodes WHERE username = ?', [username]);
+  if (refund > 0) {
+    await dbRun(db, 'UPDATE users SET skillPoints = skillPoints + ? WHERE username = ?', [refund, username]);
+  }
+  return getProgressionGrid(db, username);
 }
 
 async function findOwnedUnequippedItem(db, username, itemName) {
@@ -2422,8 +2586,10 @@ async function awardExperience(db, username, amount) {
   if (levelDelta > 0) {
     await dbRun(
       db,
-      'UPDATE users SET experience = ?, level = ?, attributePoints = attributePoints + ? WHERE username = ?',
-      [nextExperience, nextLevel, levelDelta * 10, username]
+      // Plan 016 grants 10 attribute points/level; plan 019 grants 1 skill point/
+      // level (a SEPARATE currency for the progression grid).
+      'UPDATE users SET experience = ?, level = ?, attributePoints = attributePoints + ?, skillPoints = skillPoints + ? WHERE username = ?',
+      [nextExperience, nextLevel, levelDelta * 10, levelDelta, username]
     );
   } else {
     await dbRun(db, 'UPDATE users SET experience = ? WHERE username = ?', [nextExperience, username]);
@@ -2737,6 +2903,13 @@ export async function getGrantedAbilityIds(db, username) {
     const template = getTemplate(row.templateId);
     const abilityId = template && template.grantsAbility;
     if (abilityId && getAbility(abilityId) && !granted.includes(abilityId)) {
+      granted.push(abilityId);
+    }
+  }
+  // Plan 019: abilities granted by unlocked progression-grid nodes ride the same
+  // usable-set + hotbar channel as item-granted abilities.
+  for (const abilityId of await getProgressionGrantedAbilityIds(db, username)) {
+    if (!granted.includes(abilityId)) {
       granted.push(abilityId);
     }
   }

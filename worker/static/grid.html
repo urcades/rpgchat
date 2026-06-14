@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Progression Grid</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="page">
+    <p>Progression Grid</p>
+    <p><a href="#" onclick="history.back(); return false;">Back</a> · <a href="/character">Character</a></p>
+    <div id="grid-status" class="hud">
+      <span id="skill-points">Skill Points: —</span>
+      <button type="button" id="respec-button" class="gear-action" title="Refund all unlocked nodes (costs 50 gold, only at a guild)">Respec (50g, at a guild)</button>
+    </div>
+    <p class="gear-hint">
+      Spend Skill Points (earned 1 per level — separate from attribute points) to
+      unlock nodes next to ones you already have. Your class starts at its own root.
+      Highlighted nodes are unlockable; click one to spend.
+    </p>
+    <div id="grid-board"></div>
+    <div class="grid-legend">
+      <span><span class="grid-swatch grid-swatch-unlocked"></span> Unlocked</span>
+      <span><span class="grid-swatch grid-swatch-unlockable"></span> Unlockable</span>
+      <span><span class="grid-swatch grid-swatch-locked"></span> Locked</span>
+    </div>
+    <p id="grid-message" class="gear-hint"></p>
+  </main>
+  <script>
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, character => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[character]));
+    }
+
+    function effectText(effect) {
+      if (!effect) return '';
+      if (effect.kind === 'stat') return `+${effect.amount} ${effect.stat}`;
+      if (effect.kind === 'grant_ability') return `Grants: ${effect.abilityId}`;
+      if (effect.kind === 'passive') return `Passive: ${effect.abilityId}`;
+      return '';
+    }
+
+    function setMessage(text, isError) {
+      const el = document.getElementById('grid-message');
+      el.textContent = text || '';
+      el.style.color = isError ? '#b00020' : '';
+    }
+
+    let board = null;
+
+    function render(data) {
+      board = data;
+      document.getElementById('skill-points').textContent = `Skill Points: ${data.skillPoints}`;
+
+      const byId = {};
+      data.nodes.forEach(node => { byId[node.id] = node; });
+
+      // Edges first (dedup each undirected pair). An edge between two unlocked
+      // nodes reads as a travelled path.
+      const drawnEdges = new Set();
+      const edges = [];
+      data.nodes.forEach(node => {
+        (node.neighbors || []).forEach(otherId => {
+          const key = [node.id, otherId].sort().join('|');
+          if (drawnEdges.has(key)) return;
+          drawnEdges.add(key);
+          const other = byId[otherId];
+          if (!other) return;
+          const active = node.state === 'unlocked' && other.state === 'unlocked';
+          edges.push(`<line x1="${node.x}" y1="${node.y}" x2="${other.x}" y2="${other.y}" class="grid-edge ${active ? 'grid-edge-active' : ''}" />`);
+        });
+      });
+
+      const circles = data.nodes.map(node => {
+        const title = `${node.label}${effectText(node.effect) ? ' — ' + effectText(node.effect) : ''}\n${node.state}${node.cost ? ' · cost ' + node.cost : ' · free'}`;
+        const cls = `grid-node grid-node-${node.state}`;
+        const label = escapeHtml(node.label);
+        return `<g class="${cls}" data-node-id="${escapeHtml(node.id)}" data-state="${node.state}">
+            <title>${escapeHtml(title)}</title>
+            <circle cx="${node.x}" cy="${node.y}" r="22"></circle>
+            <text x="${node.x}" y="${node.y + 38}" text-anchor="middle" class="grid-node-label">${label}</text>
+          </g>`;
+      }).join('');
+
+      document.getElementById('grid-board').innerHTML =
+        `<svg viewBox="0 0 620 620" class="grid-svg" role="img" aria-label="Progression grid">${edges.join('')}${circles}</svg>`;
+
+      document.querySelectorAll('#grid-board g[data-state="unlockable"]').forEach(group => {
+        group.addEventListener('click', () => unlock(group.getAttribute('data-node-id')));
+      });
+    }
+
+    function post(path, body) {
+      return fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+        body
+      }).then(response => {
+        if (!response.ok) {
+          return response.text().then(text => { throw new Error(text || 'That action failed.'); });
+        }
+        return response.json();
+      });
+    }
+
+    function unlock(nodeId) {
+      setMessage('');
+      post('/grid/unlock', 'nodeId=' + encodeURIComponent(nodeId))
+        .then(render)
+        .catch(error => setMessage(error.message, true));
+    }
+
+    function respec() {
+      if (!window.confirm('Respec? This refunds every unlocked node and costs 50 gold. You must be standing in a guild.')) {
+        return;
+      }
+      setMessage('');
+      post('/grid/respec', '')
+        .then(data => { render(data); setMessage('Respec complete — all nodes refunded.'); })
+        .catch(error => setMessage(error.message, true));
+    }
+
+    function load() {
+      fetch('/progression', { headers: { Accept: 'application/json' } })
+        .then(response => response.json())
+        .then(render)
+        .catch(() => setMessage('The progression grid is unavailable right now.', true));
+    }
+
+    document.getElementById('respec-button').addEventListener('click', respec);
+    load();
+  </script>
+</body>
+</html>

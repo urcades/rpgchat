@@ -406,3 +406,82 @@ a, button, input, select {
   padding: .35em .75em;
   text-decoration: none;
 }
+
+/* Plan 019: progression grid */
+#grid-status {
+  align-items: center;
+  display: flex;
+  gap: 1rem;
+}
+
+#grid-board {
+  border: 1px solid #d9d9d9;
+  margin: .5rem 0;
+  max-width: 640px;
+}
+
+.grid-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.grid-edge {
+  stroke: #d0d0d0;
+  stroke-width: 2;
+}
+
+.grid-edge-active {
+  stroke: #555555;
+  stroke-width: 3;
+}
+
+.grid-node circle {
+  stroke: #888888;
+  stroke-width: 2;
+  fill: #f4f4f4;
+}
+
+.grid-node-label {
+  fill: #333333;
+  font-size: 12px;
+}
+
+.grid-node-unlocked circle {
+  fill: #2f7d32;
+  stroke: #205723;
+}
+
+.grid-node-unlockable circle {
+  fill: #ffd54a;
+  stroke: #b8860b;
+  cursor: pointer;
+}
+
+.grid-node-unlockable {
+  cursor: pointer;
+}
+
+.grid-node-locked circle {
+  fill: #ededed;
+  stroke: #c4c4c4;
+}
+
+.grid-legend {
+  display: flex;
+  gap: 1rem;
+  font-size: .85rem;
+  color: #555555;
+}
+
+.grid-swatch {
+  display: inline-block;
+  width: .8em;
+  height: .8em;
+  border: 1px solid #888888;
+  vertical-align: middle;
+}
+
+.grid-swatch-unlocked { background: #2f7d32; }
+.grid-swatch-unlockable { background: #ffd54a; }
+.grid-swatch-locked { background: #ededed; }

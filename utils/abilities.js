@@ -105,6 +105,28 @@ const ABILITIES = {
       'Increases your Strength by 1.'
     ],
     statEffects: { strength: 1 }
+  },
+
+  // Plan 019 — board-granted passives (unlocked on the progression grid, not
+  // innate to any class). Their statEffects fold through the modifier channel
+  // (getProgressionModifiers) the same way the Toughness job passive does.
+  quickness: {
+    id: 'quickness', label: 'Quickness', kind: 'passive', target: 'none', contest: false,
+    description: 'Light on your feet.',
+    effects: ['Always active.', 'Increases your Speed by 1.'],
+    statEffects: { speed: 1 }
+  },
+  acuity: {
+    id: 'acuity', label: 'Acuity', kind: 'passive', target: 'none', contest: false,
+    description: 'A sharper, faster mind.',
+    effects: ['Always active.', 'Increases your Intelligence by 1.'],
+    statEffects: { intelligence: 1 }
+  },
+  vigor: {
+    id: 'vigor', label: 'Vigor', kind: 'passive', target: 'none', contest: false,
+    description: 'Deeper reserves of stamina.',
+    effects: ['Always active.', 'Increases your Max Stamina by 5.'],
+    statEffects: { maxStamina: 5 }
   }
 };
 

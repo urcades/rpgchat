@@ -21,6 +21,7 @@ import {
   getActiveWorldEvents,
   getRoomAccessState,
   getRoomEcology,
+  getProgressionGrid,
   getRoomState,
   getUserState,
   handleAttackAction,
@@ -28,6 +29,8 @@ import {
   handleJobChangeAction,
   handleSkillAction,
   normalizeJob,
+  respecProgression,
+  unlockProgressionNode,
   payInnAccess,
   requireRoomUse,
   roomHasActiveHostiles,
@@ -451,6 +454,15 @@ app.get('/character', async c => {
   return protectedAsset(c, '/character.html');
 });
 
+// Plan 019: the progression grid (shared skill-tree board).
+app.get('/grid', async c => {
+  const auth = await currentUserOrResponse(c);
+  if (auth instanceof Response) {
+    return auth;
+  }
+  return protectedAsset(c, '/grid.html');
+});
+
 app.get('/death', async c => {
   const session = await getSession(c.env, c.req.raw);
   if (!session?.deadUsername) {
@@ -629,6 +641,52 @@ app.post('/allocate', async c => {
     const body = await parseForm(c);
     await allocateAttributePoint(c.env.DB, auth.user.username, String(body.stat || ''));
     return c.json(await getUserState(c.env.DB, auth.user.username));
+  } catch (err) {
+    return formError(c, err);
+  }
+});
+
+// Plan 019: progression-grid board state for the /grid page.
+app.get('/progression', async c => {
+  const auth = await currentUserOrResponse(c);
+  if (auth instanceof Response) {
+    return auth;
+  }
+  try {
+    return c.json(await getProgressionGrid(c.env.DB, auth.user.username));
+  } catch (err) {
+    return formError(c, err);
+  }
+});
+
+// Unlock a node (spends 1 skill point; requires adjacency). Meta action — no
+// room/stamina/tick — like /allocate. Returns the fresh board.
+app.post('/grid/unlock', async c => {
+  const auth = await currentUserOrResponse(c);
+  if (auth instanceof Response) {
+    return auth;
+  }
+  try {
+    const body = await parseForm(c);
+    return c.json(await unlockProgressionNode(c.env.DB, auth.user.username, String(body.nodeId || '')));
+  } catch (err) {
+    return formError(c, err);
+  }
+});
+
+// Respec: gold-priced, guild-gated. Resolves the player's current room so the
+// guild check uses where they actually are.
+app.post('/grid/respec', async c => {
+  const auth = await currentUserOrResponse(c);
+  if (auth instanceof Response) {
+    return auth;
+  }
+  try {
+    const position = await getCurrentPosition(c.env.DB, auth.user.username);
+    if (!position) {
+      return formError(c, new ActionError('You can only respec at a guild.', 400));
+    }
+    return c.json(await respecProgression(c.env.DB, auth.user.username, position.row, position.col));
   } catch (err) {
     return formError(c, err);
   }
