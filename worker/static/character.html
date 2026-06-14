@@ -112,16 +112,28 @@
         ['Gold', data.gold !== undefined ? data.gold : 0]
       ];
 
+      // Plan 016: unspent attribute points get a "+" beside each allocatable stat.
+      // maxHealth is body-bound (Σ part maxHp) and intentionally not allocatable yet.
+      const points = Number(data.attributePoints || 0);
+      function allocBtn(statKey) {
+        return points > 0
+          ? ` <button type="button" class="gear-action" data-allocate="${statKey}" title="Spend 1 point">+</button>`
+          : '';
+      }
+
       // Current stats annotated with the gear contribution per stat. Health shows
       // armor HP (structural, plan 015 — not in the effective gear-modifier layer);
       // the rest come from gearBonuses.
       const currentStats = rowList([
         row('Health', `${escapeHtml(effective.health ?? 0)}/${escapeHtml(effective.maxHealth ?? 0)}${modSpan(gearHealth, 'armor')}`),
-        row('Stamina', `${escapeHtml(effective.stamina ?? 0)}/${escapeHtml(effective.maxStamina ?? 0)}${modSpan(gear.maxStamina)}`),
-        row('Speed', `${escapeHtml(effective.speed ?? 0)}${modSpan(gear.speed)}`),
-        row('Strength', `${escapeHtml(effective.strength ?? 0)}${modSpan(gear.strength)}`),
-        row('Intelligence', `${escapeHtml(effective.intelligence ?? 0)}${modSpan(gear.intelligence)}`)
+        row('Stamina', `${escapeHtml(effective.stamina ?? 0)}/${escapeHtml(effective.maxStamina ?? 0)}${modSpan(gear.maxStamina)}${allocBtn('maxStamina')}`),
+        row('Speed', `${escapeHtml(effective.speed ?? 0)}${modSpan(gear.speed)}${allocBtn('speed')}`),
+        row('Strength', `${escapeHtml(effective.strength ?? 0)}${modSpan(gear.strength)}${allocBtn('strength')}`),
+        row('Intelligence', `${escapeHtml(effective.intelligence ?? 0)}${modSpan(gear.intelligence)}${allocBtn('intelligence')}`)
       ]);
+      const pointsHint = points > 0
+        ? `<p class="gear-hint">You have ${points} attribute point${points === 1 ? '' : 's'} to spend — tap a + beside a stat.</p>`
+        : '';
 
       const body = data.body || [];
       const bodyRows = body.map(part => [part.label, part.condition]);
@@ -187,6 +199,7 @@
         </section>
         <section class="character-section">
           <h2>Current Stats</h2>
+          ${pointsHint}
           ${currentStats}
         </section>
         <section class="character-section">
@@ -232,13 +245,35 @@
         });
     }
 
+    // Plan 016: spend a point on a stat. The endpoint returns the fresh state, so
+    // we re-render from the response in one round trip.
+    function performAllocate(stat) {
+      fetch('/allocate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+        body: `stat=${encodeURIComponent(stat)}`
+      })
+        .then(response => {
+          if (!response.ok) {
+            return response.text().then(message => { throw new Error(message || 'Could not allocate that point.'); });
+          }
+          return response.json();
+        })
+        .then(render)
+        .catch(error => window.alert(error.message));
+    }
+
     // Delegated once on the persistent container; innerHTML re-renders don't lose it.
     document.getElementById('attributes').addEventListener('click', event => {
-      const button = event.target.closest('button[data-action]');
-      if (!button || button.disabled) {
+      const gearButton = event.target.closest('button[data-action]');
+      if (gearButton && !gearButton.disabled) {
+        performGearAction(gearButton.dataset.action, gearButton.dataset.ref);
         return;
       }
-      performGearAction(button.dataset.action, button.dataset.ref);
+      const allocButton = event.target.closest('button[data-allocate]');
+      if (allocButton) {
+        performAllocate(allocButton.dataset.allocate);
+      }
     });
 
     load();

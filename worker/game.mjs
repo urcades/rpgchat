@@ -982,6 +982,31 @@ export async function spendStamina(db, username, cost = 1) {
   }
 }
 
+// Plan 016: spend one attributePoint (granted 10/level by awardExperience) to
+// raise a base stat. The map is the allowlist — only these stat names ever reach
+// the SQL, which is why the `${stat}` interpolation below is safe. maxStamina
+// gives a bigger step so a point is worth spending; maxHealth is deliberately
+// NOT here yet (it's body-bound: maxHealth == Σ part maxHp — see the plan).
+const ALLOCATABLE_STATS = { strength: 1, speed: 1, intelligence: 1, maxStamina: 5 };
+
+export function getAllocatableStats() {
+  return { ...ALLOCATABLE_STATS };
+}
+
+export async function allocateAttributePoint(db, username, stat) {
+  const step = ALLOCATABLE_STATS[stat];
+  assertAction(step, 'You cannot raise that attribute.');
+  // Atomic: spends exactly one point, and only if one is available.
+  const result = await dbRun(
+    db,
+    `UPDATE users SET ${stat} = ${stat} + ?, attributePoints = attributePoints - 1
+     WHERE username = ? AND attributePoints >= 1 AND isNpc = 0`,
+    [step, username]
+  );
+  assertAction(changes(result) > 0, 'No attribute points to spend.', 400);
+  return { stat, step };
+}
+
 export async function runPlayerAction(db, { username, staminaCost = 1, validate, perform, advanceTick }) {
   await assertEnoughStamina(db, username, staminaCost);
   if (validate) {

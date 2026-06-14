@@ -12,6 +12,7 @@ import {
   ActionError,
   JOBS,
   SIGNATURE_ITEMS_BY_JOB,
+  allocateAttributePoint,
   buildStartingStats,
   createItemForOwner,
   getCurrentPosition,
@@ -611,6 +612,22 @@ app.get('/user-attributes', async c => {
     return auth;
   }
   try {
+    return c.json(await getUserState(c.env.DB, auth.user.username));
+  } catch (err) {
+    return formError(c, err);
+  }
+});
+
+// Plan 016: spend an attribute point on a stat. A character-sheet meta action —
+// no room/stamina/tick — so it routes through its own endpoint, not /chat.
+app.post('/allocate', async c => {
+  const auth = await currentUserOrResponse(c);
+  if (auth instanceof Response) {
+    return auth;
+  }
+  try {
+    const body = await parseForm(c);
+    await allocateAttributePoint(c.env.DB, auth.user.username, String(body.stat || ''));
     return c.json(await getUserState(c.env.DB, auth.user.username));
   } catch (err) {
     return formError(c, err);
