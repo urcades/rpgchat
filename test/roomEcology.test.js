@@ -137,7 +137,7 @@ test('returns effect payload for shop, gambling, and inn features', () => {
 
   assert.deepEqual(payload.effects.map(effect => effect.type), ['shop', 'gambling_den', 'inn']);
   assert.ok(payload.stock.length > 0);
-  assert.deepEqual(payload.commands, ['/roll <gold>']);
+  assert.deepEqual(payload.commands, ['/roll <gold>', '/buy <item>']);
   assert.equal(payload.innAccess.required, true);
   assert.ok(payload.innAccess.fee > 0);
 });

@@ -124,17 +124,20 @@ const AMBIENT_FEATURE_WEIGHTS = {
   safe: 0.2
 };
 
+// templateId maps each stock line to an item template in utils/items.js so
+// plan 007's /buy can mint the bought item. Names stay byte-identical (stock
+// determinism + /take/​/equip name matching depend on them).
 const SHOP_ITEM_CATALOG = [
-  { name: 'Dented Helm', basePrice: 3 },
-  { name: 'Tin Flask', basePrice: 2 },
-  { name: 'Salted Bread', basePrice: 1 },
-  { name: 'Red Thread', basePrice: 2 },
-  { name: 'Chipped Knife', basePrice: 4 },
-  { name: 'Blue Candle', basePrice: 3 },
-  { name: 'Wax Seal', basePrice: 5 },
-  { name: 'Old Map Scrap', basePrice: 4 },
-  { name: 'Bone Charm', basePrice: 6 },
-  { name: 'Copper Bell', basePrice: 3 }
+  { templateId: 'dented_helm', name: 'Dented Helm', basePrice: 3 },
+  { templateId: 'tin_flask', name: 'Tin Flask', basePrice: 2 },
+  { templateId: 'salted_bread', name: 'Salted Bread', basePrice: 1 },
+  { templateId: 'red_thread', name: 'Red Thread', basePrice: 2 },
+  { templateId: 'chipped_knife', name: 'Chipped Knife', basePrice: 4 },
+  { templateId: 'blue_candle', name: 'Blue Candle', basePrice: 3 },
+  { templateId: 'wax_seal', name: 'Wax Seal', basePrice: 5 },
+  { templateId: 'old_map_scrap', name: 'Old Map Scrap', basePrice: 4 },
+  { templateId: 'bone_charm', name: 'Bone Charm', basePrice: 6 },
+  { templateId: 'copper_bell', name: 'Copper Bell', basePrice: 3 }
 ];
 
 const PASSIVE_EFFECT_INTERVAL = 5;
@@ -252,6 +255,7 @@ function generateShopStock(row, col, worldDay = getWorldDay()) {
     const item = catalog.splice(index, 1)[0];
     const price = Math.max(1, item.basePrice + Math.floor(random() * 5) - 1);
     stock.push({
+      templateId: item.templateId,
       name: item.name,
       price
     });
@@ -277,7 +281,10 @@ function getRoomEffectPayload({ row, col, worldDay = getWorldDay(), features, in
   const payload = {
     effects,
     stock: effectTypes.includes('shop') ? generateShopStock(row, col, worldDay) : [],
-    commands: effectTypes.includes('gambling_den') ? ['/roll <gold>'] : [],
+    commands: [
+      ...(effectTypes.includes('gambling_den') ? ['/roll <gold>'] : []),
+      ...(effectTypes.includes('shop') ? ['/buy <item>'] : [])
+    ],
     activeRound: activeRound || null
   };
 

@@ -36,7 +36,21 @@ const ITEM_TEMPLATES = [
   // Rare drop pool.
   { templateId: 'wyrmscale_cloak', name: 'Wyrmscale Cloak', slotType: 'torso', rarity: 'rare', modifiers: { maxHealth: 9, speed: 1 }, dropWeight: 1 },
   { templateId: 'frostbitten_fang', name: 'Frostbitten Fang', slotType: 'hand', rarity: 'rare', modifiers: { strength: 3 }, dropWeight: 1 },
-  { templateId: 'coldlight_circlet', name: 'Coldlight Circlet', slotType: 'head', rarity: 'rare', modifiers: { intelligence: 3 }, dropWeight: 1 }
+  { templateId: 'coldlight_circlet', name: 'Coldlight Circlet', slotType: 'head', rarity: 'rare', modifiers: { intelligence: 3 }, dropWeight: 1 },
+
+  // Plan 007: shop stock — one per SHOP_ITEM_CATALOG name (utils/roomEcology.js).
+  // The economy floor: cheap, modest gear bought via /buy. Never drops
+  // (dropWeight 0); names must stay byte-identical to the catalog.
+  { templateId: 'dented_helm', name: 'Dented Helm', slotType: 'head', rarity: 'shop', modifiers: { maxHealth: 3 }, dropWeight: 0 },
+  { templateId: 'tin_flask', name: 'Tin Flask', slotType: 'trinket', rarity: 'shop', modifiers: { maxStamina: 5 }, dropWeight: 0 },
+  { templateId: 'salted_bread', name: 'Salted Bread', slotType: 'trinket', rarity: 'shop', modifiers: { maxHealth: 3 }, dropWeight: 0 },
+  { templateId: 'red_thread', name: 'Red Thread', slotType: 'trinket', rarity: 'shop', modifiers: { speed: 1, maxHealth: -3 }, dropWeight: 0 },
+  { templateId: 'chipped_knife', name: 'Chipped Knife', slotType: 'hand', rarity: 'shop', modifiers: { strength: 1 }, dropWeight: 0 },
+  { templateId: 'blue_candle', name: 'Blue Candle', slotType: 'hand', rarity: 'shop', modifiers: { intelligence: 1 }, dropWeight: 0 },
+  { templateId: 'wax_seal', name: 'Wax Seal', slotType: 'trinket', rarity: 'shop', modifiers: { intelligence: 1 }, dropWeight: 0 },
+  { templateId: 'old_map_scrap', name: 'Old Map Scrap', slotType: 'hand', rarity: 'shop', modifiers: { speed: 1 }, dropWeight: 0 },
+  { templateId: 'bone_charm', name: 'Bone Charm', slotType: 'trinket', rarity: 'shop', modifiers: { strength: 1, intelligence: 1 }, dropWeight: 0 },
+  { templateId: 'copper_bell', name: 'Copper Bell', slotType: 'trinket', rarity: 'shop', modifiers: { maxStamina: 10, speed: -1 }, dropWeight: 0 }
 ];
 
 const SIGNATURE_ITEMS_BY_JOB = {

@@ -3043,6 +3043,67 @@ export async function handleStanceCommand(db, username, row, col, message) {
   return { stance: requested };
 }
 
+// Resolve the shop stock line a /buy names, or throw the right ActionError.
+// Shared by the /buy validate (so a bad buy spends no stamina) and the perform
+// below, so the two can't drift. Returns the matched stock line + the per-day
+// cooldown key.
+async function resolveShopPurchase(db, username, row, col, itemName) {
+  const worldDay = getWorldDay();
+  const tickValue = await getCurrentTickValue(db);
+  assertAction(roomHasEffect(row, col, tickValue, 'shop', worldDay), '/buy only works in a shop.');
+
+  const stockItem = generateShopStock(row, col, worldDay).find(
+    item => item.name.toLowerCase() === itemName.toLowerCase()
+  );
+  assertAction(stockItem, 'Not stocked here today.');
+
+  // One of each stock line per player per room per day. effectType is namespaced
+  // (`buy:<templateId>`) so it never collides with passive room effects.
+  const effectType = `buy:${stockItem.templateId}`;
+  const already = await dbFirst(
+    db,
+    `SELECT 1 AS hit FROM roomEffectCooldowns
+     WHERE username = ? AND roomRow = ? AND roomCol = ? AND effectType = ? AND worldDay = ?`,
+    [username, row, col, effectType, worldDay]
+  );
+  assertAction(!already, 'Sold out for you today.');
+
+  return { stockItem, effectType, worldDay, tickValue };
+}
+
+export async function validateBuyCommand(db, username, row, col, message) {
+  const rest = commandRest(message, '/buy').trim();
+  assertAction(rest, 'Usage: /buy <item name>');
+  const { stockItem } = await resolveShopPurchase(db, username, row, col, rest);
+  const user = await getUser(db, username);
+  assertAction((user.gold || 0) >= stockItem.price, 'Not enough gold.', 402);
+}
+
+export async function buyShopItem(db, username, row, col, itemName) {
+  const { stockItem, effectType, worldDay, tickValue } = await resolveShopPurchase(db, username, row, col, itemName);
+
+  // Atomic spend (plan 003): the conditional WHERE re-validates gold under
+  // concurrency. The cooldown is written only AFTER a successful spend, so a
+  // failed payment never burns the player's once-per-day slot for this item.
+  const spend = await dbRun(
+    db,
+    'UPDATE users SET gold = gold - ? WHERE username = ? AND gold >= ?',
+    [stockItem.price, username, stockItem.price]
+  );
+  assertAction(changes(spend) > 0, 'Not enough gold.', 402);
+
+  await upsertCooldown(db, username, row, col, effectType, tickValue, worldDay);
+  await createItemForOwner(db, stockItem.templateId, username);
+  await insertSystemMessage(db, row, col, `${username} buys ${stockItem.name} for ${stockItem.price} gold.`);
+  return { bought: stockItem.name, price: stockItem.price };
+}
+
+export async function handleBuyCommand(db, username, row, col, message) {
+  const rest = commandRest(message, '/buy').trim();
+  assertAction(rest, 'Usage: /buy <item name>');
+  return buyShopItem(db, username, row, col, rest);
+}
+
 export async function handleChatAction(db, username, row, col, message) {
   if (message.trim().toLowerCase().startsWith('/stance')) {
     return runPlayerAction(db, {
@@ -3105,6 +3166,16 @@ export async function handleChatAction(db, username, row, col, message) {
       username,
       staminaCost: 1,
       perform: async () => handleDropCommand(db, username, row, col, message),
+      advanceTick: () => advanceGlobalTick(db)
+    });
+  }
+
+  if (message.trim().toLowerCase().startsWith('/buy')) {
+    return runPlayerAction(db, {
+      username,
+      staminaCost: 1,
+      validate: async () => validateBuyCommand(db, username, row, col, message),
+      perform: async () => handleBuyCommand(db, username, row, col, message),
       advanceTick: () => advanceGlobalTick(db)
     });
   }
