@@ -107,6 +107,47 @@ a, button, input, select {
   text-decoration: underline;
 }
 
+.gear-action {
+  background: none;
+  border: 1px solid #c5c5c5;
+  border-radius: 3px;
+  color: #0645ad;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.85em;
+  margin-left: 0.4em;
+  padding: 0 0.45em;
+}
+
+.gear-action:hover:not(:disabled) {
+  background: #f0f4ff;
+}
+
+.gear-action:disabled {
+  color: #999;
+  cursor: not-allowed;
+}
+
+.stat-mod {
+  color: #2a7d4f;
+}
+
+.gear-hint {
+  color: #777;
+  font-size: 0.9em;
+  margin: 0 0 0.5rem;
+}
+
+.inventory-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.inventory-list li {
+  margin: 0 0 0.35rem;
+}
+
 #attributes {
   display: flex;
   flex-direction: row;

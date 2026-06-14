@@ -240,3 +240,62 @@ test('Plan 005: a severed limb drops its equipped item to the floor where anothe
     await db.close();
   }
 });
+
+test('/drop moves a carried item from the pack to the current room floor', async () => {
+  const db = await createMigratedDb();
+  const { handleChatAction, getUserState, getFloorItems, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    const calm = findCalmRoom(getWorldDay());
+    await seedLiveUser(db, 'dropper', { health: 30, maxHealth: 30 });
+    await updatePresence(db, 'dropper', calm.row, calm.col);
+    await getUserState(db, 'dropper'); // instantiate body
+    await insertCarriedItem(db, 'dropper', { name: 'Old Boot', slotType: 'leg' });
+
+    const before = await getUserState(db, 'dropper');
+    assert.deepEqual(before.inventory.map(i => i.name), ['Old Boot'], 'boot starts carried');
+
+    const action = await handleChatAction(db, 'dropper', calm.row, calm.col, '/drop Old Boot');
+    assert.equal(action.dropped, 'Old Boot');
+
+    const after = await getUserState(db, 'dropper');
+    assert.equal(after.inventory.length, 0, 'dropped item left the pack');
+
+    const floor = await getFloorItems(db, calm.row, calm.col);
+    assert.deepEqual(floor.map(i => i.name), ['Old Boot'], 'item now lies on the room floor');
+
+    // Dropping something you are not carrying is rejected.
+    await assert.rejects(
+      handleChatAction(db, 'dropper', calm.row, calm.col, '/drop Old Boot'),
+      /aren't carrying that/
+    );
+  } finally {
+    await db.close();
+  }
+});
+
+test('getUserState exposes currentRoom from presence and gearHealthBonus from worn armor', async () => {
+  const db = await createMigratedDb();
+  const { handleChatAction, getUserState, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    const calm = findCalmRoom(getWorldDay());
+    await seedLiveUser(db, 'armored', { health: 30, maxHealth: 30 });
+    await updatePresence(db, 'armored', calm.row, calm.col);
+    await getUserState(db, 'armored'); // instantiate body
+
+    const fresh = await getUserState(db, 'armored');
+    assert.deepEqual(fresh.currentRoom, { row: calm.row, col: calm.col }, 'current room is read from presence');
+    assert.equal(fresh.gearHealthBonus, 0, 'no armor worn yet');
+
+    await insertCarriedItem(db, 'armored', { name: 'Plate Vest', slotType: 'torso', modifiers: { maxHealth: 5 } });
+    await handleChatAction(db, 'armored', calm.row, calm.col, '/equip Plate Vest');
+
+    const equipped = await getUserState(db, 'armored');
+    assert.equal(equipped.equipment.torso, 'Plate Vest', 'vest sits on the torso slot');
+    assert.equal(equipped.gearHealthBonus, 5, 'worn armor HP surfaces as gearHealthBonus');
+    assert.equal(equipped.effectiveStats.maxHealth, 35, 'armor HP is folded into effective maxHealth');
+  } finally {
+    await db.close();
+  }
+});

@@ -731,6 +731,13 @@ export async function getUserState(db, username) {
     const equipped = equippedByPartId.get(part.id);
     equipment[part.label] = equipped ? equipped.name : null;
   }
+  // Structural HP from worn armor (plan 015): the on-part maxHealth bonus is
+  // folded into maxHealth, never into the effective modifier layer, so surface
+  // it separately for the character sheet to annotate Health with "(+N armor)".
+  let gearHealthBonus = 0;
+  for (const equipped of equippedByPartId.values()) {
+    gearHealthBonus += Number(parseItemModifiers(equipped.modifiers).maxHealth || 0);
+  }
   const [achievements, kills] = await Promise.all([
     dbAll(
       db,
@@ -751,6 +758,19 @@ export async function getUserState(db, username) {
     )
   ]);
 
+  // The player's current room (latest presence this world-day). The character
+  // page uses it to route /equip, /unequip, /drop — which are tick-advancing,
+  // stamina-costing chat commands, not silent endpoints — to the room the player
+  // is in. Null when they aren't in a room (e.g. viewing from the world map).
+  const presence = await dbFirst(
+    db,
+    `SELECT roomRow, roomCol FROM roomPresence
+     WHERE username = ? AND worldDay = ?
+     ORDER BY lastSeenAt DESC LIMIT 1`,
+    [username, getWorldDay()]
+  );
+  const currentRoom = presence ? { row: presence.roomRow, col: presence.roomCol } : null;
+
   return {
     ...user,
     job: effective.job,
@@ -770,6 +790,8 @@ export async function getUserState(db, username) {
     inventory,
     equipment,
     gearBonuses,
+    gearHealthBonus,
+    currentRoom,
     skill: effective.skill,
     achievements,
     kills
@@ -1730,6 +1752,28 @@ export async function dropItemOnFloor(db, templateId, row, col) {
      VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
     [template.templateId, template.name, template.slotType, template.rarity, JSON.stringify(template.modifiers || {}), row, col]
   );
+}
+
+// Drop a CARRIED item (owned, unequipped) onto the current room floor, where
+// any player can /take it. Equipped items must be /unequip'd first (that returns
+// them to the pack), so this only ever moves carried items. Race-safe: the
+// conditional WHERE means a second drop of an item already gone is a no-op.
+export async function dropOwnedItem(db, username, itemName, row, col) {
+  const item = await findOwnedUnequippedItem(db, username, itemName);
+  if (!item) {
+    throw new ActionError("You aren't carrying that.");
+  }
+  const result = await dbRun(
+    db,
+    `UPDATE items SET ownerUsername = NULL, equippedPartId = NULL, roomRow = ?, roomCol = ?
+     WHERE id = ? AND ownerUsername = ? AND equippedPartId IS NULL`,
+    [row, col, item.id, username]
+  );
+  if (changes(result) === 0) {
+    throw new ActionError("You aren't carrying that.");
+  }
+  await insertSystemMessage(db, row, col, `${username} drops ${item.name}.`);
+  return { item: { id: item.id, name: item.name } };
 }
 
 // Full-loot on death: every item the player owns (carried OR equipped) scatters
@@ -2879,6 +2923,15 @@ export async function handleTakeCommand(db, username, row, col, message) {
   return { taken: item.name };
 }
 
+export async function handleDropCommand(db, username, row, col, message) {
+  const rest = commandRest(message, '/drop');
+  if (!rest) {
+    throw new ActionError('Use /drop <item name>.');
+  }
+  const { item } = await dropOwnedItem(db, username, rest, row, col);
+  return { dropped: item.name };
+}
+
 // Space-separated stance keys for usage/error messages, e.g. "standing,
 // aggressive, guarding, crouched".
 function stanceOptionList() {
@@ -3043,6 +3096,15 @@ export async function handleChatAction(db, username, row, col, message) {
       username,
       staminaCost: 1,
       perform: async () => handleTakeCommand(db, username, row, col, message),
+      advanceTick: () => advanceGlobalTick(db)
+    });
+  }
+
+  if (message.trim().toLowerCase().startsWith('/drop')) {
+    return runPlayerAction(db, {
+      username,
+      staminaCost: 1,
+      perform: async () => handleDropCommand(db, username, row, col, message),
       advanceTick: () => advanceGlobalTick(db)
     });
   }

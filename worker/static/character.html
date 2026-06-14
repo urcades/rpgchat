@@ -26,17 +26,23 @@
       return `${number >= 0 ? '+' : ''}${number}`;
     }
 
+    // A gear delta annotation, e.g. " (+1 gear)". Empty when zero so unmodified
+    // stats stay clean.
+    function modSpan(value, label = 'gear') {
+      const number = Number(value || 0);
+      return number !== 0 ? ` <span class="stat-mod">(${signed(number)} ${escapeHtml(label)})</span>` : '';
+    }
+
+    function row(label, valueHtml) {
+      return `<div class="character-row"><dt>${escapeHtml(label)}</dt><dd>${valueHtml}</dd></div>`;
+    }
+
+    function rowList(rows) {
+      return `<dl class="character-list">${rows.join('')}</dl>`;
+    }
+
     function renderRows(rows) {
-      return `
-        <dl class="character-list">
-          ${rows.map(([label, value]) => `
-            <div class="character-row">
-              <dt>${escapeHtml(label)}</dt>
-              <dd>${escapeHtml(value)}</dd>
-            </div>
-          `).join('')}
-        </dl>
-      `;
+      return rowList(rows.map(([label, value]) => row(label, escapeHtml(value))));
     }
 
     function renderSimpleList(items, emptyText) {
@@ -46,122 +52,196 @@
       return `<ul>${items.map(item => `<li>${item}</li>`).join('')}</ul>`;
     }
 
-    fetch('/user-attributes')
-      .then(response => response.json())
-      .then(data => {
-        const effective = data.effectiveStats || data;
-        const base = data.baseStats || data;
-        const bonuses = data.jobBonuses || {};
-        const skill = data.skill || {};
-        const achievements = data.achievements || [];
-        const kills = data.kills || [];
-        const overviewRows = [
-          ['Job', data.job || 'Novice'],
-          ['Skill', skill.label || 'Scrounge'],
-          ['Level', data.level ?? 0],
-          ['Experience', data.experience || 0],
-          ['Attribute Points', data.attributePoints || 0],
-          ['Gold', data.gold !== undefined ? data.gold : 0]
-        ];
-        const currentRows = [
-          ['Health', `${effective.health ?? 0}/${effective.maxHealth ?? 0}`],
-          ['Stamina', `${effective.stamina ?? 0}/${effective.maxStamina ?? 0}`],
-          ['Speed', effective.speed ?? 0],
-          ['Strength', effective.strength ?? 0],
-          ['Intelligence', effective.intelligence ?? 0]
-        ];
-        const baseItems = [
-          `HP ${escapeHtml(base.maxHealth ?? 0)}`,
-          `ST ${escapeHtml(base.maxStamina ?? 0)}`,
-          `SPD ${escapeHtml(base.speed ?? 0)}`,
-          `STR ${escapeHtml(base.strength ?? 0)}`,
-          `INT ${escapeHtml(base.intelligence ?? 0)}`
-        ];
-        const bonusItems = [
-          `HP ${escapeHtml(signed(bonuses.maxHealth))}`,
-          `ST ${escapeHtml(signed(bonuses.maxStamina))}`,
-          `SPD ${escapeHtml(signed(bonuses.speed))}`,
-          `STR ${escapeHtml(signed(bonuses.strength))}`,
-          `INT ${escapeHtml(signed(bonuses.intelligence))}`
-        ];
-        const body = data.body || [];
-        const bodyRows = body.map(part => [part.label, part.condition]);
-        const equipment = data.equipment || {};
-        const equipmentRows = Object.keys(equipment).map(label => [label, equipment[label] || 'empty']);
-        const inventory = data.inventory || [];
-        const inventoryItems = inventory.map(item => {
-          const mods = item.modifiers || {};
-          const modParts = ['speed', 'strength', 'intelligence', 'maxStamina']
-            .filter(key => Number(mods[key] || 0) !== 0)
-            .map(key => `${({ speed: 'SPD', strength: 'STR', intelligence: 'INT', maxStamina: 'ST' })[key]} ${signed(mods[key])}`);
-          const modText = modParts.length ? ` ${modParts.join(' ')}` : '';
-          return `${escapeHtml(item.name)} [${escapeHtml(item.slotType)}]${escapeHtml(modText)}`;
-        });
-        const gear = data.gearBonuses || {};
-        const gearItems = [
-          `ST ${escapeHtml(signed(gear.maxStamina))}`,
-          `SPD ${escapeHtml(signed(gear.speed))}`,
-          `STR ${escapeHtml(signed(gear.strength))}`,
-          `INT ${escapeHtml(signed(gear.intelligence))}`
-        ];
-        const achievementItems = achievements.map(achievement => escapeHtml(achievement.achievementType));
-        const killItems = kills.map(kill => {
-          const name = escapeHtml(kill.defeatedName || kill.defeatedUsername || 'Unknown');
-          const kind = escapeHtml(kill.defeatedKind || 'entity');
-          const level = escapeHtml(kill.defeatedLevel ?? 0);
-          const xp = escapeHtml(kill.experienceGained ?? 0);
-          return `${name} (${kind}) - Level ${level}, ${xp} XP gained`;
-        });
-        const skillEffects = (skill.effects || []).map(effect => escapeHtml(effect));
-        document.getElementById('attributes').innerHTML = `
-          <section class="character-section">
-            <h2>Overview</h2>
-            ${renderRows(overviewRows)}
-          </section>
-          <section class="character-section">
-            <h2>Skill</h2>
-            <p><strong>${escapeHtml(skill.label || 'Scrounge')}:</strong> ${escapeHtml(skill.description || 'No description available.')}</p>
-            ${renderSimpleList(skillEffects, 'No skill effects listed.')}
-          </section>
-          <section class="character-section">
-            <h2>Current Stats</h2>
-            ${renderRows(currentRows)}
-          </section>
-          <section class="character-section">
-            <h2>Body</h2>
-            <p>${escapeHtml('Stance: ' + (data.stance || 'standing').replace(/^\w/, c => c.toUpperCase()))}</p>
-            ${bodyRows.length ? renderRows(bodyRows) : `<p>${escapeHtml('No body information available.')}</p>`}
-          </section>
-          <section class="character-section">
-            <h2>Equipment</h2>
-            ${equipmentRows.length ? renderRows(equipmentRows) : `<p>${escapeHtml('No equipment slots available.')}</p>`}
-          </section>
-          <section class="character-section">
-            <h2>Inventory</h2>
-            ${renderSimpleList(inventoryItems, 'Nothing carried.')}
-          </section>
-          <section class="character-section">
-            <h2>Gear Bonus</h2>
-            ${renderSimpleList(gearItems, 'No gear bonuses.')}
-          </section>
-          <section class="character-section">
-            <h2>Base Stats</h2>
-            ${renderSimpleList(baseItems, 'No base stats available.')}
-          </section>
-          <section class="character-section">
-            <h2>Job Bonus</h2>
-            ${renderSimpleList(bonusItems, 'No job bonuses available.')}
-          </section>
-          <section class="character-section">
-            <h2>Achievements</h2>
-            ${renderSimpleList(achievementItems, 'No achievements yet.')}
-          </section>
-          <section class="character-section">
-            <h2>Kills</h2>
-            ${renderSimpleList(killItems, 'No kills recorded yet.')}
-          </section>
-        `;
+    function itemModText(modifiers) {
+      const mods = modifiers || {};
+      const labels = { speed: 'SPD', strength: 'STR', intelligence: 'INT', maxStamina: 'ST', maxHealth: 'HP' };
+      const parts = ['maxHealth', 'speed', 'strength', 'intelligence', 'maxStamina']
+        .filter(key => Number(mods[key] || 0) !== 0)
+        .map(key => `${labels[key]} ${signed(mods[key])}`);
+      return parts.length ? ` ${parts.join(' ')}` : '';
+    }
+
+    // A small inline action button. Disabled (with a tooltip) when the player is
+    // not currently in a room, since /equip, /unequip and /drop run through the
+    // room command system.
+    function actionButton(action, ref, text, enabled) {
+      const disabled = enabled ? '' : ' disabled title="Enter a room to manage gear"';
+      return `<button type="button" class="gear-action" data-action="${escapeHtml(action)}" data-ref="${escapeHtml(ref)}"${disabled}>${escapeHtml(text)}</button>`;
+    }
+
+    let currentRoom = null;
+
+    function performGearAction(action, ref) {
+      if (!currentRoom) {
+        window.alert('Enter a room first — equipping, unequipping and dropping happen where you are standing.');
+        return;
+      }
+      if (action === 'drop' && !window.confirm(`Drop ${ref} here? Anyone in the room can pick it up.`)) {
+        return;
+      }
+      fetch(`/chat/${currentRoom.row}/${currentRoom.col}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+        body: `message=${encodeURIComponent(`/${action} ${ref}`)}`
+      })
+        .then(response => {
+          if (!response.ok) {
+            return response.text().then(message => { throw new Error(message || 'That action failed.'); });
+          }
+          load();
+        })
+        .catch(error => window.alert(error.message));
+    }
+
+    function render(data) {
+      currentRoom = data.currentRoom || null;
+      const effective = data.effectiveStats || data;
+      const base = data.baseStats || data;
+      const bonuses = data.jobBonuses || {};
+      const gear = data.gearBonuses || {};
+      const gearHealth = Number(data.gearHealthBonus || 0);
+      const skill = data.skill || {};
+      const canAct = Boolean(currentRoom);
+
+      const overviewRows = [
+        ['Job', data.job || 'Novice'],
+        ['Skill', skill.label || 'Scrounge'],
+        ['Level', data.level ?? 0],
+        ['Experience', data.experience || 0],
+        ['Attribute Points', data.attributePoints || 0],
+        ['Gold', data.gold !== undefined ? data.gold : 0]
+      ];
+
+      // Current stats annotated with the gear contribution per stat. Health shows
+      // armor HP (structural, plan 015 — not in the effective gear-modifier layer);
+      // the rest come from gearBonuses.
+      const currentStats = rowList([
+        row('Health', `${escapeHtml(effective.health ?? 0)}/${escapeHtml(effective.maxHealth ?? 0)}${modSpan(gearHealth, 'armor')}`),
+        row('Stamina', `${escapeHtml(effective.stamina ?? 0)}/${escapeHtml(effective.maxStamina ?? 0)}${modSpan(gear.maxStamina)}`),
+        row('Speed', `${escapeHtml(effective.speed ?? 0)}${modSpan(gear.speed)}`),
+        row('Strength', `${escapeHtml(effective.strength ?? 0)}${modSpan(gear.strength)}`),
+        row('Intelligence', `${escapeHtml(effective.intelligence ?? 0)}${modSpan(gear.intelligence)}`)
+      ]);
+
+      const body = data.body || [];
+      const bodyRows = body.map(part => [part.label, part.condition]);
+
+      // Equipment keyed by part label. Occupied parts get an (unequip) button —
+      // unequip by part label so it's unambiguous when two items share a name.
+      const equipment = data.equipment || {};
+      const equipmentRows = Object.keys(equipment).map(label => {
+        const itemName = equipment[label];
+        if (!itemName) {
+          return row(label, 'empty');
+        }
+        return row(label, `${escapeHtml(itemName)} ${actionButton('unequip', label, 'unequip', canAct)}`);
       });
+
+      // Carried inventory. Each item gets equip + drop.
+      const inventory = data.inventory || [];
+      const inventoryHtml = inventory.length
+        ? `<ul class="inventory-list">${inventory.map(item => {
+            const meta = `${escapeHtml(item.name)} [${escapeHtml(item.slotType)}]${escapeHtml(itemModText(item.modifiers))}`;
+            const actions = `${actionButton('equip', item.name, 'equip', canAct)}${actionButton('drop', item.name, 'drop', canAct)}`;
+            return `<li>${meta} ${actions}</li>`;
+          }).join('')}</ul>`
+        : '<p>Nothing carried.</p>';
+
+      const baseItems = [
+        `HP ${escapeHtml(base.maxHealth ?? 0)}`,
+        `ST ${escapeHtml(base.maxStamina ?? 0)}`,
+        `SPD ${escapeHtml(base.speed ?? 0)}`,
+        `STR ${escapeHtml(base.strength ?? 0)}`,
+        `INT ${escapeHtml(base.intelligence ?? 0)}`
+      ];
+      const bonusItems = [
+        `HP ${escapeHtml(signed(bonuses.maxHealth))}`,
+        `ST ${escapeHtml(signed(bonuses.maxStamina))}`,
+        `SPD ${escapeHtml(signed(bonuses.speed))}`,
+        `STR ${escapeHtml(signed(bonuses.strength))}`,
+        `INT ${escapeHtml(signed(bonuses.intelligence))}`
+      ];
+      const achievementItems = (data.achievements || []).map(achievement => escapeHtml(achievement.achievementType));
+      const killItems = (data.kills || []).map(kill => {
+        const name = escapeHtml(kill.defeatedName || kill.defeatedUsername || 'Unknown');
+        const kind = escapeHtml(kill.defeatedKind || 'entity');
+        const level = escapeHtml(kill.defeatedLevel ?? 0);
+        const xp = escapeHtml(kill.experienceGained ?? 0);
+        return `${name} (${kind}) - Level ${level}, ${xp} XP gained`;
+      });
+      const skillEffects = (skill.effects || []).map(effect => escapeHtml(effect));
+
+      const roomHint = canAct
+        ? ''
+        : `<p class="gear-hint">You aren't in a room right now. Enter a room from the World Map to equip, unequip, or drop items.</p>`;
+
+      document.getElementById('attributes').innerHTML = `
+        <section class="character-section">
+          <h2>Overview</h2>
+          ${renderRows(overviewRows)}
+        </section>
+        <section class="character-section">
+          <h2>Skill</h2>
+          <p><strong>${escapeHtml(skill.label || 'Scrounge')}:</strong> ${escapeHtml(skill.description || 'No description available.')}</p>
+          ${renderSimpleList(skillEffects, 'No skill effects listed.')}
+        </section>
+        <section class="character-section">
+          <h2>Current Stats</h2>
+          ${currentStats}
+        </section>
+        <section class="character-section">
+          <h2>Body</h2>
+          <p>${escapeHtml('Stance: ' + (data.stance || 'standing').replace(/^\w/, c => c.toUpperCase()))}</p>
+          ${bodyRows.length ? renderRows(bodyRows) : `<p>${escapeHtml('No body information available.')}</p>`}
+        </section>
+        <section class="character-section">
+          <h2>Equipment</h2>
+          ${roomHint}
+          ${equipmentRows.length ? rowList(equipmentRows) : `<p>${escapeHtml('No equipment slots available.')}</p>`}
+        </section>
+        <section class="character-section">
+          <h2>Inventory</h2>
+          ${roomHint}
+          ${inventoryHtml}
+        </section>
+        <section class="character-section">
+          <h2>Base Stats</h2>
+          ${renderSimpleList(baseItems, 'No base stats available.')}
+        </section>
+        <section class="character-section">
+          <h2>Job Bonus</h2>
+          ${renderSimpleList(bonusItems, 'No job bonuses available.')}
+        </section>
+        <section class="character-section">
+          <h2>Achievements</h2>
+          ${renderSimpleList(achievementItems, 'No achievements yet.')}
+        </section>
+        <section class="character-section">
+          <h2>Kills</h2>
+          ${renderSimpleList(killItems, 'No kills recorded yet.')}
+        </section>
+      `;
+    }
+
+    function load() {
+      fetch('/user-attributes')
+        .then(response => response.json())
+        .then(render)
+        .catch(() => {
+          document.getElementById('attributes').textContent = 'Character data is unavailable right now.';
+        });
+    }
+
+    // Delegated once on the persistent container; innerHTML re-renders don't lose it.
+    document.getElementById('attributes').addEventListener('click', event => {
+      const button = event.target.closest('button[data-action]');
+      if (!button || button.disabled) {
+        return;
+      }
+      performGearAction(button.dataset.action, button.dataset.ref);
+    });
+
+    load();
   </script>
 </body>
 </html>
