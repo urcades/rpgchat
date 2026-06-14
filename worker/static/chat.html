@@ -342,6 +342,34 @@
       postForm(`/chat/${row}/${col}`, `message=${encodeURIComponent(`/take ${itemName}`)}`);
     }
 
+    function setStockParagraph(parent, stock) {
+      const paragraph = document.createElement('p');
+      setText(paragraph, 'Stock: ');
+      stock.forEach((item, index) => {
+        if (index > 0) {
+          setText(paragraph, ', ');
+        }
+        setText(paragraph, `${item.name} ${item.price}g `);
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'room-buy-item';
+        button.textContent = 'buy';
+        button.title = `Buy ${item.name} for ${item.price}g`;
+        button.addEventListener('click', () => buyStockItem(item.name));
+        paragraph.appendChild(button);
+      });
+      parent.appendChild(paragraph);
+      return paragraph;
+    }
+
+    // Clicking buy issues the /buy command (handleChatAction dispatches it),
+    // spending gold and a tick; on success updateAll() refreshes so the bought
+    // item appears in the player's inventory. Errors (not enough gold, sold out
+    // for today) surface as an alert via postForm.
+    function buyStockItem(itemName) {
+      postForm(`/chat/${row}/${col}`, `message=${encodeURIComponent(`/buy ${itemName}`)}`);
+    }
+
     function getRoomDescriptionWithoutLocation(description, rowValue, colValue) {
       return String(description || '').replace(new RegExp(`^Room\\s+${rowValue},\\s*${colValue}\\.\\s*`, 'i'), '');
     }
@@ -360,7 +388,7 @@
       setParagraph(toolbar, `Systems: ${effectLabels.join(', ')}`);
       setParagraph(toolbar, `Traces: ${traceLabels.join(', ')}`);
       if (data.stock && data.stock.length > 0) {
-        setParagraph(toolbar, `Stock: ${data.stock.map(item => `${item.name} ${item.price}g`).join(', ')}`);
+        setStockParagraph(toolbar, data.stock);
       }
       if (data.groundItems && data.groundItems.length > 0) {
         setGroundParagraph(toolbar, data.groundItems);

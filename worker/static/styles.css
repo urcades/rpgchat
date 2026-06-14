@@ -107,7 +107,8 @@ a, button, input, select {
   text-decoration: underline;
 }
 
-.gear-action {
+.gear-action,
+.room-buy-item {
   background: none;
   border: 1px solid #c5c5c5;
   border-radius: 3px;
@@ -119,7 +120,8 @@ a, button, input, select {
   padding: 0 0.45em;
 }
 
-.gear-action:hover:not(:disabled) {
+.gear-action:hover:not(:disabled),
+.room-buy-item:hover {
   background: #f0f4ff;
 }
 
