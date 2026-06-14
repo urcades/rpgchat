@@ -832,24 +832,28 @@ export async function getRoomState(db, username, row, col, tickValue = null) {
   };
 }
 
-export async function insertMessage(db, row, col, username, message) {
+export async function insertMessage(db, row, col, username, message, kind = 'chat') {
   await dbRun(
     db,
-    'INSERT INTO messages (roomRow, roomCol, username, message) VALUES (?, ?, ?, ?)',
-    [row, col, username, message]
+    'INSERT INTO messages (roomRow, roomCol, username, message, kind) VALUES (?, ?, ?, ?, ?)',
+    [row, col, username, message, kind]
   );
 }
 
-export async function insertSystemMessage(db, row, col, message) {
-  await insertMessage(db, row, col, 'System', message);
+export async function insertSystemMessage(db, row, col, message, kind = 'system') {
+  await insertMessage(db, row, col, 'System', message, kind);
 }
 
-async function emitSystemMessage(db, row, col, message, deferredSystemMessages = null) {
+// kind tags a system message for client styling (combat/skill/support/death/
+// dice/ambient/system — see migration 0008). When deferring for flush ordering
+// (the attack path), the kind rides along as { message, kind } so the flush loop
+// can preserve it instead of collapsing back to a bare string.
+async function emitSystemMessage(db, row, col, message, deferredSystemMessages = null, kind = 'system') {
   if (deferredSystemMessages) {
-    deferredSystemMessages.push(message);
+    deferredSystemMessages.push({ message, kind });
     return;
   }
-  await insertSystemMessage(db, row, col, message);
+  await insertSystemMessage(db, row, col, message, kind);
 }
 
 export async function createTrace(db, trace) {
@@ -875,7 +879,7 @@ export async function createTrace(db, trace) {
 export async function getMessages(db, row, col, tickValue = null) {
   const recent = await dbAll(
     db,
-    `SELECT id, username, message, timestamp
+    `SELECT id, username, message, timestamp, kind
      FROM messages
      WHERE roomRow = ?
        AND roomCol = ?
@@ -1009,7 +1013,7 @@ export async function moveUserToCemetery(db, username, cause, row, col, options 
     await emitSystemMessage(db, row, col, `${username}'s belongings scatter across the floor.`, options.deferredSystemMessages);
   }
   await dbRun(db, 'DELETE FROM bodyParts WHERE username = ?', [username]);
-  await emitSystemMessage(db, row, col, `${username} has died from ${cause}.`, options.deferredSystemMessages);
+  await emitSystemMessage(db, row, col, `${username} has died from ${cause}.`, options.deferredSystemMessages, 'death');
   return true;
 }
 
@@ -1201,7 +1205,7 @@ async function processEchoChamber(db, row, col, currentTick, worldDay) {
   const fragment = recent.message.length > 120
     ? `${recent.message.slice(0, 117)}...`
     : recent.message;
-  await insertSystemMessage(db, row, col, `An echo repeats: ${fragment}`);
+  await insertSystemMessage(db, row, col, `An echo repeats: ${fragment}`, 'ambient');
 }
 
 export async function processRoomEffects(db, currentTick) {
@@ -1359,7 +1363,7 @@ async function defeatNpc(db, npc, { killer, row, col, currentTick, deferredSyste
   await dbRun(db, 'DELETE FROM roomPresence WHERE username = ?', [npc.username]);
   await dbRun(db, 'DELETE FROM statusEffects WHERE username = ?', [npc.username]);
   await dbRun(db, 'UPDATE worldEventEntities SET lastDefeatedTick = ? WHERE username = ?', [currentTick, npc.username]);
-  await emitSystemMessage(db, row, col, `${npc.displayName || npc.username} is defeated by ${killer}.`, deferredSystemMessages);
+  await emitSystemMessage(db, row, col, `${npc.displayName || npc.username} is defeated by ${killer}.`, deferredSystemMessages, 'combat');
 
   const drop = rollNpcDrop(npc.npcKind);
   if (drop) {
@@ -1952,7 +1956,7 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
   await emitConditionTransitions(db, user.username, partsBefore, working, row, col);
   if (row !== undefined && row !== null && col !== undefined && col !== null) {
     for (const part of severedParts) {
-      await insertSystemMessage(db, row, col, `${user.username}'s ${part.label} is destroyed.`);
+      await insertSystemMessage(db, row, col, `${user.username}'s ${part.label} is destroyed.`, 'combat');
       // Sever knock-off: whatever was equipped on this part clatters to the
       // floor for anyone to /take (plan 005). Fetch the name BEFORE the UPDATE.
       const equipped = await dbFirst(
@@ -2286,7 +2290,7 @@ export async function runHostileRoomAction(db, row, col) {
   const playerStance = STANCES[normalizeStance(player.stance)];
   const contest = rollSpeedContest(npc, player, null, playerMods, { dodgeDelta: playerStance.dodgeBonus });
   if (!contest.hit) {
-    await insertSystemMessage(db, row, col, `${player.username} dodged ${npc.displayName || npc.username}.`);
+    await insertSystemMessage(db, row, col, `${player.username} dodged ${npc.displayName || npc.username}.`, 'combat');
     return { tick, acted: true, missed: true };
   }
 
@@ -2298,7 +2302,7 @@ export async function runHostileRoomAction(db, row, col) {
     col
   });
   const hitText = isCriticalAttack ? 'critically hits' : 'attacks';
-  await insertSystemMessage(db, row, col, `${npc.displayName || npc.username} ${hitText} ${player.username} for ${damage} damage.`);
+  await insertSystemMessage(db, row, col, `${npc.displayName || npc.username} ${hitText} ${player.username} for ${damage} damage.`, 'combat');
 
   if (damageResult.died) {
     await moveUserToCemetery(db, player.username, `attack by ${npc.username}`, row, col);
@@ -2446,7 +2450,7 @@ export async function handleRollCommand(db, username, row, col, message) {
 
   await dbRun(db, 'UPDATE gamblingRounds SET pool = pool + ? WHERE id = ?', [wager, round.id]);
   const systemMessage = `${username} enters the dice round with ${wager} gold and rolls ${roll}. The round closes at tick ${round.endTick}.`;
-  await insertSystemMessage(db, row, col, systemMessage);
+  await insertSystemMessage(db, row, col, systemMessage, 'dice');
 
   return {
     wager,
@@ -2662,7 +2666,7 @@ async function tryHarmfulSkillHit(db, { effectiveActor, target, skillLabel, row,
   }
 
   const message = `${target} dodged ${effectiveActor.username}'s ${skillLabel}.`;
-  await insertSystemMessage(db, row, col, message);
+  await insertSystemMessage(db, row, col, message, 'combat');
   return false;
 }
 
@@ -2674,7 +2678,7 @@ export async function useClassSkill(db, { username, skillId, targetUsername, row
       const gold = 1 + Math.max(1, Math.floor(effectiveActor.intelligence / 2));
       await dbRun(db, 'UPDATE users SET gold = gold + ? WHERE username = ?', [gold, username]);
       const message = `${username} scrounges up ${gold} gold.`;
-      await insertSystemMessage(db, row, col, message);
+      await insertSystemMessage(db, row, col, message, 'skill');
       return { message };
     }
     case 'ward': {
@@ -2689,7 +2693,7 @@ export async function useClassSkill(db, { username, skillId, targetUsername, row
         col
       });
       const message = `${username} wards ${target} for 5 ticks.`;
-      await insertSystemMessage(db, row, col, message);
+      await insertSystemMessage(db, row, col, message, 'support');
       return { message };
     }
     case 'power_strike': {
@@ -2727,7 +2731,7 @@ export async function useClassSkill(db, { username, skillId, targetUsername, row
         ? await damageUser(db, target, damage, `power strike by ${username}`, row, col)
         : { killed: false, remainingHealth: null };
       const message = `${username} power strikes ${target} for ${damage} damage.`;
-      await insertSystemMessage(db, row, col, message);
+      await insertSystemMessage(db, row, col, message, 'skill');
       return { message, damage, ...result };
     }
     case 'dose': {
@@ -2754,14 +2758,14 @@ export async function useClassSkill(db, { username, skillId, targetUsername, row
           col
         });
         const message = `${username} doses ${target} with something bitter.`;
-        await insertSystemMessage(db, row, col, message);
+        await insertSystemMessage(db, row, col, message, 'skill');
         return { message };
       }
 
       const amount = 2 + Math.floor(effectiveActor.intelligence / 4);
       await healUser(db, target, amount, row, col);
       const message = `${username} patches up ${target} for ${amount} health.`;
-      await insertSystemMessage(db, row, col, message);
+      await insertSystemMessage(db, row, col, message, 'support');
       return { message };
     }
     case 'survey': {
@@ -2778,7 +2782,7 @@ export async function useClassSkill(db, { username, skillId, targetUsername, row
       });
       await dbRun(db, 'UPDATE users SET gold = gold + 1 WHERE username = ?', [username]);
       const message = `${username} surveys the room and finds 1 gold.`;
-      await insertSystemMessage(db, row, col, message);
+      await insertSystemMessage(db, row, col, message, 'skill');
       return { message };
     }
     case 'arcane_pin': {
@@ -2804,7 +2808,7 @@ export async function useClassSkill(db, { username, skillId, targetUsername, row
         col
       });
       const message = `${username} pins ${target} with a humming spell.`;
-      await insertSystemMessage(db, row, col, message);
+      await insertSystemMessage(db, row, col, message, 'skill');
       return { message };
     }
     case 'mark': {
@@ -2830,7 +2834,7 @@ export async function useClassSkill(db, { username, skillId, targetUsername, row
         col
       });
       const message = `${username} marks ${target}.`;
-      await insertSystemMessage(db, row, col, message);
+      await insertSystemMessage(db, row, col, message, 'skill');
       return { message };
     }
     case 'bless': {
@@ -2848,7 +2852,7 @@ export async function useClassSkill(db, { username, skillId, targetUsername, row
       const message = cleared
         ? `${username} blesses ${target} and clears a harmful effect.`
         : `${username} blesses ${target}.`;
-      await insertSystemMessage(db, row, col, message);
+      await insertSystemMessage(db, row, col, message, 'support');
       return { message };
     }
     default:
@@ -3234,8 +3238,8 @@ export async function handleAttackAction(db, username, row, col, message) {
       const deferredSystemMessages = [];
       const updatedMessage = await handleAttack(db, username, message, row, col, { deferredSystemMessages });
       await insertMessage(db, row, col, username, updatedMessage);
-      for (const systemMessage of deferredSystemMessages) {
-        await insertSystemMessage(db, row, col, systemMessage);
+      for (const deferred of deferredSystemMessages) {
+        await insertSystemMessage(db, row, col, deferred.message, deferred.kind);
       }
       await awardGoldMaybe(db, username);
       await updateLevel(db, username, row, col);

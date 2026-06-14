@@ -55,6 +55,8 @@
     let socket;
     let phase = 'Day';
     let heartbeatTimer;
+    let socketRetryDelay = 1000;
+    let roomStateRefreshTimer = null;
     let currentSkill = null;
     let currentJob = 'Novice';
     let selectedTarget = '';
@@ -92,6 +94,32 @@
 
     function isDeathSystemMessage(message) {
       return /\bhas died from\b/i.test(message);
+    }
+
+    // Plan 008: a typed message kind maps straight to a CSS class. System rows
+    // without a styled kind ('system'/'chat'/undefined, incl. legacy rows written
+    // before the kind column) fall back to the prose classifiers above.
+    const kindClassMap = {
+      skill: 'skill-message',
+      support: 'support-message',
+      combat: 'speed-message',
+      death: 'death-message'
+    };
+
+    // legacy fallback for rows written before the kind column
+    function applyLegacyMessageClasses(element, message) {
+      if (isSkillSystemMessage(message)) {
+        element.classList.add('skill-message');
+      }
+      if (isSupportSystemMessage(message)) {
+        element.classList.add('support-message');
+      }
+      if (isSpeedContestSystemMessage(message)) {
+        element.classList.add('speed-message');
+      }
+      if (isDeathSystemMessage(message)) {
+        element.classList.add('death-message');
+      }
     }
 
     function setText(parent, text, className = '') {
@@ -153,17 +181,11 @@
       const isSystem = msg.username === 'System';
       if (isSystem) {
         messageElement.classList.add('system-message');
-        if (isSkillSystemMessage(msg.message)) {
-          messageElement.classList.add('skill-message');
-        }
-        if (isSupportSystemMessage(msg.message)) {
-          messageElement.classList.add('support-message');
-        }
-        if (isSpeedContestSystemMessage(msg.message)) {
-          messageElement.classList.add('speed-message');
-        }
-        if (isDeathSystemMessage(msg.message)) {
-          messageElement.classList.add('death-message');
+        const kindClass = kindClassMap[msg.kind];
+        if (kindClass) {
+          messageElement.classList.add(kindClass);
+        } else {
+          applyLegacyMessageClasses(messageElement, msg.message);
         }
         messageElement.textContent = `${msg.timestamp} - system: ${msg.message}`;
         return messageElement;
@@ -458,6 +480,54 @@
       heartbeatRoom().finally(loadRoomState);
     }
 
+    // Debounce full room-state refetches: a burst of broadcasts (e.g. a multi-hit
+    // combat round, or several players acting at once) collapses to one fetch on
+    // the trailing edge instead of a thundering-herd refetch per message.
+    function scheduleRoomStateRefresh() {
+      clearTimeout(roomStateRefreshTimer);
+      roomStateRefreshTimer = setTimeout(loadRoomState, 250);
+    }
+
+    // The realtime socket, with reconnect. Without this, a Durable Object restart
+    // or a slept laptop silently kills live updates and the player limps along on
+    // the 15s poll. onclose schedules a reconnect with exponential backoff (1s, 2s,
+    // 4s … capped at 30s), reset on a successful open; onerror closes to trigger it.
+    function connectSocket() {
+      const socketProtocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+      socket = new WebSocket(`${socketProtocol}${window.location.host}/ws/${row}/${col}`);
+
+      socket.onopen = function() {
+        socketRetryDelay = 1000;
+        loadRoomState(); // resync — events may have been missed while disconnected
+      };
+
+      socket.onmessage = function(event) {
+        let payload = null;
+        try {
+          payload = JSON.parse(event.data);
+        } catch (error) {
+          payload = null;
+        }
+        // Presence heartbeats only change who is in the room — refresh just the
+        // ecology panel (which carries the presence list). Real game events
+        // refetch the whole room state, debounced.
+        if (payload && payload.type === 'presence') {
+          loadRoomEcology();
+          return;
+        }
+        scheduleRoomStateRefresh();
+      };
+
+      socket.onclose = function() {
+        setTimeout(connectSocket, socketRetryDelay);
+        socketRetryDelay = Math.min(socketRetryDelay * 2, 30000);
+      };
+
+      socket.onerror = function() {
+        socket.close();
+      };
+    }
+
     function updateTargetHint() {
       const messageInput = document.getElementById('message');
       const clearTargetButton = document.getElementById('clear-target');
@@ -588,27 +658,18 @@
 
       updateTargetHint();
       updateAll();
+      // Presence TTL still depends on this 15s heartbeat; the socket is additive.
       heartbeatTimer = setInterval(updateAll, 15000);
 
-      const socketProtocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
-      socket = new WebSocket(`${socketProtocol}${window.location.host}/ws/${row}/${col}`);
-      socket.onmessage = function(event) {
-        let payload = null;
-        try {
-          payload = JSON.parse(event.data);
-        } catch (error) {
-          payload = null;
+      // Returning to a backgrounded tab resyncs immediately instead of waiting
+      // for the next heartbeat.
+      document.addEventListener('visibilitychange', function() {
+        if (!document.hidden) {
+          updateAll();
         }
-        // Presence heartbeats only change who is in the room — not the messages
-        // or your own attributes. Refresh just the ecology panel (which carries
-        // the presence list) instead of re-fetching the entire room state on
-        // every other player's 15s heartbeat. Real game events still reload fully.
-        if (payload && payload.type === 'presence') {
-          loadRoomEcology();
-          return;
-        }
-        loadRoomState();
-      };
+      });
+
+      connectSocket();
     });
   </script>
 </body>

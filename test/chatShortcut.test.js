@@ -152,6 +152,13 @@ function loadChatPage(overrides = {}) {
       intervals.push(handler);
       return 1;
     },
+    // Run timers synchronously so the room-state debounce and socket-reconnect
+    // backoff are observable in tests without real time passing.
+    setTimeout(handler) {
+      handler();
+      return 1;
+    },
+    clearTimeout() {},
     WebSocket: overrides.WebSocket || function WebSocket() {
       return {};
     },
@@ -331,6 +338,52 @@ test('chat renderer colors support, death, attack, and speed result messages', (
   assert.ok(speedResult);
   assert.equal(speedResult.textContent, '(ed dodged ed\'s attack)');
   assert.equal(dodgeMessage.textContent, '2026-05-29 15:25:19 - ed: @ed (ed dodged ed\'s attack)');
+});
+
+test('chat renderer styles by message kind, not prose (plan 008)', () => {
+  const page = loadChatPage();
+
+  // A typed kind picks the class directly — note the message text 'xyz' matches
+  // none of the legacy prose regexes.
+  const death = page.context.renderMessage({ username: 'System', timestamp: 't', message: 'xyz', kind: 'death' });
+  assert.ok(death.classList.values.includes('death-message'), 'kind=death -> death-message without prose');
+
+  const support = page.context.renderMessage({ username: 'System', timestamp: 't', message: 'xyz', kind: 'support' });
+  assert.ok(support.classList.values.includes('support-message'));
+  assert.ok(!support.classList.values.includes('skill-message'), 'a typed kind adds exactly one styling class');
+
+  const combat = page.context.renderMessage({ username: 'System', timestamp: 't', message: 'xyz', kind: 'combat' });
+  assert.ok(combat.classList.values.includes('speed-message'), 'kind=combat -> speed-message');
+});
+
+test('chat renderer falls back to prose for rows without a styled kind (plan 008)', () => {
+  const page = loadChatPage();
+
+  // Legacy/system rows (no styled kind) are still classified by their prose.
+  const legacy = page.context.renderMessage({ username: 'System', timestamp: 't', message: 'ed has died from a fall.', kind: 'system' });
+  assert.ok(legacy.classList.values.includes('death-message'), 'legacy system row classified by prose fallback');
+
+  const undefinedKind = page.context.renderMessage({ username: 'System', timestamp: 't', message: 'ed wards ed for 5 ticks.' });
+  assert.ok(undefinedKind.classList.values.includes('support-message'), 'undefined kind also falls back to prose');
+});
+
+test('chat socket reconnects after the connection closes (plan 008)', async () => {
+  let constructed = 0;
+  let socket;
+  const page = loadChatPage({
+    WebSocket: function WebSocket() {
+      constructed += 1;
+      socket = {};
+      return socket;
+    }
+  });
+  await flushPromises();
+  assert.equal(constructed, 1, 'one socket constructed on load');
+
+  // Harness setTimeout runs synchronously, so the backoff reconnect fires now.
+  socket.onclose();
+  assert.equal(constructed, 2, 'a fresh socket is constructed after a close');
+  assert.ok(page.gets.length >= 0);
 });
 
 test('room prose is appended to reset without repeating the room coordinate prefix', async () => {

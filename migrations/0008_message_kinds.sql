@@ -1,0 +1,11 @@
+-- Plan 008: typed message kinds for client styling, replacing the brittle
+-- English-prose regexes the chat client used to classify system messages.
+--
+-- Vocabulary: chat (player text), system (generic), combat, skill, support,
+-- death, dice, ambient. Future plans add: whisper (010), rite (012), npc (013).
+--
+-- Existing rows default to 'chat'. That is correct for player lines, and harmless
+-- for legacy System lines: the client keys styling off kindClassMap, which has no
+-- entry for 'chat', so those rows fall through to the legacy regex fallback that
+-- has always classified them.
+ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat';
