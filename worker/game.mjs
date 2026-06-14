@@ -24,9 +24,8 @@ const {
 } = abilitiesModule;
 
 const {
-  getAllNodes: getAllGridNodes,
+  getDailyBoard,
   getNode: getGridNode,
-  getNeighbors: getGridNeighbors,
   getEntryNodeIds: getGridEntryNodeIds
 } = progressionModule;
 
@@ -1681,32 +1680,37 @@ export async function getConditionAndGearModifiers(db, username) {
   return combined;
 }
 
-// --- Plan 019: progression grid -------------------------------------------
-// Skill Points (1/level, separate from attribute points) unlock nodes on ONE
-// shared board. Unlocks are DERIVED state: a row in playerProgressionNodes; node
-// effects recompute from the unlocked set (so respec is just deleting the rows).
+// --- Plan 019b: the daily progression grid --------------------------------
+// ONE shared board generated per worldDay from a Penrose tiling (utils/progression
+// Grid.js). Daily builds: your point budget is your LEVEL, re-spent each day;
+// available = budget − cost of TODAY's unlocked nodes. Node IDs are namespaced
+// `${worldDay}:${vid}`, so yesterday's rows stop counting and the reset is free and
+// automatic — stale rows are swept lazily. Node effects are DERIVED from the
+// unlocked set (respec is just deleting today's rows).
 
-// The PAID nodes a player has unlocked. A class's entry node is implicit (derived
-// from job) and never stored, so it's added back where the full set is needed.
-async function getStoredUnlockedNodeIds(db, username) {
-  const rows = await dbAll(db, 'SELECT nodeId FROM playerProgressionNodes WHERE username = ?', [username]);
+// Today's unlocked node IDs only (a prior day's rows belong to a board that no
+// longer exists). Sweep those stale rows opportunistically.
+async function getStoredUnlockedNodeIds(db, username, worldDay) {
+  const rows = await dbAll(db, 'SELECT nodeId FROM playerProgressionNodes WHERE username = ? AND nodeId LIKE ?', [username, `${worldDay}:%`]);
   return rows.map(row => row.nodeId);
 }
 
-// The full unlocked set (entry node[s] for the class + paid unlocks) — used for
-// adjacency checks and the board render.
-async function getUnlockedNodeIds(db, username, job) {
-  const stored = await getStoredUnlockedNodeIds(db, username);
-  return Array.from(new Set([...getGridEntryNodeIds(normalizeJob(job)), ...stored]));
+async function sweepStaleUnlocks(db, username, worldDay) {
+  await dbRun(db, 'DELETE FROM playerProgressionNodes WHERE username = ? AND nodeId NOT LIKE ?', [username, `${worldDay}:%`]);
 }
 
-// Stat deltas from unlocked `stat` and `passive` nodes, folded into the effective
-// layer via getConditionAndGearModifiers so they reach combat AND display at once.
-// Entry nodes carry no effect, so only stored (paid) unlocks contribute. Passives
-// are binary: a board passive the class ALREADY has innately (folded by
-// getEffectiveUser) is skipped so it never stacks twice.
+// The full unlocked set (the class's entry node + today's unlocks) — for adjacency.
+async function getUnlockedNodeIds(db, username, job, worldDay) {
+  const stored = await getStoredUnlockedNodeIds(db, username, worldDay);
+  return new Set([...getGridEntryNodeIds(worldDay, normalizeJob(job)), ...stored]);
+}
+
+// Stat deltas from today's unlocked `stat` / `passive` nodes, folded into the
+// effective layer via getConditionAndGearModifiers so they reach combat AND
+// display. Passives are binary: one the class already has innately is skipped.
 async function getProgressionModifiers(db, username) {
-  const stored = await getStoredUnlockedNodeIds(db, username);
+  const worldDay = getWorldDay();
+  const stored = await getStoredUnlockedNodeIds(db, username, worldDay);
   if (!stored.length) {
     return {};
   }
@@ -1719,7 +1723,7 @@ async function getProgressionModifiers(db, username) {
   );
   const modifiers = {};
   for (const nodeId of stored) {
-    const node = getGridNode(nodeId);
+    const node = getGridNode(worldDay, nodeId);
     if (!node || !node.effect) continue;
     if (node.effect.kind === 'stat') {
       modifiers[node.effect.stat] = (modifiers[node.effect.stat] || 0) + Number(node.effect.amount || 0);
@@ -1734,13 +1738,14 @@ async function getProgressionModifiers(db, username) {
   return modifiers;
 }
 
-// Active abilities granted by unlocked `grant_ability` nodes (board-sourced),
-// unioned with item-granted abilities in getGrantedAbilityIds.
+// Active abilities granted by today's unlocked `grant_ability` nodes — unioned with
+// item-granted abilities in getGrantedAbilityIds.
 async function getProgressionGrantedAbilityIds(db, username) {
-  const stored = await getStoredUnlockedNodeIds(db, username);
+  const worldDay = getWorldDay();
+  const stored = await getStoredUnlockedNodeIds(db, username, worldDay);
   const granted = [];
   for (const nodeId of stored) {
-    const node = getGridNode(nodeId);
+    const node = getGridNode(worldDay, nodeId);
     if (node && node.effect && node.effect.kind === 'grant_ability') {
       const abilityId = node.effect.abilityId;
       if (getAbility(abilityId) && !granted.includes(abilityId)) granted.push(abilityId);
@@ -1749,15 +1754,32 @@ async function getProgressionGrantedAbilityIds(db, username) {
   return granted;
 }
 
-// The board state for the UI: every node tagged unlocked / unlockable / locked.
+function spentOnNodes(board, nodeIds) {
+  let spent = 0;
+  for (const id of nodeIds) {
+    const node = board.byId.get(id);
+    if (node) spent += node.cost || 0;
+  }
+  return spent;
+}
+
+// The board state for the UI: today's board with every node tagged unlocked /
+// unlockable / locked, plus the daily point budget.
 export async function getProgressionGrid(db, username) {
+  const worldDay = getWorldDay();
+  await sweepStaleUnlocks(db, username, worldDay);
+  const board = getDailyBoard(worldDay);
   const user = await getUser(db, username);
   const job = normalizeJob(user.job);
-  const skillPoints = Number(user.skillPoints || 0);
-  const unlocked = new Set(await getUnlockedNodeIds(db, username, job));
-  const nodes = getAllGridNodes().map(node => {
+  const budget = Number(user.level || 0);
+  const stored = await getStoredUnlockedNodeIds(db, username, worldDay);
+  const unlocked = new Set([...getGridEntryNodeIds(worldDay, job), ...stored]);
+  const spent = spentOnNodes(board, stored);
+  const available = Math.max(0, budget - spent);
+
+  const nodes = board.nodes.map(node => {
     const isUnlocked = unlocked.has(node.id);
-    const onFrontier = getGridNeighbors(node.id).some(neighborId => unlocked.has(neighborId));
+    const onFrontier = node.neighbors.some(neighborId => unlocked.has(neighborId));
     const cost = node.cost || 0;
     return {
       id: node.id,
@@ -1767,26 +1789,33 @@ export async function getProgressionGrid(db, username) {
       cost,
       effect: node.effect,
       entryFor: node.entryFor || null,
-      neighbors: getGridNeighbors(node.id),
-      state: isUnlocked ? 'unlocked' : (onFrontier && skillPoints >= cost ? 'unlockable' : 'locked')
+      neighbors: node.neighbors,
+      state: isUnlocked ? 'unlocked' : (onFrontier && available >= cost ? 'unlockable' : 'locked')
     };
   });
-  return { skillPoints, job, nodes };
+  return { worldDay, job, budget, spent, available, canvas: board.canvas, nodes };
 }
 
-// Unlock a node: claim-first (the PK guards double-unlock races), then spend —
-// releasing the claim if the spend fails. Mirrors the resurrection claim-before-
-// side-effects ordering (advisor-plans/001).
+// Unlock a node on TODAY's board: claim-first (the PK guards double-unlock races),
+// then verify the daily budget still holds — rolling the claim back if it doesn't.
 export async function unlockProgressionNode(db, username, nodeId) {
-  const node = getGridNode(nodeId);
-  assertAction(node, 'Unknown node.', 404);
+  const worldDay = getWorldDay();
+  const board = getDailyBoard(worldDay);
+  const node = board.byId.get(nodeId);
+  assertAction(node, 'That node is not on today\'s board.', 404);
+  await sweepStaleUnlocks(db, username, worldDay);
+
   const user = await getUser(db, username);
   const job = normalizeJob(user.job);
-  const unlocked = new Set(await getUnlockedNodeIds(db, username, job));
+  const budget = Number(user.level || 0);
+  const stored = await getStoredUnlockedNodeIds(db, username, worldDay);
+  const unlocked = new Set([...getGridEntryNodeIds(worldDay, job), ...stored]);
   assertAction(!unlocked.has(nodeId), 'That node is already unlocked.', 400);
-  assertAction(getGridNeighbors(nodeId).some(neighborId => unlocked.has(neighborId)), 'That node is not reachable yet.', 400);
+  assertAction(node.neighbors.some(neighborId => unlocked.has(neighborId)), 'That node is not reachable yet.', 400);
 
   const cost = node.cost || 0;
+  assertAction(budget - spentOnNodes(board, stored) >= cost, 'Not enough skill points today.', 400);
+
   const claim = await dbRun(
     db,
     'INSERT OR IGNORE INTO playerProgressionNodes (username, nodeId, unlockedTick) VALUES (?, ?, ?)',
@@ -1794,33 +1823,27 @@ export async function unlockProgressionNode(db, username, nodeId) {
   );
   assertAction(changes(claim) > 0, 'That node is already unlocked.', 400);
 
-  const spent = await dbRun(
-    db,
-    'UPDATE users SET skillPoints = skillPoints - ? WHERE username = ? AND skillPoints >= ? AND isNpc = 0',
-    [cost, username, cost]
-  );
-  if (changes(spent) === 0) {
+  // Re-check the budget against the now-committed set; roll back on overspend.
+  const after = await getStoredUnlockedNodeIds(db, username, worldDay);
+  if (spentOnNodes(board, after) > budget) {
     await dbRun(db, 'DELETE FROM playerProgressionNodes WHERE username = ? AND nodeId = ?', [username, nodeId]);
-    throw new ActionError('Not enough skill points.', 400);
+    throw new ActionError('Not enough skill points today.', 400);
   }
   return getProgressionGrid(db, username);
 }
 
 const RESPEC_GOLD_COST = 50;
 
-// Respec at a guild (where class reselection already lives): pay gold, wipe all
-// paid unlocks, refund the spent points. Effects revert automatically (derived).
+// Respec at a guild (where class reselection lives): pay gold to clear TODAY's
+// unlocks so the day's budget can be re-spent. (The board itself resets free at
+// the daily rollover; this is for re-planning mid-day.)
 export async function respecProgression(db, username, row, col) {
   const worldDay = getWorldDay();
   const tickValue = await getCurrentTickValue(db);
   assertAction(roomHasEffect(row, col, tickValue, 'guild', worldDay), 'You can only respec at a guild.', 400);
 
-  const stored = await getStoredUnlockedNodeIds(db, username);
-  assertAction(stored.length > 0, 'You have no unlocked nodes to respec.', 400);
-  const refund = stored.reduce((sum, id) => {
-    const node = getGridNode(id);
-    return sum + (node ? (node.cost || 0) : 0);
-  }, 0);
+  const stored = await getStoredUnlockedNodeIds(db, username, worldDay);
+  assertAction(stored.length > 0, 'You have no unlocked nodes to respec today.', 400);
 
   const paid = await dbRun(
     db,
@@ -1829,10 +1852,7 @@ export async function respecProgression(db, username, row, col) {
   );
   assertAction(changes(paid) > 0, `Respec costs ${RESPEC_GOLD_COST} gold.`, 400);
 
-  await dbRun(db, 'DELETE FROM playerProgressionNodes WHERE username = ?', [username]);
-  if (refund > 0) {
-    await dbRun(db, 'UPDATE users SET skillPoints = skillPoints + ? WHERE username = ?', [refund, username]);
-  }
+  await dbRun(db, 'DELETE FROM playerProgressionNodes WHERE username = ? AND nodeId LIKE ?', [username, `${worldDay}:%`]);
   return getProgressionGrid(db, username);
 }
 

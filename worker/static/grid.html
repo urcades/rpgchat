@@ -6,16 +6,18 @@
 </head>
 <body>
   <main class="page">
-    <p>Progression Grid</p>
+    <p>Progression Grid — today's board</p>
     <p><a href="#" onclick="history.back(); return false;">Back</a> · <a href="/character">Character</a></p>
     <div id="grid-status" class="hud">
       <span id="skill-points">Skill Points: —</span>
-      <button type="button" id="respec-button" class="gear-action" title="Refund all unlocked nodes (costs 50 gold, only at a guild)">Respec (50g, at a guild)</button>
+      <button type="button" id="respec-button" class="gear-action" title="Clear today's unlocked nodes so you can re-spend (costs 50 gold, only at a guild)">Respec (50g, at a guild)</button>
     </div>
     <p class="gear-hint">
-      Spend Skill Points (earned 1 per level — separate from attribute points) to
-      unlock nodes next to ones you already have. Your class starts at its own root.
-      Highlighted nodes are unlockable; click one to spend.
+      This board is regenerated every day from the world's pattern — a fresh organic
+      shape each reset, shared by everyone. Your daily budget is your level; spend it
+      on nodes next to ones you've unlocked. Your class starts at its own root
+      (thick ring); larger nodes with a white centre are skill knots. Highlighted
+      nodes are unlockable — click one to spend. Unlocks clear at the daily reset.
     </p>
     <div id="grid-board"></div>
     <div class="grid-legend">
@@ -35,8 +37,8 @@
     function effectText(effect) {
       if (!effect) return '';
       if (effect.kind === 'stat') return `+${effect.amount} ${effect.stat}`;
-      if (effect.kind === 'grant_ability') return `Grants: ${effect.abilityId}`;
-      if (effect.kind === 'passive') return `Passive: ${effect.abilityId}`;
+      if (effect.kind === 'grant_ability') return `grants ${effect.abilityId}`;
+      if (effect.kind === 'passive') return `passive ${effect.abilityId}`;
       return '';
     }
 
@@ -46,44 +48,44 @@
       el.style.color = isError ? '#b00020' : '';
     }
 
-    let board = null;
+    const STAT_R = 7, KNOT_R = 12, ENTRY_R = 15;
 
     function render(data) {
-      board = data;
-      document.getElementById('skill-points').textContent = `Skill Points: ${data.skillPoints}`;
+      document.getElementById('skill-points').textContent =
+        `Skill Points: ${data.available} / ${data.budget} today` + (data.spent ? ` (${data.spent} spent)` : '');
 
       const byId = {};
       data.nodes.forEach(node => { byId[node.id] = node; });
 
-      // Edges first (dedup each undirected pair). An edge between two unlocked
-      // nodes reads as a travelled path.
-      const drawnEdges = new Set();
+      const drawn = new Set();
       const edges = [];
       data.nodes.forEach(node => {
         (node.neighbors || []).forEach(otherId => {
           const key = [node.id, otherId].sort().join('|');
-          if (drawnEdges.has(key)) return;
-          drawnEdges.add(key);
+          if (drawn.has(key)) return;
+          drawn.add(key);
           const other = byId[otherId];
           if (!other) return;
           const active = node.state === 'unlocked' && other.state === 'unlocked';
-          edges.push(`<line x1="${node.x}" y1="${node.y}" x2="${other.x}" y2="${other.y}" class="grid-edge ${active ? 'grid-edge-active' : ''}" />`);
+          edges.push(`<line x1="${node.x}" y1="${node.y}" x2="${other.x}" y2="${other.y}" class="grid-edge ${active ? 'grid-edge-active' : ''}"/>`);
         });
       });
 
-      const circles = data.nodes.map(node => {
+      const nodesSvg = data.nodes.map(node => {
+        const isEntry = Boolean(node.entryFor);
+        const isKnot = !isEntry && (node.effect && (node.effect.kind === 'grant_ability' || node.effect.kind === 'passive'));
+        const r = isEntry ? ENTRY_R : (isKnot ? KNOT_R : STAT_R);
         const title = `${node.label}${effectText(node.effect) ? ' — ' + effectText(node.effect) : ''}\n${node.state}${node.cost ? ' · cost ' + node.cost : ' · free'}`;
-        const cls = `grid-node grid-node-${node.state}`;
-        const label = escapeHtml(node.label);
-        return `<g class="${cls}" data-node-id="${escapeHtml(node.id)}" data-state="${node.state}">
-            <title>${escapeHtml(title)}</title>
-            <circle cx="${node.x}" cy="${node.y}" r="22"></circle>
-            <text x="${node.x}" y="${node.y + 38}" text-anchor="middle" class="grid-node-label">${label}</text>
-          </g>`;
+        const inner = isKnot ? `<circle cx="${node.x}" cy="${node.y}" r="${(r * 0.42).toFixed(1)}" fill="#fff"/>` : '';
+        return `<g class="grid-node grid-node-${node.state}" data-node-id="${escapeHtml(node.id)}" data-state="${node.state}">`
+          + `<title>${escapeHtml(title)}</title>`
+          + `<circle cx="${node.x}" cy="${node.y}" r="${r}"${isEntry ? ' stroke-width="4"' : ''}></circle>${inner}</g>`;
       }).join('');
 
+      const w = (data.canvas && data.canvas.width) || 1000;
+      const h = (data.canvas && data.canvas.height) || 760;
       document.getElementById('grid-board').innerHTML =
-        `<svg viewBox="0 0 620 620" class="grid-svg" role="img" aria-label="Progression grid">${edges.join('')}${circles}</svg>`;
+        `<svg viewBox="0 0 ${w} ${h}" class="grid-svg" role="img" aria-label="Progression grid for world day ${data.worldDay}">${edges.join('')}${nodesSvg}</svg>`;
 
       document.querySelectorAll('#grid-board g[data-state="unlockable"]').forEach(group => {
         group.addEventListener('click', () => unlock(group.getAttribute('data-node-id')));
@@ -111,12 +113,12 @@
     }
 
     function respec() {
-      if (!window.confirm('Respec? This refunds every unlocked node and costs 50 gold. You must be standing in a guild.')) {
+      if (!window.confirm("Respec? This clears today's unlocked nodes so you can re-spend your budget, and costs 50 gold. You must be standing in a guild.")) {
         return;
       }
       setMessage('');
       post('/grid/respec', '')
-        .then(data => { render(data); setMessage('Respec complete — all nodes refunded.'); })
+        .then(data => { render(data); setMessage("Respec complete — today's nodes cleared."); })
         .catch(error => setMessage(error.message, true));
     }
 

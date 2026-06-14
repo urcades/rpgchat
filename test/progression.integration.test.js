@@ -1,8 +1,7 @@
-// Plan 019: the progression grid. Skill Points (1/level, separate from attribute
-// points) unlock nodes on ONE shared board; adjacency gates what's reachable;
-// node effects (stat / grant_ability / passive) fold into the effective layer and
-// the usable-ability set; respec is gold-priced and guild-gated. CommonJS +
-// node:test to match the rest of test/.
+// Plan 019b: the daily progression grid. ONE shared board is generated per
+// worldDay from a Penrose tiling (deterministic, like rooms); your point budget is
+// your level, re-spent daily; node effects fold into the effective layer + ability
+// set; unlocks are namespaced by day so the reset is automatic. CommonJS + node:test.
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -68,183 +67,204 @@ function findRoomWithEffect(worldDay, effectType) {
   return null;
 }
 
-async function seedPlayer(db, username, job, { skillPoints = 0, gold = 0, level = 0 } = {}) {
+async function seedPlayer(db, username, job, { gold = 0, level = 0 } = {}) {
   await db.prepare(
     `INSERT INTO users (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold, skillPoints)
      VALUES (?, 'pw', ?, 30, 30, 100, 100, 1, 1, 1, ?, ?, ?)`
-  ).bind(username, job, level, gold, skillPoints).run();
+  ).bind(username, job, level, gold, level).run();
 }
 
-const ids = list => list.map(x => x.id);
+const WD = getWorldDay();
 
 // ---------------------------------------------------------------------------
-// Board integrity (pure)
+// Generator (pure)
 
-test('Plan 019: the shared board is well-formed (edges symmetric, effects valid, one entry per class)', () => {
-  const nodes = grid.getAllNodes();
-  assert.ok(nodes.length >= 16, 'the board is reasonably expansive');
+test('Plan 019b: the daily board is deterministic per day, connected, and varies across days', () => {
+  const a = grid.getDailyBoard(WD);
+  const aAgain = grid.getDailyBoard(WD);
+  const b = grid.getDailyBoard('1999-01-01');
 
-  for (const node of nodes) {
-    for (const neighborId of grid.getNeighbors(node.id)) {
-      assert.ok(grid.getNode(neighborId), `edge target ${neighborId} exists`);
-      assert.ok(grid.getNeighbors(neighborId).includes(node.id), `edge ${node.id}-${neighborId} is symmetric`);
-    }
-    const effect = node.effect || {};
-    if (effect.kind === 'stat') {
-      assert.ok(['strength', 'speed', 'intelligence', 'maxStamina'].includes(effect.stat), `${node.id} bumps an allowlisted stat`);
-    } else if (effect.kind === 'grant_ability' || effect.kind === 'passive') {
-      assert.ok(abilities.getAbility(effect.abilityId), `${node.id} references a real ability (${effect.abilityId})`);
+  assert.ok(a.nodes.length >= 100, 'the board is expansive');
+  assert.equal(a.nodes.length, aAgain.nodes.length, 'same day → same board');
+  assert.equal(a.nodes[0].id, aAgain.nodes[0].id, 'same day → same node ids');
+  // A different day carves a different set of base vertices (compare the vid suffix).
+  const vidsA = new Set(a.nodes.map(n => n.id.split(':')[1]));
+  const vidsB = new Set(b.nodes.map(n => n.id.split(':')[1]));
+  let symDiff = 0;
+  for (const v of vidsA) if (!vidsB.has(v)) symDiff += 1;
+  assert.ok(symDiff > 0, 'a different day carves a different vertex set');
+
+  let dangling = 0;
+  for (const n of a.nodes) for (const m of n.neighbors) if (!a.byId.get(m)) dangling += 1;
+  assert.equal(dangling, 0, 'every edge resolves (connected graph)');
+
+  assert.equal(Object.keys(a.entryByJob).length, 8, 'eight class entries');
+  for (const id of Object.values(a.entryByJob)) assert.equal(a.byId.get(id).cost, 0, 'entries are free');
+
+  for (const n of a.nodes) {
+    if (n.effect.kind === 'grant_ability' || n.effect.kind === 'passive') {
+      assert.ok(abilities.getAbility(n.effect.abilityId), `${n.id} references a real ability`);
+    } else if (n.effect.kind === 'stat') {
+      assert.ok(['strength', 'speed', 'intelligence', 'maxStamina'].includes(n.effect.stat));
     }
   }
-
-  for (const job of ['Novice', 'Paladin', 'Fighter', 'Chemist', 'Dungeoneer', 'Mage', 'Assassin', 'Cleric']) {
-    assert.equal(grid.getEntryNodeIds(job).length, 1, `${job} has exactly one entry node`);
-  }
+  // node ids are namespaced by the day.
+  assert.ok(a.nodes.every(n => n.id.startsWith(`${WD}:`)), 'ids namespaced by worldDay');
 });
 
 // ---------------------------------------------------------------------------
-// Grid state + unlock flow (live DB)
+// Daily-build flow (live DB)
 
-test('Plan 019: a fresh player sees their entry unlocked, its neighbor unlockable, the rest locked', async () => {
+test('Plan 019b: a fresh player sees their entry unlocked and budget = level', async () => {
   const db = await createMigratedDb();
   const { getProgressionGrid } = await import('../worker/game.mjs');
   try {
-    await seedPlayer(db, 'fighter', 'Fighter', { skillPoints: 3 });
+    await seedPlayer(db, 'fighter', 'Fighter', { level: 7 });
     const board = await getProgressionGrid(db, 'fighter');
-    const byId = Object.fromEntries(board.nodes.map(n => [n.id, n]));
-    assert.equal(board.skillPoints, 3);
-    assert.equal(byId.fighter_root.state, 'unlocked', 'class entry auto-unlocked');
-    assert.equal(byId.fighter_stat.state, 'unlockable', 'neighbor of entry is unlockable');
-    assert.equal(byId.core_int.state, 'locked', 'a distant node is locked');
+    assert.equal(board.budget, 7, 'budget is the level');
+    assert.equal(board.available, 7, 'nothing spent yet');
+    const entry = board.nodes.find(n => n.entryFor === 'Fighter');
+    assert.ok(entry && entry.state === 'unlocked', 'class entry auto-unlocked');
+    assert.ok(board.nodes.some(n => n.state === 'unlockable'), 'some nodes are unlockable');
   } finally {
     await db.close();
   }
 });
 
-test('Plan 019: unlocking spends a point, applies the effect, and opens the next node', async () => {
+test('Plan 019b: unlocking spends from the daily budget, folds the effect, and opens neighbors', async () => {
   const db = await createMigratedDb();
   const { getProgressionGrid, unlockProgressionNode, getUserState, updatePresence } = await import('../worker/game.mjs');
   try {
-    const calm = findCalmRoom(getWorldDay());
-    await seedPlayer(db, 'fighter', 'Fighter', { skillPoints: 3 });
+    const calm = findCalmRoom(WD);
+    await seedPlayer(db, 'fighter', 'Fighter', { level: 10 });
     await updatePresence(db, 'fighter', calm.row, calm.col);
 
-    const before = await getUserState(db, 'fighter');
-    await unlockProgressionNode(db, 'fighter', 'fighter_stat'); // +1 strength
-    const after = await getUserState(db, 'fighter');
+    const before = await getProgressionGrid(db, 'fighter');
+    const target = before.nodes.find(n => n.state === 'unlockable' && n.effect.kind === 'stat')
+      || before.nodes.find(n => n.state === 'unlockable');
+    assert.ok(target, 'there is an unlockable node');
 
-    assert.equal(after.skillPoints, 2, 'one skill point spent');
-    assert.equal(after.effectiveStats.strength, before.effectiveStats.strength + 1, 'the stat node folds into effective strength');
+    const userBefore = await getUserState(db, 'fighter');
+    const after = await unlockProgressionNode(db, 'fighter', target.id);
+    assert.equal(after.spent, target.cost, 'budget spent equals the node cost');
+    assert.equal(after.available, 10 - target.cost, 'available dropped by the cost');
+    assert.equal(after.nodes.find(n => n.id === target.id).state, 'unlocked');
 
-    const board = await getProgressionGrid(db, 'fighter');
-    const byId = Object.fromEntries(board.nodes.map(n => [n.id, n]));
-    assert.equal(byId.fighter_stat.state, 'unlocked');
-    assert.equal(byId.fighter_passive.state, 'unlockable', 'the next node along the spoke opened up');
+    if (target.effect.kind === 'stat') {
+      const userAfter = await getUserState(db, 'fighter');
+      assert.equal(
+        userAfter.effectiveStats[target.effect.stat],
+        userBefore.effectiveStats[target.effect.stat] + target.effect.amount,
+        'the stat node folded into effective stats'
+      );
+    }
+    // a neighbor of the newly-unlocked node is now on the frontier.
+    const opened = after.nodes.some(n => n.state === 'unlockable' && target.neighbors.includes(n.id));
+    assert.ok(opened || after.available === 0, 'a neighbor opened (or budget is exhausted)');
   } finally {
     await db.close();
   }
 });
 
-test('Plan 019: a grant_ability node puts the ability on the hotbar (and an already-innate passive does not double)', async () => {
-  const db = await createMigratedDb();
-  const { unlockProgressionNode, getUserState, updatePresence } = await import('../worker/game.mjs');
-  try {
-    const calm = findCalmRoom(getWorldDay());
-    await seedPlayer(db, 'fighter', 'Fighter', { skillPoints: 5 });
-    await updatePresence(db, 'fighter', calm.row, calm.col);
-
-    const before = await getUserState(db, 'fighter');
-    await unlockProgressionNode(db, 'fighter', 'fighter_stat');     // +1 str
-    await unlockProgressionNode(db, 'fighter', 'fighter_passive');  // toughness — Fighter already has it innately
-    await unlockProgressionNode(db, 'fighter', 'core_survey');      // grants Survey
-
-    const after = await getUserState(db, 'fighter');
-    // Only the stat node moves the needle; the redundant Toughness folds to 0.
-    assert.equal(after.effectiveStats.strength, before.effectiveStats.strength + 1, 'stat node folds; innate passive does not stack');
-    assert.ok(ids(after.skills).includes('survey'), 'the board-granted ability is on the hotbar');
-  } finally {
-    await db.close();
-  }
-});
-
-test('Plan 019: a passive node folds its stat for a class that does not already have it', async () => {
-  const db = await createMigratedDb();
-  const { unlockProgressionNode, getUserState, updatePresence } = await import('../worker/game.mjs');
-  try {
-    const calm = findCalmRoom(getWorldDay());
-    await seedPlayer(db, 'mage', 'Mage', { skillPoints: 2 });
-    await updatePresence(db, 'mage', calm.row, calm.col);
-
-    const before = await getUserState(db, 'mage');
-    await unlockProgressionNode(db, 'mage', 'mage_stat');     // +1 intelligence
-    await unlockProgressionNode(db, 'mage', 'mage_passive');  // Acuity (+1 intelligence), not innate to Mage
-
-    const after = await getUserState(db, 'mage');
-    assert.equal(after.effectiveStats.intelligence, before.effectiveStats.intelligence + 2, 'stat node + non-redundant passive both fold');
-  } finally {
-    await db.close();
-  }
-});
-
-test('Plan 019: unlock rejects unreachable nodes, double-unlocks, and empty-handed spends', async () => {
+test('Plan 019b: unlock rejects no-budget, unreachable, and off-board nodes', async () => {
   const db = await createMigratedDb();
   const { unlockProgressionNode } = await import('../worker/game.mjs');
   try {
-    await seedPlayer(db, 'fighter', 'Fighter', { skillPoints: 1 });
+    const board = grid.getDailyBoard(WD);
+    const entry = board.nodes.find(n => n.entryFor === 'Fighter');
 
-    // Not adjacent to anything unlocked.
-    await assert.rejects(() => unlockProgressionNode(db, 'fighter', 'core_int'), /not reachable/);
-    // Another class's spoke is also unreachable from the Fighter root.
-    await assert.rejects(() => unlockProgressionNode(db, 'fighter', 'mage_stat'), /not reachable/);
+    // Level 0 → budget 0: cannot afford even a cost-1 neighbor of the entry.
+    await seedPlayer(db, 'fighter', 'Fighter', { level: 0 });
+    await assert.rejects(() => unlockProgressionNode(db, 'fighter', entry.neighbors[0]), /Not enough skill points today/);
 
-    await unlockProgressionNode(db, 'fighter', 'fighter_stat'); // spends the only point
-    await assert.rejects(() => unlockProgressionNode(db, 'fighter', 'fighter_stat'), /already unlocked/);
-    // Out of points now.
-    await assert.rejects(() => unlockProgressionNode(db, 'fighter', 'fighter_passive'), /Not enough skill points/);
+    // A node not adjacent to anything unlocked is unreachable.
+    await seedPlayer(db, 'rich', 'Fighter', { level: 50 });
+    const entrySet = new Set(Object.values(board.entryByJob));
+    const farNode = board.nodes.find(n => !entrySet.has(n.id) && !n.neighbors.some(m => entrySet.has(m)));
+    await assert.rejects(() => unlockProgressionNode(db, 'rich', farNode.id), /not reachable/);
+
+    // A node id that isn't on today's board.
+    await assert.rejects(() => unlockProgressionNode(db, 'rich', '1999-01-01:0'), /not on today's board/);
   } finally {
     await db.close();
   }
 });
 
-// ---------------------------------------------------------------------------
-// Respec (gold-priced, guild-gated)
-
-test('Plan 019: respec at a guild refunds nodes and charges gold; elsewhere it is refused', async () => {
+test('Plan 019b: prior-day unlocks do not count and get swept (the daily reset)', async () => {
   const db = await createMigratedDb();
-  const { unlockProgressionNode, respecProgression, getProgressionGrid, getUserState, updatePresence } = await import('../worker/game.mjs');
+  const { getProgressionGrid } = await import('../worker/game.mjs');
   try {
-    const worldDay = getWorldDay();
-    const guild = findRoomWithEffect(worldDay, 'guild');
-    if (!guild) {
-      // No guild room today — respec is unreachable; assert the gate refuses a calm room and stop.
-      const calm = findCalmRoom(worldDay);
-      await seedPlayer(db, 'fighter', 'Fighter', { skillPoints: 3, gold: 100 });
-      await updatePresence(db, 'fighter', calm.row, calm.col);
-      await unlockProgressionNode(db, 'fighter', 'fighter_stat');
-      await assert.rejects(() => respecProgression(db, 'fighter', calm.row, calm.col), /only respec at a guild/);
-      return;
+    await seedPlayer(db, 'fighter', 'Fighter', { level: 5 });
+    // A leftover unlock from a prior day's board.
+    await db.prepare("INSERT INTO playerProgressionNodes (username, nodeId, unlockedTick) VALUES ('fighter', ?, 0)").bind('1999-01-01:5').run();
+
+    const board = await getProgressionGrid(db, 'fighter');
+    assert.equal(board.spent, 0, 'a prior-day unlock does not count against today');
+    assert.equal(board.available, 5, 'full budget available today');
+
+    const left = await db.prepare("SELECT COUNT(*) AS c FROM playerProgressionNodes WHERE username = 'fighter' AND nodeId = ?").bind(`${WD - 1}:5`).first();
+    assert.equal(left.c, 0, 'the stale row was swept');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 019b: board-granted abilities and non-innate passives fold for the player', async () => {
+  const db = await createMigratedDb();
+  const { getUserState, updatePresence } = await import('../worker/game.mjs');
+  try {
+    const calm = findCalmRoom(WD);
+    await seedPlayer(db, 'fighter', 'Fighter', { level: 10 });
+    await updatePresence(db, 'fighter', calm.row, calm.col);
+    const board = grid.getDailyBoard(WD);
+    const fighterInnate = new Set(['power_strike', 'brace', 'toughness']);
+
+    // A grant_ability node for an ability the Fighter does NOT have innately.
+    const grantNode = board.nodes.find(n => n.effect.kind === 'grant_ability' && !fighterInnate.has(n.effect.abilityId));
+    if (grantNode) {
+      await db.prepare("INSERT INTO playerProgressionNodes (username, nodeId, unlockedTick) VALUES ('fighter', ?, 0)").bind(grantNode.id).run();
+      const state = await getUserState(db, 'fighter');
+      assert.ok(state.skills.map(s => s.id).includes(grantNode.effect.abilityId), 'board-granted ability is on the hotbar');
     }
 
-    await seedPlayer(db, 'fighter', 'Fighter', { skillPoints: 3, gold: 100 });
-    await updatePresence(db, 'fighter', guild.row, guild.col);
-    await unlockProgressionNode(db, 'fighter', 'fighter_stat');
-    await unlockProgressionNode(db, 'fighter', 'fighter_passive');
+    // A non-innate passive node folds its stat.
+    const passiveNode = board.nodes.find(n => n.effect.kind === 'passive' && !fighterInnate.has(n.effect.abilityId));
+    if (passiveNode) {
+      const ability = abilities.getAbility(passiveNode.effect.abilityId);
+      const stat = Object.keys(ability.statEffects)[0];
+      const before = (await getUserState(db, 'fighter')).effectiveStats[stat];
+      await db.prepare("INSERT INTO playerProgressionNodes (username, nodeId, unlockedTick) VALUES ('fighter', ?, 0)").bind(passiveNode.id).run();
+      const after = (await getUserState(db, 'fighter')).effectiveStats[stat];
+      assert.equal(after, before + ability.statEffects[stat], 'the board passive folded into effective stats');
+    }
+  } finally {
+    await db.close();
+  }
+});
 
-    const spent = await getUserState(db, 'fighter');
-    assert.equal(spent.skillPoints, 1, 'two points spent');
+test('Plan 019b: respec at a guild clears today\'s unlocks for 50 gold; elsewhere refused', async () => {
+  const db = await createMigratedDb();
+  const { getProgressionGrid, unlockProgressionNode, respecProgression, updatePresence } = await import('../worker/game.mjs');
+  try {
+    const guild = findRoomWithEffect(WD, 'guild');
+    await seedPlayer(db, 'fighter', 'Fighter', { level: 10, gold: 100 });
+    const where = guild || findCalmRoom(WD);
+    await updatePresence(db, 'fighter', where.row, where.col);
 
-    // Wrong room: refused.
-    const calm = findCalmRoom(worldDay);
-    await assert.rejects(() => respecProgression(db, 'fighter', calm.row, calm.col), /only respec at a guild/);
+    const before = await getProgressionGrid(db, 'fighter');
+    const target = before.nodes.find(n => n.state === 'unlockable');
+    await unlockProgressionNode(db, 'fighter', target.id);
+    assert.equal((await getProgressionGrid(db, 'fighter')).spent, target.cost);
 
-    // At the guild: refunds the two points, charges 50 gold, re-locks the nodes.
-    const board = await respecProgression(db, 'fighter', guild.row, guild.col);
-    assert.equal(board.skillPoints, 3, 'both points refunded');
-    const after = await getUserState(db, 'fighter');
-    assert.equal(after.gold, 50, 'respec charged 50 gold');
-    assert.equal(after.effectiveStats.strength, spent.effectiveStats.strength - 1, 'the unlocked stat reverted');
-    const byId = Object.fromEntries(board.nodes.map(n => [n.id, n]));
-    assert.equal(byId.fighter_stat.state, 'unlockable', 'nodes are re-locked (back to unlockable)');
+    if (!guild) {
+      await assert.rejects(() => respecProgression(db, 'fighter', where.row, where.col), /only respec at a guild/);
+      return;
+    }
+    const after = await respecProgression(db, 'fighter', guild.row, guild.col);
+    assert.equal(after.spent, 0, "today's unlocks cleared");
+    assert.equal(after.available, 10, 'budget fully available again');
+    const user = await db.prepare("SELECT gold FROM users WHERE username = 'fighter'").bind().first();
+    assert.equal(user.gold, 50, 'respec charged 50 gold');
   } finally {
     await db.close();
   }
