@@ -41,13 +41,13 @@
     <div id="messages"></div>
   </div>
   <div class="hud chat-input-toolbar">
+    <div id="stance-bar" class="action-bar"></div>
+    <div id="skill-bar" class="action-bar"></div>
     <form class="chat-form" id="chat-form">
       <input type="text" id="message" name="message">
       <button type="button" id="clear-target" style="display: none;">Untarget</button>
       <button type="submit" id="send-button">Send</button>
       <button type="button" id="attack-button">Attack</button>
-      <button type="button" id="skill-button">Skill</button>
-      <select id="skill-id" name="skillId"></select>
     </form>
   </div>
 
@@ -58,6 +58,7 @@
     let socketRetryDelay = 1000;
     let roomStateRefreshTimer = null;
     let currentSkill = null;
+    let currentSkills = [];
     let currentJob = 'Novice';
     let selectedTarget = '';
 
@@ -248,20 +249,12 @@
         <p>Speed: ${effective.speed}</p>
         <p>Strength: ${effective.strength}</p>
         <p>Intelligence: ${effective.intelligence}</p>
-        <p>Stance: ${(data.stance || 'standing').replace(/^\w/, c => c.toUpperCase())}</p>
       `;
       document.getElementById('gold').textContent = `Gold: ${data.gold !== undefined ? data.gold : 0}`;
-      const skillSelect = document.getElementById('skill-id');
-      if (skillSelect && currentSkill) {
-        skillSelect.innerHTML = '';
-        const option = document.createElement('option');
-        option.value = currentSkill.id;
-        option.textContent = currentSkill.label;
-        const skillTooltip = getSkillTooltip(currentSkill);
-        option.title = skillTooltip;
-        skillSelect.title = skillTooltip;
-        skillSelect.appendChild(option);
-      }
+      // Plan 017: render the ability hotbar (data.skills plural after 018; a single
+      // data.skill until then) and the stance toggle, replacing the old dropdown.
+      renderSkillBar(data.skills || (currentSkill ? [currentSkill] : []));
+      renderStanceBar(data.stance || 'standing');
       const jobSelect = document.getElementById('job-select');
       if (jobSelect) {
         Array.from(jobSelect.options).forEach(option => {
@@ -614,9 +607,43 @@
       });
     }
 
-    function submitSkill(event) {
-      event.preventDefault();
-      const skillId = document.getElementById('skill-id').value;
+    // Plan 017: the ability hotbar — one clickable button per available skill
+    // (FFXIV/WoW style). Each button fires its own skill; no dropdown to hunt
+    // through. Designed to render N skills so plan 018 is a data change, not a UI one.
+    function renderSkillBar(skills) {
+      currentSkills = skills || [];
+      const bar = document.getElementById('skill-bar');
+      bar.innerHTML = '';
+      currentSkills.forEach(skill => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'skill-slot';
+        button.textContent = skill.label;
+        button.title = getSkillTooltip(skill);
+        button.addEventListener('click', () => fireSkill(skill.id));
+        bar.appendChild(button);
+      });
+    }
+
+    const STANCE_OPTIONS = ['standing', 'aggressive', 'guarding', 'crouched'];
+    function renderStanceBar(currentStance) {
+      const bar = document.getElementById('stance-bar');
+      bar.innerHTML = '';
+      setText(bar, 'Stance: ');
+      STANCE_OPTIONS.forEach(name => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = name === currentStance ? 'stance-slot stance-active' : 'stance-slot';
+        button.textContent = name.replace(/^\w/, c => c.toUpperCase());
+        button.addEventListener('click', () => setStance(name));
+        bar.appendChild(button);
+      });
+    }
+
+    function fireSkill(skillId) {
+      if (!skillId) {
+        return;
+      }
       const messageInput = document.getElementById('message');
       const targetUsername = getMentionTarget(messageInput.value) || selectedTarget;
       postForm(
@@ -624,6 +651,23 @@
         `skillId=${encodeURIComponent(skillId)}&targetUsername=${encodeURIComponent(targetUsername)}`,
         updateTargetHint
       );
+    }
+
+    // The active stance is set via the existing /stance command (owner principle:
+    // verbs stay chat-command-backed); the button just issues it.
+    function setStance(name) {
+      postForm(`/chat/${row}/${col}`, `message=${encodeURIComponent('/stance ' + name)}`);
+    }
+
+    // The keyboard shortcut fires the first ability on the bar.
+    function submitSkill(event) {
+      if (event && event.preventDefault) {
+        event.preventDefault();
+      }
+      const first = currentSkills[0];
+      if (first) {
+        fireSkill(first.id);
+      }
     }
 
     function submitJobChange(event) {
@@ -640,7 +684,6 @@
     document.addEventListener('DOMContentLoaded', function() {
       document.getElementById('chat-form').addEventListener('submit', event => submitMessage(event, false));
       document.getElementById('attack-button').addEventListener('click', event => submitMessage(event, true));
-      document.getElementById('skill-button').addEventListener('click', submitSkill);
       document.getElementById('job-button').addEventListener('click', submitJobChange);
       document.getElementById('clear-target').addEventListener('click', clearTarget);
       document.getElementById('message').addEventListener('keydown', function(event) {

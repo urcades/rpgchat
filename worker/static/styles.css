@@ -261,6 +261,39 @@ a, button, input, select {
   flex-wrap: wrap;
 }
 
+/* Plan 017: ability hotbar + stance toggle */
+.action-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .4em;
+  width: 100%;
+  padding: .4em 0 0;
+  font-size: .9em;
+}
+
+.skill-slot,
+.stance-slot {
+  background: none;
+  border: 1px solid #c5c5c5;
+  border-radius: 4px;
+  color: #16181d;
+  cursor: pointer;
+  font: inherit;
+  padding: .2em .6em;
+}
+
+.skill-slot:hover,
+.stance-slot:hover {
+  background: #f0f4ff;
+}
+
+.stance-slot.stance-active {
+  background: #16181d;
+  border-color: #16181d;
+  color: #fff;
+}
+
 #job-controls {
   align-items: center;
 }

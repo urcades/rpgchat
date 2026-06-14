@@ -53,13 +53,16 @@ test('character page lays out attributes and history as readable sections', () =
   assert.match(css, /\.character-row\s*\{[^}]*grid-template-columns:\s*9rem minmax\(0, 1fr\)/s);
 });
 
-test('chat page puts active skill details on the skill dropdown tooltip', () => {
+test('chat page puts active skill details on the hotbar button tooltip (plan 017)', () => {
   const html = fs.readFileSync(path.join(__dirname, '../worker/static/chat.html'), 'utf8');
   const css = fs.readFileSync(path.join(__dirname, '../worker/static/styles.css'), 'utf8');
 
   assert.doesNotMatch(html, /id="skill-details"/);
   assert.match(html, /function getSkillTooltip/);
-  assert.match(html, /skillSelect\.title = skillTooltip/);
+  // Plan 017: the tooltip now lives on each hotbar button, not a dropdown.
+  assert.match(html, /button\.title = getSkillTooltip\(skill\)/);
+  assert.doesNotMatch(html, /<select id="skill-id"/);
+  assert.match(css, /\.skill-slot/);
   assert.doesNotMatch(css, /\.skill-details\s*\{/);
 });
 

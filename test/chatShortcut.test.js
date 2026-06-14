@@ -196,8 +196,10 @@ async function flushPromises() {
   await Promise.resolve();
 }
 
-test('Shift+Command+Enter uses the current skill from the chat input', () => {
+test('Shift+Command+Enter fires the first ability on the hotbar', async () => {
   const page = loadChatPage();
+  await page.context.loadUserAttributes();
+  await flushPromises();
   const message = page.getElement('message');
   let prevented = false;
 
@@ -252,9 +254,43 @@ test('chat header combines job and level and moves gold into the right-side stat
   assert.doesNotMatch(page.getElement('attributes').innerHTML, /<p>Gold:/);
   assert.equal(page.getElement('gold').textContent, 'Gold: 2');
   assert.equal(
-    page.getElement('skill-id').title,
+    page.getElement('skill-bar').children[0].title,
     'Dose: Patch someone up by day, poison them by night.\n- Day: heals the target.\n- Night: poisons the target.'
   );
+});
+
+test('the skill hotbar renders a button per ability and fires it on click (plan 017)', async () => {
+  const page = loadChatPage();
+  await page.context.loadUserAttributes();
+  await flushPromises();
+
+  const bar = page.getElement('skill-bar');
+  assert.equal(bar.children.length, 1, 'one button for the default single-skill class');
+  assert.equal(bar.children[0].textContent, 'Scrounge');
+
+  bar.children[0].listeners.click();
+  assert.equal(page.posts.at(-1).endpoint, '/skill/1/1');
+  assert.equal(page.posts.at(-1).body, 'skillId=scrounge&targetUsername=');
+});
+
+test('the stance toggle marks the active stance and issues /stance on click (plan 017)', async () => {
+  const page = loadChatPage({
+    userAttributes: {
+      username: 'u', job: 'Novice', level: 1, gold: 0, stance: 'guarding',
+      effectiveStats: { health: 10, maxHealth: 10, stamina: 10, maxStamina: 10, speed: 1, strength: 1, intelligence: 1 },
+      skill: { id: 'scrounge', label: 'Scrounge' }
+    }
+  });
+  await page.context.loadUserAttributes();
+  await flushPromises();
+
+  const buttons = page.getElement('stance-bar').children.filter(ch => ch.className && ch.className.includes('stance-slot'));
+  assert.equal(buttons.length, 4, 'four stance buttons');
+  assert.equal(buttons.find(b => b.className.includes('stance-active')).textContent, 'Guarding', 'current stance highlighted');
+
+  buttons.find(b => b.textContent === 'Aggressive').listeners.click();
+  assert.equal(page.posts.at(-1).endpoint, '/chat/1/1');
+  assert.equal(page.posts.at(-1).body, 'message=' + encodeURIComponent('/stance aggressive'));
 });
 
 test('chat startup fetches one room state payload', async () => {
