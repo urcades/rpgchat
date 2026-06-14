@@ -658,14 +658,15 @@ test('Worker attacks can miss through speed contest without damaging the target'
        VALUES ('quick', 'pw', 'Novice', 12, 12, 100, 100, 20, 1, 1)`
     ).run();
 
-    await updatePresence(db, 'slow', 1, 1);
-    await updatePresence(db, 'quick', 1, 1);
+    const calm = findCalmRoom(getWorldDay());
+    await updatePresence(db, 'slow', calm.row, calm.col);
+    await updatePresence(db, 'quick', calm.row, calm.col);
 
-    await withMockedRandom([0.99, 0.99], () => handleAttackAction(db, 'slow', 1, 1, '@quick'));
+    await withMockedRandom([0.99, 0.99], () => handleAttackAction(db, 'slow', calm.row, calm.col, '@quick'));
 
     const attacker = await db.prepare("SELECT stamina FROM users WHERE username = 'slow'").first();
     const target = await db.prepare("SELECT health FROM users WHERE username = 'quick'").first();
-    const messages = await getMessages(db, 1, 1);
+    const messages = await getMessages(db, calm.row, calm.col);
     const traces = await db.prepare('SELECT traceType FROM roomTraces').all();
 
     assert.equal(await getCurrentTickValue(db), 1);
@@ -694,10 +695,11 @@ test('Worker attacks that pass speed contest still use strength damage', async (
        VALUES ('slow_target', 'pw', 'Novice', 12, 12, 100, 100, 1, 1, 1)`
     ).run();
 
-    await updatePresence(db, 'fast', 1, 1);
-    await updatePresence(db, 'slow_target', 1, 1);
+    const calm = findCalmRoom(getWorldDay());
+    await updatePresence(db, 'fast', calm.row, calm.col);
+    await updatePresence(db, 'slow_target', calm.row, calm.col);
 
-    await withMockedRandom([0.1, 0.99, 0.99], () => handleAttackAction(db, 'fast', 1, 1, '@slow_target'));
+    await withMockedRandom([0.1, 0.99, 0.99], () => handleAttackAction(db, 'fast', calm.row, calm.col, '@slow_target'));
 
     const target = await db.prepare("SELECT health FROM users WHERE username = 'slow_target'").first();
 
@@ -1693,8 +1695,9 @@ test('Equip lands an item on a matching body part and spends stamina and a tick'
   const { handleChatAction, getUserState, updatePresence } = await import('../worker/game.mjs');
 
   try {
+    const calm = findCalmRoom(getWorldDay());
     await seedLiveUser(db, 'wielder', { health: 30, maxHealth: 30 });
-    await updatePresence(db, 'wielder', 1, 1);
+    await updatePresence(db, 'wielder', calm.row, calm.col);
     // Trigger body instantiation so the arm part rows exist.
     await getUserState(db, 'wielder');
     await insertCarriedItem(db, 'wielder', { name: 'Rusty Sword', slotType: 'hand', modifiers: { strength: 2 } });
@@ -1702,7 +1705,7 @@ test('Equip lands an item on a matching body part and spends stamina and a tick'
     const staminaBefore = (await db.prepare("SELECT stamina FROM users WHERE username = 'wielder'").first()).stamina;
     const tickBefore = (await db.prepare('SELECT value FROM tick WHERE id = 1').first()).value;
 
-    const action = await handleChatAction(db, 'wielder', 1, 1, '/equip Rusty Sword');
+    const action = await handleChatAction(db, 'wielder', calm.row, calm.col, '/equip Rusty Sword');
     assert.equal(action.equipped, 'Rusty Sword');
 
     // The item is now equipped on a `hand` part (left arm = the lower id).
