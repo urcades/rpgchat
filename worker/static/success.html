@@ -41,6 +41,30 @@
         });
       })
       .catch(() => {});
+
+    // Adjacency (plan 009): mark where you stand and dim rooms you can't walk to
+    // this step. Links stay live — the server is the authority (a dimmed link
+    // just returns the "too far" page). Null position = first placement of the
+    // day, when everywhere is reachable.
+    fetch('/map-state')
+      .then(response => response.json())
+      .then(({ position }) => {
+        if (!position) {
+          return;
+        }
+        const current = gridItems.get(`${position.row}:${position.col}`);
+        if (current) {
+          current.classList.add('current-room');
+        }
+        gridItems.forEach((item, key) => {
+          const [row, col] = key.split(':').map(Number);
+          const distance = Math.max(Math.abs(position.row - row), Math.abs(position.col - col));
+          if (distance > 1) {
+            item.classList.add('unreachable-room');
+          }
+        });
+      })
+      .catch(() => {});
   </script>
 </body>
 </html>

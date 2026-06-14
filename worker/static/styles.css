@@ -328,6 +328,14 @@ a, button, input, select {
   font-weight: 700;
 }
 
+.grid-item.current-room {
+  outline: 1px solid currentColor;
+}
+
+.grid-item.unreachable-room {
+  opacity: 0.35;
+}
+
 .grid-item:hover {
   color: white;
   background-color: black;

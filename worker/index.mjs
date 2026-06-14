@@ -14,6 +14,7 @@ import {
   SIGNATURE_ITEMS_BY_JOB,
   buildStartingStats,
   createItemForOwner,
+  getCurrentPosition,
   getCurrentTickValue,
   getMessages,
   getActiveWorldEvents,
@@ -32,6 +33,7 @@ import {
   runHostileRoomAction,
   runScheduledWorldPulse,
   updatePresence,
+  validateMovement,
   validateRoomCoordinates,
   validateStartingAllocation
 } from './game.mjs';
@@ -423,6 +425,15 @@ app.get('/success', async c => {
   return protectedAsset(c, '/success.html');
 });
 
+app.get('/map-state', async c => {
+  const auth = await currentUserOrResponse(c);
+  if (auth instanceof Response) {
+    return auth;
+  }
+  const position = await getCurrentPosition(c.env.DB, auth.user.username);
+  return c.json({ position: position ? { row: position.row, col: position.col } : null });
+});
+
 app.get('/world-events', async c => {
   const auth = await currentUserOrResponse(c);
   if (auth instanceof Response) {
@@ -554,6 +565,22 @@ app.get('/chat/:row/:col', async c => {
 
   try {
     const { row, col } = parseCoordinates(c);
+
+    // Adjacency gate (plan 009): only the room page is served here; the server
+    // is still the authority (POST /room-presence re-checks), but render a
+    // friendly page instead of a broken chat when the room is out of walking range.
+    const movement = await validateMovement(c.env.DB, auth.user.username, row, col);
+    if (!movement.allowed) {
+      return noStore(c.html(`<!DOCTYPE html>
+<html>
+<head><title>Too Far</title><link rel="stylesheet" href="/styles.css"></head>
+<body>
+  <p>Too far to walk there — Room ${row}, ${col} is out of range from where you are standing.</p>
+  <p>You can only move to an adjacent room. <a href="/success">Return to map</a></p>
+</body>
+</html>`));
+    }
+
     const tickValue = await getCurrentTickValue(c.env.DB);
     const access = await getRoomAccessState(c.env.DB, auth.user.username, row, col, tickValue);
 

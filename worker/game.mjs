@@ -213,7 +213,45 @@ export async function getRoomAccessState(db, username, row, col, tickValue = nul
   };
 }
 
+// The player's position for the day — their single roomPresence row (PK is
+// (username, worldDay), so there is at most one). Null before their first
+// placement of the day.
+export async function getCurrentPosition(db, username, worldDay = getWorldDay()) {
+  return dbFirst(
+    db,
+    'SELECT roomRow AS row, roomCol AS col FROM roomPresence WHERE username = ? AND worldDay = ?',
+    [username, worldDay]
+  );
+}
+
+// Adjacency rule (plan 009): the first placement of the world day is free (spawn
+// anywhere); after that you may only enter a room within Chebyshev distance 1
+// (including diagonals) of where you last stood. A new world day resets position
+// (presence is keyed by worldDay), so movement frees up again each day. Staleness
+// is ignored on purpose — your body stays where you left it even if you go AFK.
+export async function validateMovement(db, username, row, col) {
+  const position = await getCurrentPosition(db, username);
+  if (!position) {
+    return { allowed: true, first: true };
+  }
+  const distance = Math.max(Math.abs(position.row - row), Math.abs(position.col - col));
+  if (distance <= 1) {
+    return { allowed: true, from: position };
+  }
+  return { allowed: false, from: position };
+}
+
 export async function requireRoomUse(db, username, row, col) {
+  // Movement is the first gate and the single choke point — covers POST
+  // /room-presence (the move) and every action route, so acting in a room you
+  // couldn't have walked to is rejected too. The throw flows through the route
+  // try/catch -> formError; the inn path below keeps returning its structured
+  // object so the pay-to-enter flow still renders.
+  const movement = await validateMovement(db, username, row, col);
+  if (!movement.allowed) {
+    throw new ActionError('Too far to walk there.', 403);
+  }
+
   const worldDay = getWorldDay();
   const tickValue = await getCurrentTickValue(db);
   const access = await getRoomAccessState(db, username, row, col, tickValue, worldDay);

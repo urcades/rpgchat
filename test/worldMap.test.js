@@ -36,6 +36,9 @@ test('world map renders active event room coordinates in red', async () => {
       }
     },
     fetch(endpoint) {
+      if (endpoint === '/map-state') {
+        return Promise.resolve({ json: async () => ({ position: null }) });
+      }
       assert.equal(endpoint, '/world-events');
       return Promise.resolve({
         json: async () => [{ eventType: 'raid', row: 3, col: 4 }]
@@ -56,4 +59,52 @@ test('world map renders active event room coordinates in red', async () => {
   assert.ok(raidRoom.classList.values.includes('world-event-room'));
   assert.equal(raidRoom.dataset.eventType, 'raid');
   assert.equal(normalRoom.classList.values.includes('world-event-room'), false);
+});
+
+test('world map marks the current room and dims unreachable ones (plan 009)', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '../worker/static/success.html'), 'utf8');
+  const script = html.match(/<script>([\s\S]*)<\/script>/)[1];
+  const gridContainer = {
+    children: [],
+    appendChild(child) {
+      this.children.push(child);
+      return child;
+    }
+  };
+
+  const context = {
+    document: {
+      querySelector(selector) {
+        return selector === '.grid-container' ? gridContainer : null;
+      },
+      createElement() {
+        return {
+          classList: { values: [], add(value) { this.values.push(value); } },
+          dataset: {},
+          href: '',
+          textContent: ''
+        };
+      }
+    },
+    fetch(endpoint) {
+      if (endpoint === '/map-state') {
+        return Promise.resolve({ json: async () => ({ position: { row: 5, col: 5 } }) });
+      }
+      return Promise.resolve({ json: async () => [] });
+    }
+  };
+
+  vm.createContext(context);
+  vm.runInContext(script, context);
+  for (let i = 0; i < 6; i += 1) {
+    await Promise.resolve();
+  }
+
+  const here = gridContainer.children.find(child => child.textContent === '5, 5');
+  const adjacent = gridContainer.children.find(child => child.textContent === '6, 6'); // distance 1
+  const far = gridContainer.children.find(child => child.textContent === '8, 8'); // distance 3
+
+  assert.ok(here.classList.values.includes('current-room'), 'the room you stand in is marked current');
+  assert.equal(adjacent.classList.values.includes('unreachable-room'), false, 'adjacent rooms stay reachable');
+  assert.ok(far.classList.values.includes('unreachable-room'), 'distant rooms are dimmed');
 });
