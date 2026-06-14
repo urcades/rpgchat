@@ -48,7 +48,9 @@ const ITEM_TEMPLATES = [
   { templateId: 'chipped_knife', name: 'Chipped Knife', slotType: 'hand', rarity: 'shop', modifiers: { strength: 1 }, dropWeight: 0 },
   { templateId: 'blue_candle', name: 'Blue Candle', slotType: 'hand', rarity: 'shop', modifiers: { intelligence: 1 }, dropWeight: 0 },
   { templateId: 'wax_seal', name: 'Wax Seal', slotType: 'trinket', rarity: 'shop', modifiers: { intelligence: 1 }, dropWeight: 0 },
-  { templateId: 'old_map_scrap', name: 'Old Map Scrap', slotType: 'hand', rarity: 'shop', modifiers: { speed: 1 }, dropWeight: 0 },
+  // Plan 018c: an item can grant an ability — equipping the scrap lets any class
+  // Survey the room. `grantsAbility` references an id in utils/abilities.js.
+  { templateId: 'old_map_scrap', name: 'Old Map Scrap', slotType: 'hand', rarity: 'shop', modifiers: { speed: 1 }, grantsAbility: 'survey', dropWeight: 0 },
   { templateId: 'bone_charm', name: 'Bone Charm', slotType: 'trinket', rarity: 'shop', modifiers: { strength: 1, intelligence: 1 }, dropWeight: 0 },
   { templateId: 'copper_bell', name: 'Copper Bell', slotType: 'trinket', rarity: 'shop', modifiers: { maxStamina: 10, speed: -1 }, dropWeight: 0 }
 ];

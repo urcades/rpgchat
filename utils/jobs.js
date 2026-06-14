@@ -1,3 +1,8 @@
+// Plan 018: ability DATA now lives in utils/abilities.js (the registry). Jobs keep
+// their stat identity (bonuses) and reference abilities by class; getSkillForJob
+// returns the starter ability so its shape and callers stay unchanged.
+const abilitiesModule = require('./abilities');
+
 const STAT_KEYS = ['health', 'stamina', 'speed', 'strength', 'intelligence'];
 const STARTING_STAT_POINTS = 12;
 
@@ -15,121 +20,42 @@ const JOBS = {
   Novice: {
     label: 'Novice',
     description: 'Flexible, poor, and unusually good at finding loose change.',
-    bonuses: {},
-    skill: {
-      id: 'scrounge',
-      label: 'Scrounge',
-      description: 'Search the room for loose gold.',
-      effects: [
-        'Gains 1 + half your Intelligence in gold, rounded down with a minimum bonus of 1.',
-        'Does not require a target.'
-      ]
-    }
+    bonuses: {}
   },
   Paladin: {
     label: 'Paladin',
     description: 'A stubborn protector whose holiness mostly looks like interference.',
-    bonuses: { maxHealth: 9, strength: 1 },
-    skill: {
-      id: 'ward',
-      label: 'Ward',
-      description: 'Protect yourself or another player from incoming harm.',
-      effects: [
-        'Adds Ward for 5 ticks.',
-        'The next attack or Power Strike against the warded target is reduced by 2 damage and consumes the ward.',
-        'Targets yourself if no target is selected.'
-      ]
-    }
+    bonuses: { maxHealth: 9, strength: 1 }
   },
   Fighter: {
     label: 'Fighter',
     description: 'A blunt instrument with legs and a grievance.',
-    bonuses: { maxHealth: 3, strength: 2 },
-    skill: {
-      id: 'power_strike',
-      label: 'Power Strike',
-      description: 'Hit a target harder than a normal attack.',
-      effects: [
-        'Uses a speed contest, so faster targets can dodge it.',
-        'Deals 1 + half your Strength in damage, rounded down.',
-        'Consumes Mark for +2 damage and consumes Ward for -2 damage.'
-      ]
-    }
+    bonuses: { maxHealth: 3, strength: 2 }
   },
   Chemist: {
     label: 'Chemist',
     description: 'Helpful in daylight, concerning after dark.',
-    bonuses: { intelligence: 2, maxStamina: 10 },
-    skill: {
-      id: 'dose',
-      label: 'Dose',
-      description: 'Patch someone up by day, poison them by night.',
-      effects: [
-        'Day: heals the target for 2 + one quarter of your Intelligence, rounded down.',
-        'Night: uses a speed contest, then poisons the target for 5 ticks.',
-        'Poison deals 1 damage each tick after it starts.'
-      ]
-    }
+    bonuses: { intelligence: 2, maxStamina: 10 }
   },
   Dungeoneer: {
     label: 'Dungeoneer',
     description: 'Reads rooms like arguments and leaves marks on both.',
-    bonuses: { speed: 1, strength: 1, intelligence: 1 },
-    skill: {
-      id: 'survey',
-      label: 'Survey',
-      description: 'Study the room and leave a visible survey trace.',
-      effects: [
-        'Leaves a survey trace in the room for 20 ticks.',
-        'Gains 1 gold.',
-        'Does not require a target.'
-      ]
-    }
+    bonuses: { speed: 1, strength: 1, intelligence: 1 }
   },
   Mage: {
     label: 'Mage',
     description: 'Turns attention into pressure.',
-    bonuses: { intelligence: 3 },
-    skill: {
-      id: 'arcane_pin',
-      label: 'Arcane Pin',
-      description: 'Pin a target with a stamina-draining spell.',
-      effects: [
-        'Uses a speed contest, so faster targets can dodge it.',
-        'Adds Arcane Pin for 4 ticks.',
-        'Arcane Pin drains 2 stamina each tick after it starts.'
-      ]
-    }
+    bonuses: { intelligence: 3 }
   },
   Assassin: {
     label: 'Assassin',
     description: 'Makes future violence easier for everyone, unfortunately.',
-    bonuses: { speed: 2, strength: 1 },
-    skill: {
-      id: 'mark',
-      label: 'Mark',
-      description: 'Make a target vulnerable to the next strong hit.',
-      effects: [
-        'Uses a speed contest, so faster targets can dodge it.',
-        'Adds Mark for 6 ticks.',
-        'The next attack or Power Strike against the marked target gains +2 damage and consumes the mark.'
-      ]
-    }
+    bonuses: { speed: 2, strength: 1 }
   },
   Cleric: {
     label: 'Cleric',
     description: 'Keeps people alive in ways that create obligations.',
-    bonuses: { maxHealth: 6, intelligence: 2 },
-    skill: {
-      id: 'bless',
-      label: 'Bless',
-      description: 'Bless a target with healing and protection from harmful effects.',
-      effects: [
-        'Clears one harmful effect from the target if one is present.',
-        'Adds Bless for 5 ticks.',
-        'Bless heals 1 health each tick after it starts.'
-      ]
-    }
+    bonuses: { maxHealth: 6, intelligence: 2 }
   }
 };
 
@@ -142,7 +68,7 @@ function getJob(job) {
 }
 
 function getSkillForJob(job) {
-  return getJob(job).skill;
+  return abilitiesModule.getStarterAbility(normalizeJob(job));
 }
 
 function parseAllocationValue(value) {
@@ -256,8 +182,13 @@ function getEffectiveUser(user = {}, bonusModifiers = null) {
     intelligence: 0,
     ...(bonusModifiers || {})
   };
-  const maxHealth = baseStats.maxHealth + jobBonuses.maxHealth + mods.maxHealth;
-  const maxStamina = baseStats.maxStamina + jobBonuses.maxStamina + mods.maxStamina;
+  // Plan 018: passive abilities fold their stat deltas into the effective layer,
+  // exactly like a job bonus. Empty until a passive with statEffects exists, so
+  // this changes nothing for the eight starter classes.
+  const passiveMods = abilitiesModule.getPassiveStatModifiers(job);
+  const passiveOf = key => Number(passiveMods[key] || 0);
+  const maxHealth = baseStats.maxHealth + jobBonuses.maxHealth + mods.maxHealth + passiveOf('maxHealth');
+  const maxStamina = baseStats.maxStamina + jobBonuses.maxStamina + mods.maxStamina + passiveOf('maxStamina');
 
   return {
     ...user,
@@ -269,10 +200,12 @@ function getEffectiveUser(user = {}, bonusModifiers = null) {
     maxHealth,
     stamina: Math.min(baseStats.stamina, maxStamina),
     maxStamina,
-    speed: baseStats.speed + jobBonuses.speed + mods.speed,
-    strength: baseStats.strength + jobBonuses.strength + mods.strength,
-    intelligence: baseStats.intelligence + jobBonuses.intelligence + mods.intelligence,
-    skill: getSkillForJob(job)
+    speed: baseStats.speed + jobBonuses.speed + mods.speed + passiveOf('speed'),
+    strength: baseStats.strength + jobBonuses.strength + mods.strength + passiveOf('strength'),
+    intelligence: baseStats.intelligence + jobBonuses.intelligence + mods.intelligence + passiveOf('intelligence'),
+    skill: getSkillForJob(job),
+    skills: abilitiesModule.getActiveAbilitiesForJob(job),
+    passives: abilitiesModule.getPassiveAbilitiesForJob(job)
   };
 }
 

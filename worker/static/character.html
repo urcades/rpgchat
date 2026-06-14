@@ -181,7 +181,15 @@
         const xp = escapeHtml(kill.experienceGained ?? 0);
         return `${name} (${kind}) - Level ${level}, ${xp} XP gained`;
       });
-      const skillEffects = (skill.effects || []).map(effect => escapeHtml(effect));
+      // Plan 018: render the full active kit and the read-only passives. Falls back
+      // to the single `skill` for older payloads.
+      const activeSkills = (data.skills && data.skills.length) ? data.skills : (skill.label ? [skill] : []);
+      const passives = data.passives || [];
+      const abilityBlock = ability =>
+        `<p><strong>${escapeHtml(ability.label || 'Ability')}:</strong> ${escapeHtml(ability.description || 'No description available.')}</p>`
+        + renderSimpleList((ability.effects || []).map(effect => escapeHtml(effect)), 'No effects listed.');
+      const skillsHtml = activeSkills.length ? activeSkills.map(abilityBlock).join('') : '<p>No active skills.</p>';
+      const passivesHtml = passives.length ? passives.map(abilityBlock).join('') : '<p>No passive abilities.</p>';
 
       const roomHint = canAct
         ? ''
@@ -194,8 +202,11 @@
         </section>
         <section class="character-section">
           <h2>Skill</h2>
-          <p><strong>${escapeHtml(skill.label || 'Scrounge')}:</strong> ${escapeHtml(skill.description || 'No description available.')}</p>
-          ${renderSimpleList(skillEffects, 'No skill effects listed.')}
+          ${skillsHtml}
+        </section>
+        <section class="character-section">
+          <h2>Passives</h2>
+          ${passivesHtml}
         </section>
         <section class="character-section">
           <h2>Current Stats</h2>

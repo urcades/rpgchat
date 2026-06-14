@@ -4,17 +4,23 @@ import levelingModule from '../utils/leveling.js';
 import worldEventsModule from '../utils/worldEvents.js';
 import bodyModule from '../utils/body.js';
 import itemsModule from '../utils/items.js';
+import abilitiesModule from '../utils/abilities.js';
 import { changes, dbAll, dbFirst, dbRun, lastInsertId } from './db.mjs';
 import { elapsedMs, logEvent, measureAsync, nowMs } from './observability.mjs';
 
 const {
   JOBS,
   normalizeJob,
-  getSkillForJob,
   validateStartingAllocation,
   buildStartingStats,
   getEffectiveUser
 } = jobsModule;
+
+const {
+  getAbility,
+  getInnateAbilityIds,
+  resolveAbilityStaminaCost
+} = abilitiesModule;
 
 const {
   GRID_SIZE,
@@ -776,6 +782,17 @@ export async function getUserState(db, username) {
   for (const equipped of equippedByPartId.values()) {
     gearHealthBonus += Number(parseItemModifiers(equipped.modifiers).maxHealth || 0);
   }
+  // Plan 018c: merge item-granted active abilities into the innate kit for the
+  // hotbar, deduped by id (a class may already own a granted ability).
+  const grantedActives = (await getGrantedAbilityIds(db, username))
+    .map(getAbility)
+    .filter(ability => ability && ability.kind === 'active');
+  const hotbarSkills = [...(effective.skills || [])];
+  for (const ability of grantedActives) {
+    if (!hotbarSkills.some(skill => skill.id === ability.id)) {
+      hotbarSkills.push(ability);
+    }
+  }
   const [achievements, kills] = await Promise.all([
     dbAll(
       db,
@@ -831,6 +848,8 @@ export async function getUserState(db, username) {
     gearHealthBonus,
     currentRoom,
     skill: effective.skill,
+    skills: hotbarSkills,
+    passives: effective.passives,
     achievements,
     kills
   };
@@ -2704,21 +2723,62 @@ function getSkillTarget(invoker, targetUsername) {
   return targetUsername && targetUsername.trim() ? targetUsername.trim() : invoker;
 }
 
+// Plan 018c: abilities granted by a player's EQUIPPED items (an item template's
+// grantsAbility), deduped to ids that resolve to a registered ability. Unioned
+// into the usable set and the hotbar so gear can hand a class a verb.
+export async function getGrantedAbilityIds(db, username) {
+  const rows = await dbAll(
+    db,
+    'SELECT templateId FROM items WHERE ownerUsername = ? AND equippedPartId IS NOT NULL',
+    [username]
+  );
+  const granted = [];
+  for (const row of rows) {
+    const template = getTemplate(row.templateId);
+    const abilityId = template && template.grantsAbility;
+    if (abilityId && getAbility(abilityId) && !granted.includes(abilityId)) {
+      granted.push(abilityId);
+    }
+  }
+  return granted;
+}
+
+// The abilities a player may invoke right now: their innate class kit plus any
+// abilities granted by equipped items (plan 018c) — actives only (passives are
+// never activated). Async so the granted source can hit the DB.
+async function getUsableAbilityIds(db, username, effectiveActor) {
+  const candidateIds = [
+    ...getInnateAbilityIds(effectiveActor.job),
+    ...(await getGrantedAbilityIds(db, username))
+  ];
+  const usable = [];
+  for (const id of candidateIds) {
+    const ability = getAbility(id);
+    if (ability && ability.kind !== 'passive' && !usable.includes(id)) {
+      usable.push(id);
+    }
+  }
+  return usable;
+}
+
 export async function validateClassSkillUse(db, { username, skillId, targetUsername }) {
   const actor = await getUser(db, username);
   const effectiveActor = getEffectiveUser(actor);
-  const actorSkill = getSkillForJob(effectiveActor.job);
+  const ability = getAbility(skillId);
+  const usableIds = await getUsableAbilityIds(db, username, effectiveActor);
 
-  if (skillId !== actorSkill.id) {
+  if (!ability || !usableIds.includes(skillId)) {
     throw new ActionError(`${effectiveActor.job} cannot use that skill.`);
   }
 
+  // Only abilities that aim at someone else validate a target. 'none' (room/no
+  // target) and 'self' resolve to the actor and need no lookup.
   const target = getSkillTarget(username, targetUsername);
-  if (skillId !== 'scrounge' && target) {
+  if ((ability.target === 'ally' || ability.target === 'enemy') && target) {
     await getUser(db, target, 'Target');
   }
 
-  return { actor, effectiveActor, target };
+  return { actor, effectiveActor, target, ability };
 }
 
 async function tryHarmfulSkillHit(db, { effectiveActor, target, skillLabel, row, col }) {
@@ -2735,8 +2795,15 @@ async function tryHarmfulSkillHit(db, { effectiveActor, target, skillLabel, row,
 
 export async function useClassSkill(db, { username, skillId, targetUsername, row, col, currentTick, phase }) {
   const { effectiveActor, target } = await validateClassSkillUse(db, { username, skillId, targetUsername });
+  return runAbility(db, skillId, { username, effectiveActor, target, row, col, currentTick, phase });
+}
 
-  switch (skillId) {
+// The ability resolver: behavior keyed by ability id, callable by any invoker (a
+// player class skill today; an equipped item or an NPC tomorrow — plans 018c/021).
+// Behavior parity with the per-class switch it replaced: identical formulas,
+// messages, and message kinds. Validation and targeting happen in the caller.
+export async function runAbility(db, abilityId, { username, effectiveActor, target, row, col, currentTick, phase }) {
+  switch (abilityId) {
     case 'scrounge': {
       const gold = 1 + Math.max(1, Math.floor(effectiveActor.intelligence / 2));
       await dbRun(db, 'UPDATE users SET gold = gold + ? WHERE username = ?', [gold, username]);
@@ -2915,6 +2982,22 @@ export async function useClassSkill(db, { username, skillId, targetUsername, row
       const message = cleared
         ? `${username} blesses ${target} and clears a harmful effect.`
         : `${username} blesses ${target}.`;
+      await insertSystemMessage(db, row, col, message, 'support');
+      return { message };
+    }
+    case 'brace': {
+      // Self only — ward the actor regardless of any selected target.
+      await addStatusEffect(db, {
+        username,
+        source: username,
+        effectType: 'ward',
+        magnitude: 1,
+        currentTick,
+        duration: 3,
+        row,
+        col
+      });
+      const message = `${username} braces, warding themselves for 3 ticks.`;
       await insertSystemMessage(db, row, col, message, 'support');
       return { message };
     }
@@ -3312,10 +3395,14 @@ export async function handleAttackAction(db, username, row, col, message) {
   });
 }
 
-export async function handleSkillAction(db, username, row, col, skillId, targetUsername, actionTick) {
+export async function handleSkillAction(db, username, row, col, skillId, targetUsername, actionTick, incantation = '') {
+  // Plan 018c: cost is data-driven — base plus any linguistic surcharge from the
+  // typed incantation. Every ability defaults to 1 stamina with no prose, so this
+  // is parity today; plan 012 supplies linguistic abilities and the prose path.
+  const staminaCost = resolveAbilityStaminaCost(getAbility(skillId), { text: incantation });
   return runPlayerAction(db, {
     username,
-    staminaCost: 1,
+    staminaCost,
     validate: async () => validateClassSkillUse(db, { username, skillId, targetUsername }),
     perform: async () => useClassSkill(db, {
       username,
