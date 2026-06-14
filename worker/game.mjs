@@ -54,6 +54,7 @@ const { generateDailyWorldEvents } = worldEventsModule;
 const {
   SIGNATURE_ITEMS_BY_JOB,
   getTemplate,
+  getItemCategory,
   rollNpcDrop
 } = itemsModule;
 
@@ -766,6 +767,8 @@ export async function getUserState(db, username) {
       name: row.name,
       slotType: row.slotType,
       rarity: row.rarity,
+      category: getItemCategory(row.templateId),
+      quantity: Number(row.quantity || 1),
       modifiers: parseItemModifiers(row.modifiers)
     }));
   // Equipment keyed by part label: one entry per non-severed part, empty or filled.
@@ -3275,6 +3278,77 @@ export async function handleDropCommand(db, username, row, col, message) {
   return { dropped: item.name };
 }
 
+// --- Plan 020a: consumables + the effects-walker ---------------------------
+// applyItemEffect dispatches ONE on_use effect to the SAME shared primitives that
+// skills use (healUser / addStatusEffect / clearOneHarmfulEffect), so a potion and
+// an ability resolve through one path. 020c/d add more effect kinds here.
+async function applyItemEffect(db, ctx, effect) {
+  if (!effect || typeof effect !== 'object') {
+    return;
+  }
+  switch (effect.kind) {
+    case 'heal':
+      await healUser(db, ctx.username, Number(effect.amount) || 0, ctx.row, ctx.col);
+      return;
+    case 'status':
+      await addStatusEffect(db, {
+        username: ctx.username,
+        source: ctx.username,
+        effectType: effect.type,
+        magnitude: Number(effect.magnitude) || 1,
+        currentTick: ctx.currentTick,
+        duration: Number(effect.duration) || 1,
+        row: ctx.row,
+        col: ctx.col
+      });
+      return;
+    case 'clear_status':
+      await clearOneHarmfulEffect(db, ctx.username);
+      return;
+    default:
+      return; // gear-time kinds (stat / grant_ability / affinity) don't fire on use
+  }
+}
+
+async function findOwnedConsumable(db, username, itemName) {
+  return dbFirst(
+    db,
+    `SELECT id, templateId, name, quantity FROM items
+     WHERE ownerUsername = ? AND equippedPartId IS NULL AND roomRow IS NULL AND roomCol IS NULL
+       AND LOWER(name) = LOWER(?)
+     ORDER BY id ASC LIMIT 1`,
+    [username, itemName]
+  );
+}
+
+export async function useItem(db, username, itemName, row, col) {
+  const item = await findOwnedConsumable(db, username, itemName);
+  assertAction(item, `You are not carrying ${itemName}.`, 404);
+  assertAction(getItemCategory(item.templateId) === 'consumable', `${item.name} cannot be used.`, 400);
+  const template = getTemplate(item.templateId);
+  const currentTick = await getCurrentTickValue(db);
+  for (const effect of (template.onUse || [])) {
+    await applyItemEffect(db, { username, row, col, currentTick }, effect);
+  }
+  // Consume one charge from the stack; delete the row when the last is used.
+  if (Number(item.quantity || 1) > 1) {
+    await dbRun(db, 'UPDATE items SET quantity = quantity - 1 WHERE id = ?', [item.id]);
+  } else {
+    await dbRun(db, 'DELETE FROM items WHERE id = ?', [item.id]);
+  }
+  const message = `${username} uses ${item.name}.`;
+  await insertSystemMessage(db, row, col, message, 'support');
+  return { used: item.name, message };
+}
+
+export async function handleUseCommand(db, username, row, col, message) {
+  const rest = commandRest(message, '/use');
+  if (!rest) {
+    throw new ActionError('Use /use <item name>.');
+  }
+  return useItem(db, username, rest, row, col);
+}
+
 // Space-separated stance keys for usage/error messages, e.g. "standing,
 // aggressive, guarding, crouched".
 function stanceOptionList() {
@@ -3509,6 +3583,15 @@ export async function handleChatAction(db, username, row, col, message) {
       username,
       staminaCost: 1,
       perform: async () => handleDropCommand(db, username, row, col, message),
+      advanceTick: () => advanceGlobalTick(db)
+    });
+  }
+
+  if (message.trim().toLowerCase().startsWith('/use')) {
+    return runPlayerAction(db, {
+      username,
+      staminaCost: 1,
+      perform: async () => handleUseCommand(db, username, row, col, message),
       advanceTick: () => advanceGlobalTick(db)
     });
   }

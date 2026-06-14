@@ -149,12 +149,17 @@
         return row(label, `${escapeHtml(itemName)} ${actionButton('unequip', label, 'unequip', canAct)}`);
       });
 
-      // Carried inventory. Each item gets equip + drop.
+      // Carried inventory. Consumables (plan 020a) get use + drop; gear gets equip + drop.
       const inventory = data.inventory || [];
       const inventoryHtml = inventory.length
         ? `<ul class="inventory-list">${inventory.map(item => {
-            const meta = `${escapeHtml(item.name)} [${escapeHtml(item.slotType)}]${escapeHtml(itemModText(item.modifiers))}`;
-            const actions = `${actionButton('equip', item.name, 'equip', canAct)}${actionButton('drop', item.name, 'drop', canAct)}`;
+            const isConsumable = item.category === 'consumable';
+            const qty = Number(item.quantity || 1) > 1 ? ` ×${escapeHtml(item.quantity)}` : '';
+            const meta = `${escapeHtml(item.name)}${qty} [${escapeHtml(isConsumable ? 'consumable' : item.slotType)}]${escapeHtml(itemModText(item.modifiers))}`;
+            const primary = isConsumable
+              ? actionButton('use', item.name, 'use', canAct)
+              : actionButton('equip', item.name, 'equip', canAct);
+            const actions = `${primary}${actionButton('drop', item.name, 'drop', canAct)}`;
             return `<li>${meta} ${actions}</li>`;
           }).join('')}</ul>`
         : '<p>Nothing carried.</p>';

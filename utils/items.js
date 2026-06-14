@@ -43,7 +43,7 @@ const ITEM_TEMPLATES = [
   // (dropWeight 0); names must stay byte-identical to the catalog.
   { templateId: 'dented_helm', name: 'Dented Helm', slotType: 'head', rarity: 'shop', modifiers: { maxHealth: 3 }, dropWeight: 0 },
   { templateId: 'tin_flask', name: 'Tin Flask', slotType: 'trinket', rarity: 'shop', modifiers: { maxStamina: 5 }, dropWeight: 0 },
-  { templateId: 'salted_bread', name: 'Salted Bread', slotType: 'trinket', rarity: 'shop', modifiers: { maxHealth: 3 }, dropWeight: 0 },
+  { templateId: 'salted_bread', name: 'Salted Bread', slotType: 'consumable', category: 'consumable', rarity: 'shop', modifiers: {}, onUse: [{ kind: 'heal', amount: 8 }], dropWeight: 0 },
   { templateId: 'red_thread', name: 'Red Thread', slotType: 'trinket', rarity: 'shop', modifiers: { speed: 1, maxHealth: -3 }, dropWeight: 0 },
   { templateId: 'chipped_knife', name: 'Chipped Knife', slotType: 'hand', rarity: 'shop', modifiers: { strength: 1 }, dropWeight: 0 },
   { templateId: 'blue_candle', name: 'Blue Candle', slotType: 'hand', rarity: 'shop', modifiers: { intelligence: 1 }, dropWeight: 0 },
@@ -52,7 +52,13 @@ const ITEM_TEMPLATES = [
   // Survey the room. `grantsAbility` references an id in utils/abilities.js.
   { templateId: 'old_map_scrap', name: 'Old Map Scrap', slotType: 'hand', rarity: 'shop', modifiers: { speed: 1 }, grantsAbility: 'survey', dropWeight: 0 },
   { templateId: 'bone_charm', name: 'Bone Charm', slotType: 'trinket', rarity: 'shop', modifiers: { strength: 1, intelligence: 1 }, dropWeight: 0 },
-  { templateId: 'copper_bell', name: 'Copper Bell', slotType: 'trinket', rarity: 'shop', modifiers: { maxStamina: 10, speed: -1 }, dropWeight: 0 }
+  { templateId: 'copper_bell', name: 'Copper Bell', slotType: 'trinket', rarity: 'shop', modifiers: { maxStamina: 10, speed: -1 }, dropWeight: 0 },
+
+  // Plan 020a: consumables — category 'consumable' (not equippable); `/use` runs
+  // `onUse` effects, then a charge is consumed. Drop from the common pool (appended
+  // after the gear so the weighted pick's first-common stays Rusty Knife).
+  { templateId: 'heal_potion', name: 'Healing Draught', slotType: 'consumable', category: 'consumable', rarity: 'common', modifiers: {}, onUse: [{ kind: 'heal', amount: 12 }], dropWeight: 2 },
+  { templateId: 'antidote', name: 'Antidote', slotType: 'consumable', category: 'consumable', rarity: 'common', modifiers: {}, onUse: [{ kind: 'clear_status' }], dropWeight: 1 }
 ];
 
 const SIGNATURE_ITEMS_BY_JOB = {
@@ -76,6 +82,12 @@ const NPC_DROP_TABLE = {
 
 function getTemplate(templateId) {
   return ITEM_TEMPLATES.find(template => template.templateId === templateId) || null;
+}
+
+// An item's category is a template property; absent = plain equippable 'gear'.
+function getItemCategory(templateId) {
+  const template = getTemplate(templateId);
+  return (template && template.category) || 'gear';
 }
 
 // Roll a drop for a defeated NPC. Consumes EXACTLY two random() values when an
@@ -110,5 +122,6 @@ module.exports = {
   SIGNATURE_ITEMS_BY_JOB,
   NPC_DROP_TABLE,
   getTemplate,
+  getItemCategory,
   rollNpcDrop
 };
