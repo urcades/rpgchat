@@ -38,6 +38,12 @@ const ITEM_TEMPLATES = [
   { templateId: 'frostbitten_fang', name: 'Frostbitten Fang', slotType: 'hand', rarity: 'rare', modifiers: { strength: 3 }, dropWeight: 1 },
   { templateId: 'coldlight_circlet', name: 'Coldlight Circlet', slotType: 'head', rarity: 'rare', modifiers: { intelligence: 3 }, dropWeight: 1 },
 
+  // Plan 020b: skill-granting gear — equip to borrow another class's ability
+  // (018c's grantsAbility). Appended so the weighted pick's first-rare is unchanged.
+  { templateId: 'venom_fang', name: 'Venom Fang', slotType: 'hand', rarity: 'rare', modifiers: { speed: 1 }, grantsAbility: 'mark', dropWeight: 1 },
+  { templateId: 'acolytes_censer', name: "Acolyte's Censer", slotType: 'trinket', rarity: 'rare', modifiers: { intelligence: 1 }, grantsAbility: 'bless', dropWeight: 1 },
+  { templateId: 'spark_focus', name: 'Spark Focus', slotType: 'hand', rarity: 'rare', modifiers: { intelligence: 1 }, grantsAbility: 'arcane_pin', dropWeight: 1 },
+
   // Plan 007: shop stock — one per SHOP_ITEM_CATALOG name (utils/roomEcology.js).
   // The economy floor: cheap, modest gear bought via /buy. Never drops
   // (dropWeight 0); names must stay byte-identical to the catalog.
