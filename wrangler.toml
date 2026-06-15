@@ -20,6 +20,12 @@ migrations_dir = "migrations"
 name = "ROOMS"
 class_name = "RoomObject"
 
+# Plan 013: Workers AI binding for NPC dialogue. Optional — the generator is
+# fallback-first, so the worker runs (with canned NPC lines) even if this account
+# has not enabled Workers AI yet.
+[ai]
+binding = "AI"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RoomObject"]

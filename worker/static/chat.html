@@ -106,7 +106,8 @@
       support: 'support-message',
       combat: 'speed-message',
       death: 'death-message',
-      rite: 'rite-message'
+      rite: 'rite-message',
+      npc: 'npc-message'
     };
 
     // legacy fallback for rows written before the kind column
@@ -194,12 +195,17 @@
         return messageElement;
       }
 
+      // Plan 013a: NPC-authored lines (kind 'npc') render by displayName and get the
+      // npc styling; targeting still uses the raw username key.
+      if (msg.kind === 'npc') {
+        messageElement.classList.add('npc-message');
+      }
       const activeStatuses = (msg.statusEffects || []).map(getStatusLabel);
       setText(messageElement, `${msg.timestamp} - `);
       const username = document.createElement('button');
       username.type = 'button';
       username.className = 'message-username';
-      username.textContent = msg.username;
+      username.textContent = msg.displayName || msg.username;
       username.addEventListener('click', () => selectTarget(msg.username));
       messageElement.appendChild(username);
       if (msg.job) {

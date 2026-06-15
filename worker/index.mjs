@@ -35,6 +35,7 @@ import {
   requireRoomUse,
   roomHasActiveHostiles,
   runHostileRoomAction,
+  runNpcReply,
   runScheduledWorldPulse,
   updatePresence,
   validateMovement,
@@ -273,6 +274,14 @@ async function startHostileLoopIfNeeded(env, row, col) {
   }
   const stub = env.ROOMS.getByName(roomName(row, col));
   await stub.fetch(new Request(`https://room.local/hostiles/${row}/${col}/start`, { method: 'POST' }));
+}
+
+// Plan 013a: ask the room's Durable Object to let an NPC react to what a player just
+// said. The DO owns env.AI (the model is never touched in a route's latency path) and
+// owns broadcast + per-room serialization. Fire-and-forget from runAfterResponse.
+async function npcReactInRoom(env, row, col) {
+  const stub = env.ROOMS.getByName(roomName(row, col));
+  await stub.fetch(new Request(`https://room.local/npc-react/${row}/${col}`, { method: 'POST' }));
 }
 
 async function wakeActiveRooms(env, pulse) {
@@ -855,6 +864,11 @@ app.post('/chat/:row/:col', async c => {
     runAfterResponse(c, { action: 'chat', roomRow: row, roomCol: col }, async () => {
       const broadcast = await measureAsync(() => broadcastRoom(c.env, row, col, { type: 'message', username: auth.user.username, result }));
       const hostileLoop = await measureAsync(() => startHostileLoopIfNeeded(c.env, row, col));
+      // Plan 013a: after the player's line lands, give a present NPC a chance to answer.
+      // Skipped silently for a downed player's garbled whisper (no NPC banter mid-bleed-out).
+      if (!result || !result.garbled) {
+        await measureAsync(() => npcReactInRoom(c.env, row, col));
+      }
       logEvent({
         event: 'action.background',
         action: 'chat',
@@ -1064,6 +1078,24 @@ export class RoomObject extends DurableObject {
       const col = Number.parseInt(hostileMatch[2], 10);
       await this.ctx.storage.put('hostileRoom', { row, col });
       await this.ctx.storage.setAlarm(Date.now() + 5000);
+      return new Response('ok');
+    }
+
+    // Plan 013a: let an NPC react to what a player just said. The model (this.env.AI)
+    // is reached only here in the DO, never in a route's latency path; runNpcReply is
+    // fallback-first, so a missing/slow binding degrades to a canned line.
+    const npcReactMatch = url.pathname.match(/^\/npc-react\/(\d+)\/(\d+)$/);
+    if (npcReactMatch && request.method === 'POST') {
+      const row = Number.parseInt(npcReactMatch[1], 10);
+      const col = Number.parseInt(npcReactMatch[2], 10);
+      try {
+        const result = await runNpcReply(this.env.DB, this.env.AI, row, col);
+        if (result.spoke) {
+          await this.broadcast({ type: 'message', room: { row, col }, username: result.npc });
+        }
+      } catch (err) {
+        console.error('npc-react failed', err);
+      }
       return new Response('ok');
     }
 

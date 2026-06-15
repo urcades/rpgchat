@@ -329,6 +329,12 @@ a, button, input, select {
   color: #b00020;
 }
 
+/* Plan 013a: NPC dialogue — set apart from player chat, mossy and a touch wry. */
+.npc-message {
+  color: #5a6b3a;
+  font-style: italic;
+}
+
 /* Plan 023c: the bleeding-out state — a stark banner for the downed, and a marker
    on prone bystanders in the room presence line. */
 .bleeding-banner {

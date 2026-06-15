@@ -10,6 +10,7 @@ import recipesModule from '../utils/recipes.js';
 import { changes, dbAll, dbFirst, dbRun, lastInsertId } from './db.mjs';
 import { elapsedMs, logEvent, measureAsync, nowMs } from './observability.mjs';
 import { revivePlayer } from './resurrection.mjs';
+import { generateNpcResponse } from './npcVoice.mjs';
 
 const {
   JOBS,
@@ -95,6 +96,7 @@ const REGROW_STAMINA_COST = 20;
 const REGROW_EFFECT_TYPE = 'regrow';
 const HARMFUL_EFFECTS = new Set(['poison', 'arcane_pin', 'marked']);
 const AMBIENT_HOSTILE_RESPAWN_INTERVAL = 6;
+const NPC_VOICE_INTERVAL = 4; // Plan 013a: min ticks between NPC dialogue lines per room
 // Plan 023b: the incapacitated negative-HP band. At 0 HP a player falls
 // incapacitated (deathClock 0); further blows and the passive pulse drive the
 // clock down toward DEATH_FLOOR, at which point they truly die. A single blow of
@@ -1012,7 +1014,9 @@ export async function getMessages(db, row, col, tickValue = null) {
   const placeholders = usernames.map(() => '?').join(', ');
   const currentTick = tickValue === null ? await getCurrentTickValue(db) : tickValue;
   const [users, effects] = await Promise.all([
-    dbAll(db, `SELECT username, job FROM users WHERE username IN (${placeholders})`, usernames),
+    // Plan 013a: also fetch displayName so NPC-authored lines render as "Frost Wyrm",
+    // not the internal id; players still target by the raw username.
+    dbAll(db, `SELECT username, job, displayName FROM users WHERE username IN (${placeholders})`, usernames),
     dbAll(
       db,
       `SELECT username, effectType
@@ -1037,8 +1041,77 @@ export async function getMessages(db, row, col, tickValue = null) {
   return rows.map(row => ({
     ...row,
     job: usersByName.get(row.username)?.job || null,
+    displayName: usersByName.get(row.username)?.displayName || null,
     statusEffects: effectsByName.get(row.username) || []
   }));
+}
+
+// Plan 013a: an NPC reacts to what a human just said/did in this room. Runs ONLY with a
+// human present ("alive only when observed"), picks the addressed (or a present) NPC,
+// honors a per-room cooldown, and asks the injected `ai` (env.AI) for an ADVISORY
+// response. 013a uses only `speech`; 013c/d will consume `intent`/`request`. The model
+// never mutates game state — this only inserts a chat line, so a prompt-injection can at
+// worst make an NPC say something odd. Returns { spoke, npc?, speech?, intent?, request? }.
+export async function runNpcReply(db, ai, row, col) {
+  const worldDay = getWorldDay();
+  const currentTick = await getCurrentTickValue(db);
+  const presence = await getRoomPresence(db, row, col, worldDay);
+  const npcs = presence.filter(p => p.isNpc);
+  const humans = presence.filter(p => !p.isNpc);
+  if (humans.length === 0 || npcs.length === 0) {
+    return { spoke: false };
+  }
+
+  const recent = await getMessages(db, row, col, currentTick);
+  if (recent.length === 0) {
+    return { spoke: false };
+  }
+  // Only react when the LAST room line is a human's (they just spoke); never pile onto
+  // an NPC's own line, which prevents NPC↔NPC reply loops on this reactive path.
+  const last = recent[recent.length - 1];
+  const lastIsHuman = last.username && last.username !== 'System' && !npcs.some(n => n.username === last.username);
+  if (!lastIsHuman) {
+    return { spoke: false };
+  }
+
+  const cooldown = await dbFirst(
+    db,
+    `SELECT lastAppliedTick FROM roomEffectCooldowns
+     WHERE username = '__npc_voice' AND roomRow = ? AND roomCol = ? AND effectType = 'npc_voice' AND worldDay = ?`,
+    [row, col, worldDay]
+  );
+  if (!shouldApplyEffect({ currentTick, lastAppliedTick: cooldown ? cooldown.lastAppliedTick : null, interval: NPC_VOICE_INTERVAL })) {
+    return { spoke: false };
+  }
+
+  // Responder: an NPC named in the human's line, else a present NPC at random.
+  const text = String(last.message || '').toLowerCase();
+  const addressed = npcs.find(n => (n.displayName && text.includes(String(n.displayName).toLowerCase())) || text.includes(String(n.username).toLowerCase()));
+  const speaker = addressed || npcs[Math.floor(Math.random() * npcs.length)];
+  if (!speaker) {
+    return { spoke: false };
+  }
+
+  const ecology = await getRoomEcology(db, speaker.username, row, col, worldDay, currentTick);
+  const response = await generateNpcResponse(ai, {
+    npc: {
+      displayName: speaker.displayName || speaker.username,
+      npcKind: speaker.npcKind,
+      role: speaker.role || speaker.npcKind,
+      disposition: speaker.disposition
+    },
+    roomDescription: ecology.description,
+    recentMessages: recent.slice(-6),
+    addressedBy: last.displayName || last.username,
+    mode: 'reply'
+  });
+  if (!response.speech) {
+    return { spoke: false };
+  }
+
+  await insertMessage(db, row, col, speaker.username, response.speech, 'npc');
+  await upsertCooldown(db, '__npc_voice', row, col, 'npc_voice', currentTick, worldDay);
+  return { spoke: true, npc: speaker.username, speech: response.speech, intent: response.intent, request: response.request };
 }
 
 export async function assertEnoughStamina(db, username, cost = 1) {
