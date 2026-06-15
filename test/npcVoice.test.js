@@ -42,6 +42,22 @@ test('Plan 013a: an over-long line is TRUNCATED (not discarded); an AI tell fall
   assert.ok(m.FALLBACK_LINES.patron.includes(tell.speech), 'AI tell -> fallback');
 });
 
+test('Plan 013a: an already-parsed OBJECT response is accepted (the real Workers AI shape)', async () => {
+  const m = await import('../worker/npcVoice.mjs');
+  // env.AI.run returns `response` as a parsed object when the model emits JSON. This was
+  // the production bug: the object form hit the string-only guard and fell back every time.
+  const obj = m.parseNpcResponse({ speech: 'Just dwarves arguing over ale prices.', intent: 'wary', request: 'none' }, 'bartender');
+  assert.equal(obj.speech, 'Just dwarves arguing over ale prices.');
+  assert.equal(obj.intent, 'wary');
+  assert.ok(!m.FALLBACK_LINES.bartender.includes(obj.speech), 'a real object line is kept, not canned');
+
+  // And via the full generator with a stub returning the object form.
+  const ai = { run: async () => ({ response: { speech: 'Mind the ale, friend.', intent: 'friendly', request: 'none' } }) };
+  const r = await m.generateNpcResponse(ai, { npc: { role: 'bartender', displayName: 'Hask' } });
+  assert.equal(r.speech, 'Mind the ale, friend.');
+  assert.equal(r.source, 'model');
+});
+
 test('Plan 013a: model output is salvaged from fenced / imperfect JSON', async () => {
   const m = await import('../worker/npcVoice.mjs');
   const fenced = m.parseNpcResponse('```json\n{"speech":"Mind the step, friend.","intent":"friendly","request":"none"}\n```', 'bartender');

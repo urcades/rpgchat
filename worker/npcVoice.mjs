@@ -88,7 +88,34 @@ export function buildNpcPrompt({ npc, roomDescription, recentMessages, addressed
 
 const INJECTION_TELL = /\b(as an ai|language model|system prompt|i cannot|i can't help|instruction)\b/i;
 
+// Shared tail: clean the speech, reject only genuinely-unusable output (empty / AI tell),
+// truncate an over-long-but-fine line rather than discard it.
+function finalizeSpeech(speech, intent, request, role) {
+  if (speech == null) {
+    return { speech: pickFallback(role), intent, request };
+  }
+  let s = String(speech).replace(/\s+/g, ' ').replace(/^["'\s]+|["'\s]+$/g, '').trim();
+  if (!s || INJECTION_TELL.test(s)) {
+    return { speech: pickFallback(role), intent, request };
+  }
+  if (s.length > MAX_LINE_LENGTH) {
+    s = `${s.slice(0, MAX_LINE_LENGTH - 1).trimEnd()}…`;
+  }
+  return { speech: s, intent, request };
+}
+
 export function parseNpcResponse(raw, role) {
+  // Workers AI returns `response` already parsed into an OBJECT when the model emits JSON
+  // (not a string). This was THE bug behind 100% canned lines: an object response hit the
+  // string-only guard below and fell back every single time. Handle the object form first.
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    return finalizeSpeech(
+      typeof raw.speech === 'string' ? raw.speech : null,
+      VALID_INTENTS.has(raw.intent) ? raw.intent : 'wary',
+      VALID_REQUESTS.has(raw.request) ? raw.request : 'none',
+      role
+    );
+  }
   if (typeof raw !== 'string') {
     return { speech: pickFallback(role), intent: 'wary', request: 'none' };
   }
