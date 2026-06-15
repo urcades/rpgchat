@@ -1308,6 +1308,19 @@ async function isIncapacitated(db, username) {
   return Boolean(u && u.incapacitated);
 }
 
+// Plan 023c: an incapacitated voice. A downed player can still speak, but the words
+// come out in ragged fragments — only ~every fourth survives, the rest collapse into
+// an ellipsis ("please … … help … …"). Deterministic by position so it is testable
+// and never RNG-flaky.
+export function garbleSpeech(text) {
+  const words = String(text || '').trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) {
+    return '…';
+  }
+  const kept = words.map((word, index) => (index % 4 === 0 ? word : '…'));
+  return kept.join(' ').replace(/(?:…\s*){2,}/g, '… ').trim();
+}
+
 function getKillerFromCause(cause) {
   const match = String(cause || '').match(/\bby\s+(.+)$/);
   return match ? match[1].trim() : null;
@@ -4286,6 +4299,15 @@ export async function handleChatAction(db, username, row, col, message) {
       perform: async () => handleBuyCommand(db, username, row, col, message),
       advanceTick: () => advanceGlobalTick(db)
     });
+  }
+
+  // Plan 023c: a downed player's plea comes out broken — garbled, and free of the
+  // usual stamina/gold/XP/tick machinery (a dying breath doesn't farm or move the
+  // world). The banner + garbling carry the pathos.
+  if (downed) {
+    const garbled = garbleSpeech(message);
+    await insertMessage(db, row, col, username, garbled, 'rite');
+    return { message: garbled, garbled: true };
   }
 
   return runPlayerAction(db, {

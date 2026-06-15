@@ -61,6 +61,7 @@
     let currentSkills = [];
     let currentJob = 'Novice';
     let selectedTarget = '';
+    let incapacitated = false; // Plan 023c: when down, only the chat input stays live
 
     const pathParts = window.location.pathname.split('/');
     const row = pathParts[2];
@@ -242,8 +243,15 @@
       const effective = data.effectiveStats || data;
       currentSkill = data.skill || null;
       currentJob = data.job || 'Novice';
+      incapacitated = !!data.incapacitated; // Plan 023b/c
       document.getElementById('character-link').textContent = data.displayName || data.username || 'Status';
+      // Plan 023c: a downed player gets a stark banner instead of a stat block — they
+      // are bleeding out, and can do nothing but whisper while the clock ticks down.
+      const banner = incapacitated
+        ? `<p class="bleeding-banner">YOU ARE BLEEDING OUT — ${data.deathClock ?? 0} / -30. You can only whisper.</p>`
+        : '';
       attributesDiv.innerHTML = `
+        ${banner}
         <p>${data.job || 'Novice'} ~ Level ${data.level}</p>
         <p>Health: ${effective.health}/${effective.maxHealth}</p>
         <p>Stamina: ${effective.stamina}/${effective.maxStamina}</p>
@@ -256,6 +264,11 @@
       // data.skill until then) and the stance toggle, replacing the old dropdown.
       renderSkillBar(data.skills || (currentSkill ? [currentSkill] : []));
       renderStanceBar(data.stance || 'standing');
+      // Plan 023c: the downed can't fight, skill, or shift stance — only speak.
+      const attackButton = document.getElementById('attack-button');
+      if (attackButton) {
+        attackButton.disabled = incapacitated;
+      }
       const jobSelect = document.getElementById('job-select');
       if (jobSelect) {
         Array.from(jobSelect.options).forEach(option => {
@@ -326,6 +339,13 @@
         button.textContent = player.displayName || player.username;
         button.addEventListener('click', () => selectTarget(player.username));
         paragraph.appendChild(button);
+        // Plan 023c: a fallen body is marked prone so the room can see who to help — or finish.
+        if (player.incapacitated) {
+          const marker = document.createElement('span');
+          marker.className = 'prone-marker';
+          marker.textContent = ' (prone, bleeding)';
+          paragraph.appendChild(marker);
+        }
       });
       parent.appendChild(paragraph);
       return paragraph;
@@ -621,6 +641,7 @@
         button.className = 'skill-slot';
         button.textContent = skill.label;
         button.title = getSkillTooltip(skill);
+        button.disabled = incapacitated; // Plan 023c
         button.addEventListener('click', () => fireSkill(skill.id));
         bar.appendChild(button);
       });
@@ -636,6 +657,7 @@
         button.type = 'button';
         button.className = name === currentStance ? 'stance-slot stance-active' : 'stance-slot';
         button.textContent = name.replace(/^\w/, c => c.toUpperCase());
+        button.disabled = incapacitated; // Plan 023c
         button.addEventListener('click', () => setStance(name));
         bar.appendChild(button);
       });
