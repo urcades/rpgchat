@@ -104,6 +104,7 @@ const DEATH_FLOOR = -30;
 const INCAP_BLEED_PER_PULSE = 3; // ~10-minute window at one cron pulse/min
 const GIB_OVERKILL = 15;
 const INCAP_BLOW_MIN = 5;
+const REVIVE_HEAL_AMOUNT = 12; // Plan 023d: HP a Cleric's revive restores when lifting a downed ally
 const PASSIVE_EFFECT_TYPES = new Set([
   'pub',
   'inn',
@@ -3665,10 +3666,28 @@ export async function runAbility(db, abilityId, { username, effectiveActor, targ
       return { message };
     }
     case 'revive': {
-      // Plan 011: revive a fallen ally whose corpse lies in this room. The corpse
-      // (the 022c anchor) must still exist here; revivePlayer restores them from
-      // the grave and consumes it.
       assertAction(target && target !== username, 'Name the fallen ally to revive.', 400);
+      // Plan 023d: the Cleric's real-time window. If the ally is DOWNED (incapacitated)
+      // and still here, lift them — no corpse needed, they aren't dead yet. Healing
+      // above 0 trips reviveFromIncapacitation, standing them back up. This is the free
+      // in-game path; Stripe (createResurrectionCheckout) stays the post-DEATH, corpse-
+      // gated path, so the two no longer overlap.
+      const downed = await dbFirst(
+        db,
+        `SELECT u.username FROM users u
+         JOIN roomPresence rp ON rp.username = u.username
+         WHERE u.username = ? AND u.incapacitated = 1 AND rp.roomRow = ? AND rp.roomCol = ?`,
+        [target, row, col]
+      );
+      if (downed) {
+        const downedUser = await getUser(db, target, 'Target');
+        await applyBodyHeal(db, downedUser, REVIVE_HEAL_AMOUNT, { row, col });
+        const message = `${username} pulls ${target} back from the brink!`;
+        await insertSystemMessage(db, row, col, message, 'support');
+        return { message, revived: target, fromBrink: true };
+      }
+      // Plan 011: otherwise, raise a truly-dead ally whose corpse (the 022c anchor)
+      // lies in this room; revivePlayer restores them from the grave and consumes it.
       const corpse = await dbFirst(
         db,
         'SELECT id FROM items WHERE corpseOf = ? AND roomRow = ? AND roomCol = ?',
