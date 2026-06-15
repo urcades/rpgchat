@@ -606,18 +606,22 @@ const SOCIAL_NAME_POOLS = {
   barmaid: ['Sil', 'Mara', 'Joss'],
   patron: ['a sodden regular', 'a hooded drinker', 'a quiet dicer'],
   guard: ['Bren', 'Tovin', 'the house guard'],
-  clerk: ['Auria', 'the guild clerk']
+  clerk: ['Auria', 'the guild clerk'],
+  healer: ['Sister Maeve', 'Brother Aldric', 'a robed acolyte']
 };
 const SOCIAL_ROSTERS = {
   tavern: [
     { role: 'bartender', job: 'Fighter', disposition: 'neutral', level: 3 },
     { role: 'barmaid', job: 'Novice', disposition: 'friendly', level: 1 },
     { role: 'patron', job: 'Novice', disposition: 'friendly', level: 1 },
-    { role: 'guard', job: 'Fighter', disposition: 'neutral', level: 4 }
+    { role: 'guard', job: 'Fighter', disposition: 'neutral', level: 4 },
+    // Plan 013d: a kindly cleric nursing an ale — can raise you if asked (and able).
+    { role: 'healer', job: 'Cleric', disposition: 'friendly', level: 3 }
   ],
   guild: [
     { role: 'clerk', job: 'Novice', disposition: 'friendly', level: 1 },
-    { role: 'guard', job: 'Fighter', disposition: 'neutral', level: 4 }
+    { role: 'guard', job: 'Fighter', disposition: 'neutral', level: 4 },
+    { role: 'healer', job: 'Cleric', disposition: 'friendly', level: 3 }
   ]
 };
 
@@ -1155,6 +1159,18 @@ export function classifyHostileText(text) {
   return HOSTILE_SPEECH.test(String(text || ''));
 }
 
+// Plan 013d: the model-absent floor for a plea. The model also flags request:'heal' for
+// subtler asks; this catches the overt ones (and survives a downed player's garbled cry).
+const HELP_REQUEST = /\b(help|heal|save|revive|raise me|mercy|don'?t let me die|please)\b/i;
+export function classifyHelpRequest(text) {
+  return HELP_REQUEST.test(String(text || ''));
+}
+
+// Plan 013d: does this NPC's JOB grant a revival rite? (An NPC Cleric carries 'revive'.)
+function npcCanRevive(job) {
+  return (abilitiesModule.getAbilitiesForJob(job) || []).some(ability => ability.id === 'revive');
+}
+
 // Plan 013c: aggression turns the room. Every present non-hostile social NPC flips to
 // hostile — the whole pub jumps you — and the caller's hostile loop wakes the fight.
 // Returns { provoked, names }.
@@ -1248,7 +1264,36 @@ export async function runNpcReply(db, ai, row, col) {
   if (response.intent === 'hostile' || classifyHostileText(last.message)) {
     provoked = (await provokeRoomNpcs(db, row, col)).provoked;
   }
-  return { spoke: true, npc: speaker.username, speech: response.speech, intent: response.intent, request: response.request, provoked };
+
+  // Plan 013d: a plea for help. If the asker is DOWNED and a friendly NPC present can
+  // revive (a Cleric's rite), the engine runs it — the NPC only ever ASKS via intent;
+  // the deterministic engine gates it on disposition + ability + the target being down.
+  // This closes the loop with 023's incapacitation window: ask nicely, get raised.
+  let helped = null;
+  if (!provoked && (response.request === 'heal' || classifyHelpRequest(last.message))) {
+    const asker = await dbFirst(db, 'SELECT username, incapacitated FROM users WHERE username = ? AND isNpc = 0', [last.username]);
+    if (asker && asker.incapacitated) {
+      const healer = npcs.find(n => n.disposition !== 'hostile' && n.job && npcCanRevive(n.job));
+      if (healer) {
+        try {
+          const healerRow = await dbFirst(db, 'SELECT * FROM users WHERE username = ?', [healer.username]);
+          await runAbility(db, 'revive', {
+            username: healer.displayName || healer.username,
+            effectiveActor: getEffectiveUser(healerRow),
+            target: asker.username,
+            row,
+            col,
+            currentTick
+          });
+          helped = { by: healer.username, action: 'revive', target: asker.username };
+        } catch {
+          // Gated/failed (e.g. target rose already) — the NPC simply couldn't; no-op.
+        }
+      }
+    }
+  }
+
+  return { spoke: true, npc: speaker.username, speech: response.speech, intent: response.intent, request: response.request, provoked, helped };
 }
 
 export async function assertEnoughStamina(db, username, cost = 1) {

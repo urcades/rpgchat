@@ -27,7 +27,8 @@ export const FALLBACK_LINES = {
   barmaid: ['*weaves between the crowded tables*', 'Mind yourself tonight, love.', 'Busy night, this.'],
   patron: ['*nurses a warm drink*', 'Strange weather, lately.', '*mutters into their cup*'],
   guard: ['*rests a hand on the pommel*', 'Keep it civil in here.', '*watches the door*'],
-  traveler: ['*adjusts a heavy pack*', 'Long road behind me.', 'You headed north too?']
+  traveler: ['*adjusts a heavy pack*', 'Long road behind me.', 'You headed north too?'],
+  healer: ['*murmurs a small blessing*', 'Be still — let me see the wound.', 'The light is patient.']
 };
 
 const ROLE_DEMEANOR = {
@@ -39,7 +40,8 @@ const ROLE_DEMEANOR = {
   barmaid: 'a quick-witted serving hand — warm, teasing, busy',
   patron: 'a tavern regular — gossipy, a little drunk',
   guard: 'a watchful guard — calm, firm, slow to anger but decisive',
-  traveler: 'a road-worn wanderer — curious, guarded'
+  traveler: 'a road-worn wanderer — curious, guarded',
+  healer: 'a soft-spoken cleric — kind, grave, quick to aid the hurt'
 };
 
 export function fallbackFor(role) {

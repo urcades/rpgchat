@@ -872,10 +872,9 @@ app.post('/chat/:row/:col', async c => {
       const broadcast = await measureAsync(() => broadcastRoom(c.env, row, col, { type: 'message', username: auth.user.username, result }));
       const hostileLoop = await measureAsync(() => startHostileLoopIfNeeded(c.env, row, col));
       // Plan 013a: after the player's line lands, give a present NPC a chance to answer.
-      // Skipped silently for a downed player's garbled whisper (no NPC banter mid-bleed-out).
-      if (!result || !result.garbled) {
-        await measureAsync(() => npcReactInRoom(c.env, row, col));
-      }
+      // Plan 013d: a downed player's garbled plea still reaches the room — a present
+      // cleric may piece it together and raise them (the engine gates the actual revive).
+      await measureAsync(() => npcReactInRoom(c.env, row, col));
       logEvent({
         event: 'action.background',
         action: 'chat',
