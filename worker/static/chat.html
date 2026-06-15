@@ -62,6 +62,7 @@
     let currentSkills = [];
     let currentJob = 'Novice';
     let selectedTarget = '';
+    let selectedTargetLabel = ''; // Plan 013e: display name for the hint/echo (selectedTarget stays the key)
     let incapacitated = false; // Plan 023c: when down, only the chat input stays live
 
     const pathParts = window.location.pathname.split('/');
@@ -207,7 +208,7 @@
       username.type = 'button';
       username.className = 'message-username';
       username.textContent = msg.displayName || msg.username;
-      username.addEventListener('click', () => selectTarget(msg.username));
+      username.addEventListener('click', () => selectTarget(msg.username, msg.displayName || msg.username));
       messageElement.appendChild(username);
       if (msg.job) {
         setText(messageElement, ` [${String(msg.job).toLowerCase()}]`);
@@ -343,7 +344,7 @@
         button.type = 'button';
         button.className = 'room-presence-target';
         button.textContent = player.displayName || player.username;
-        button.addEventListener('click', () => selectTarget(player.username));
+        button.addEventListener('click', () => selectTarget(player.username, player.displayName || player.username));
         paragraph.appendChild(button);
         // Plan 023c: a fallen body is marked prone so the room can see who to help — or finish.
         if (player.incapacitated) {
@@ -551,19 +552,21 @@
     function updateTargetHint() {
       const messageInput = document.getElementById('message');
       const clearTargetButton = document.getElementById('clear-target');
-      messageInput.placeholder = selectedTarget ? `Currently targeting ${selectedTarget}` : 'Message';
+      messageInput.placeholder = selectedTarget ? `Currently targeting ${selectedTargetLabel || selectedTarget}` : 'Message';
       clearTargetButton.style.display = selectedTarget ? 'inline-block' : 'none';
       clearTargetButton.textContent = 'Untarget';
     }
 
-    function selectTarget(username) {
+    function selectTarget(username, label) {
       selectedTarget = username;
+      selectedTargetLabel = label || username; // Plan 013e: show the name, not the soc:… id
       updateTargetHint();
       document.getElementById('message').focus();
     }
 
     function clearTarget() {
       selectedTarget = '';
+      selectedTargetLabel = '';
       updateTargetHint();
       document.getElementById('message').focus();
     }
@@ -578,14 +581,20 @@
       if (!attack) {
         return message;
       }
-      const target = getMentionTarget(trimmed) || selectedTarget;
-      if (!target) {
+      // If the player typed an explicit @mention, respect it. Otherwise fall back to the
+      // selected target — appended by its DISPLAY NAME (Plan 013e), which the server now
+      // resolves, so the echoed line reads "attack Sil" not "@soc:…:barmaid:1".
+      if (getMentionTarget(trimmed)) {
         return message;
       }
-      if (trimmed.includes(target)) {
+      if (!selectedTarget) {
         return message;
       }
-      return trimmed ? `${trimmed} @${target}` : `@${target}`;
+      const label = selectedTargetLabel || selectedTarget;
+      if (trimmed.toLowerCase().includes(label.toLowerCase())) {
+        return message;
+      }
+      return trimmed ? `${trimmed} ${label}` : label;
     }
 
     function postForm(endpoint, body, onSuccess) {

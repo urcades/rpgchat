@@ -481,7 +481,8 @@ test('room toolbar renders present players as quick target buttons', async () =>
   assert.ok(targetButton);
   targetButton.listeners.click();
 
-  assert.equal(page.getElement('message').placeholder, 'Currently targeting raid_boss_20260529');
+  // Plan 013e: the hint shows the DISPLAY NAME, not the opaque NPC id.
+  assert.equal(page.getElement('message').placeholder, 'Currently targeting Frost Wyrm');
   assert.equal(page.getElement('clear-target').textContent, 'Untarget');
 });
 
