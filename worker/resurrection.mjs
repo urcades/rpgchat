@@ -26,6 +26,31 @@ async function hasCorpse(db, username) {
   return Boolean(row);
 }
 
+// Plan 011: restore a dead player from their grave (a free, Cleric-driven revival).
+// Recreates the user, deletes the grave, consumes the corpse, clears the dead
+// session. No-op return when there's no grave. The caller (the Cleric ability) is
+// responsible for the corpse-in-room proximity check before calling this.
+export async function revivePlayer(db, username, row, col) {
+  const grave = await latestGrave(db, username);
+  if (!grave) {
+    return { revived: false, reason: 'no_grave' };
+  }
+  const liveUser = await dbFirst(db, 'SELECT username FROM users WHERE username = ?', [username]);
+  if (!liveUser) {
+    await dbRun(
+      db,
+      `INSERT INTO users
+        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold)
+       VALUES (?, ?, ?, 30, 30, 100, 100, 1, 1, 1, ?, ?)`,
+      [grave.username, grave.password || '', grave.job || 'Novice', grave.level || 0, grave.gold || 0]
+    );
+  }
+  await dbRun(db, 'DELETE FROM cemetery WHERE id = ?', [grave.id]);
+  await dbRun(db, 'DELETE FROM items WHERE corpseOf = ?', [username]);
+  await dbRun(db, 'UPDATE sessions SET username = ?, deadUsername = NULL WHERE deadUsername = ?', [username, username]);
+  return { revived: true, username };
+}
+
 export async function createResurrectionCheckout(db, username, paymentLinkUrl) {
   const grave = await latestGrave(db, username);
   if (!grave) {

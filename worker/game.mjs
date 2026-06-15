@@ -9,6 +9,7 @@ import progressionModule from '../utils/progressionGrid.js';
 import recipesModule from '../utils/recipes.js';
 import { changes, dbAll, dbFirst, dbRun, lastInsertId } from './db.mjs';
 import { elapsedMs, logEvent, measureAsync, nowMs } from './observability.mjs';
+import { revivePlayer } from './resurrection.mjs';
 
 const {
   JOBS,
@@ -3474,6 +3475,23 @@ export async function runAbility(db, abilityId, { username, effectiveActor, targ
       const message = `${username} braces, warding themselves for 3 ticks.`;
       await insertSystemMessage(db, row, col, message, 'support');
       return { message };
+    }
+    case 'revive': {
+      // Plan 011: revive a fallen ally whose corpse lies in this room. The corpse
+      // (the 022c anchor) must still exist here; revivePlayer restores them from
+      // the grave and consumes it.
+      assertAction(target && target !== username, 'Name the fallen ally to revive.', 400);
+      const corpse = await dbFirst(
+        db,
+        'SELECT id FROM items WHERE corpseOf = ? AND roomRow = ? AND roomCol = ?',
+        [target, row, col]
+      );
+      assertAction(corpse, `There is no corpse of ${target} here to revive.`, 404);
+      const result = await revivePlayer(db, target, row, col);
+      assertAction(result.revived, `${target} cannot be revived — their grave is gone.`, 400);
+      const message = `${username} revives ${target}!`;
+      await insertSystemMessage(db, row, col, message, 'support');
+      return { message, revived: target };
     }
     default:
       throw new ActionError('Unknown skill.');

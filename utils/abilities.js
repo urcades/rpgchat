@@ -84,6 +84,18 @@ const ABILITIES = {
     ]
   },
 
+  // Plan 011 — the Cleric's revival rite. Target 'corpse' skips the live-target
+  // check (the ally is dead); the behavior finds their corpse in the room and
+  // restores them from the grave (consuming the corpse). Ties into the 022c anchor.
+  revive: {
+    id: 'revive', label: 'Revive', kind: 'active', target: 'corpse', contest: false, costStamina: 3,
+    description: 'Call a fallen ally back from death — if their corpse still lies here.',
+    effects: [
+      "Revives a dead player whose corpse is in your room, restored from their grave.",
+      'Consumes the corpse. Fails if the corpse was destroyed (true death) or the grave is gone.'
+    ]
+  },
+
   // Plan 018b — a second active for the Fighter, proving multi-ability kits. Self
   // only (target 'self' skips external target validation); a weaker, shorter ward
   // than the Paladin's so the protector keeps the better version (no dominant meta).
@@ -140,7 +152,7 @@ const CLASS_ABILITIES = {
   Dungeoneer: ['survey'],
   Mage: ['arcane_pin'],
   Assassin: ['mark'],
-  Cleric: ['bless']
+  Cleric: ['bless', 'revive']
 };
 
 function getAbility(id) {
