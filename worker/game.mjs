@@ -1147,6 +1147,35 @@ export async function getMessages(db, row, col, tickValue = null) {
   }));
 }
 
+// Plan 013c: the model-absent floor for hostile speech. Overt threats/violence provoke
+// even with no Workers AI; the model catches the subtler cases (aggressive "rizz", veiled
+// menace) via its returned intent.
+const HOSTILE_SPEECH = /\b(kill|murder|die|gut|slit|stab|throttle|strangle|destroy you|attack(s|ing)?|i'?ll end|burn you)\b/i;
+export function classifyHostileText(text) {
+  return HOSTILE_SPEECH.test(String(text || ''));
+}
+
+// Plan 013c: aggression turns the room. Every present non-hostile social NPC flips to
+// hostile — the whole pub jumps you — and the caller's hostile loop wakes the fight.
+// Returns { provoked, names }.
+export async function provokeRoomNpcs(db, row, col, { deferredSystemMessages = null } = {}) {
+  const worldDay = getWorldDay();
+  const present = await getRoomPresence(db, row, col, worldDay);
+  const turning = present.filter(p => p.isNpc && p.npcKind === 'social' && p.disposition !== 'hostile');
+  if (turning.length === 0) {
+    return { provoked: 0, names: [] };
+  }
+  for (const npc of turning) {
+    await dbRun(db, "UPDATE users SET disposition = 'hostile' WHERE username = ?", [npc.username]);
+  }
+  const names = turning.map(n => n.displayName || n.username);
+  const message = names.length > 1
+    ? `${names[0]} and the others turn on you!`
+    : `${names[0]} turns hostile!`;
+  await emitSystemMessage(db, row, col, message, deferredSystemMessages, 'combat');
+  return { provoked: turning.length, names };
+}
+
 // Plan 013a: an NPC reacts to what a human just said/did in this room. Runs ONLY with a
 // human present ("alive only when observed"), picks the addressed (or a present) NPC,
 // honors a per-room cooldown, and asks the injected `ai` (env.AI) for an ADVISORY
@@ -1212,7 +1241,14 @@ export async function runNpcReply(db, ai, row, col) {
 
   await insertMessage(db, row, col, speaker.username, response.speech, 'npc');
   await upsertCooldown(db, '__npc_voice', row, col, 'npc_voice', currentTick, worldDay);
-  return { spoke: true, npc: speaker.username, speech: response.speech, intent: response.intent, request: response.request };
+
+  // Plan 013c: if the player's words read as hostile — the model's intent, or the
+  // keyword floor for the model-absent path — the room's social cast turns on them.
+  let provoked = 0;
+  if (response.intent === 'hostile' || classifyHostileText(last.message)) {
+    provoked = (await provokeRoomNpcs(db, row, col)).provoked;
+  }
+  return { spoke: true, npc: speaker.username, speech: response.speech, intent: response.intent, request: response.request, provoked };
 }
 
 export async function assertEnoughStamina(db, username, cost = 1) {
@@ -3539,6 +3575,13 @@ export async function handleAttack(db, username, message, row, col, options = {}
     }
 
     await createTrace(db, trace);
+
+    // Plan 013c: striking a non-hostile NPC turns it — and the rest of the room's social
+    // cast — hostile. The attack route's startHostileLoopIfNeeded (after this resolves)
+    // then wakes the fight, so the whole pub comes for you.
+    if (attackedUser.isNpc && attackedUser.disposition && attackedUser.disposition !== 'hostile') {
+      await provokeRoomNpcs(db, row, col, { deferredSystemMessages: options.deferredSystemMessages });
+    }
   }
 
   return `${message} (${attackMessages.join(', ')})`;

@@ -1100,6 +1100,12 @@ export class RoomObject extends DurableObject {
         if (result.spoke) {
           await this.broadcast({ type: 'message', room: { row, col }, username: result.npc });
         }
+        // Plan 013c: hostile speech can flip the room's NPCs — wake the combat loop so
+        // they actually come for the player.
+        if (result.provoked > 0) {
+          await this.ctx.storage.put('hostileRoom', { row, col });
+          await this.ctx.storage.setAlarm(Date.now() + 5000);
+        }
       } catch (err) {
         console.error('npc-react failed', err);
       }
