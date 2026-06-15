@@ -71,7 +71,16 @@ const ITEM_TEMPLATES = [
   // `onUse` effects, then a charge is consumed. Drop from the common pool (appended
   // after the gear so the weighted pick's first-common stays Rusty Knife).
   { templateId: 'heal_potion', name: 'Healing Draught', slotType: 'consumable', category: 'consumable', rarity: 'common', modifiers: {}, onUse: [{ kind: 'heal', amount: 12 }], dropWeight: 2 },
-  { templateId: 'antidote', name: 'Antidote', slotType: 'consumable', category: 'consumable', rarity: 'common', modifiers: {}, onUse: [{ kind: 'clear_status' }], dropWeight: 1 }
+  { templateId: 'antidote', name: 'Antidote', slotType: 'consumable', category: 'consumable', rarity: 'common', modifiers: {}, onUse: [{ kind: 'clear_status' }], dropWeight: 1 },
+
+  // Plan 020d: materia — socket into gear; while the host is equipped, inject the
+  // `materia` effect. Stat/affinity amounts scale with the materia's level (AP-grown).
+  // Appended last so the weighted-pick firsts (rusty_knife / wyrmscale_cloak) hold.
+  { templateId: 'power_materia', name: 'Power Materia', slotType: 'materia', category: 'materia', rarity: 'common', modifiers: {}, materia: { kind: 'stat', stat: 'strength', amount: 1 }, dropWeight: 2 },
+  { templateId: 'swift_materia', name: 'Swift Materia', slotType: 'materia', category: 'materia', rarity: 'common', modifiers: {}, materia: { kind: 'stat', stat: 'speed', amount: 1 }, dropWeight: 1 },
+  { templateId: 'mind_materia', name: 'Mind Materia', slotType: 'materia', category: 'materia', rarity: 'common', modifiers: {}, materia: { kind: 'stat', stat: 'intelligence', amount: 1 }, dropWeight: 1 },
+  { templateId: 'spell_materia', name: 'Spell Materia', slotType: 'materia', category: 'materia', rarity: 'rare', modifiers: {}, materia: { kind: 'grant_ability', abilityId: 'arcane_pin' }, dropWeight: 1 },
+  { templateId: 'guard_materia', name: 'Guard Materia', slotType: 'materia', category: 'materia', rarity: 'rare', modifiers: {}, materia: { kind: 'affinity', element: 'fire', amount: -0.25 }, dropWeight: 1 }
 ];
 
 const SIGNATURE_ITEMS_BY_JOB = {
@@ -101,6 +110,41 @@ function getTemplate(templateId) {
 function getItemCategory(templateId) {
   const template = getTemplate(templateId);
   return (template && template.category) || 'gear';
+}
+
+// Plan 020d — materia growth + sockets.
+const MATERIA_AP_THRESHOLDS = [0, 10, 30]; // AP needed for levels 1 / 2 / 3
+const SOCKETS_BY_RARITY = { rare: 2, common: 1 };
+
+function materiaLevelFromAp(ap) {
+  let level = 1;
+  for (let i = 1; i < MATERIA_AP_THRESHOLDS.length; i += 1) {
+    if ((ap || 0) >= MATERIA_AP_THRESHOLDS[i]) level = i + 1;
+  }
+  return level;
+}
+
+// A materia's effect at a given AP. Stat/affinity amounts scale with level;
+// grant_ability is level-independent. Returns null for non-materia templates.
+function getMateriaEffect(templateId, ap = 0) {
+  const template = getTemplate(templateId);
+  if (!template || !template.materia) return null;
+  const level = materiaLevelFromAp(ap);
+  const base = template.materia;
+  if (base.kind === 'stat') return { kind: 'stat', stat: base.stat, amount: (base.amount || 0) * level, level };
+  if (base.kind === 'affinity') return { kind: 'affinity', element: base.element, amount: (base.amount || 0) * level, level };
+  if (base.kind === 'grant_ability') return { kind: 'grant_ability', abilityId: base.abilityId, level };
+  return null;
+}
+
+// Socket count for a gear item: explicit template override, else by rarity. Only
+// gear (not consumables/materia/parts) carries sockets.
+function getItemSockets(templateId) {
+  const template = getTemplate(templateId);
+  if (!template) return 0;
+  if (Number.isFinite(template.sockets)) return template.sockets;
+  if ((template.category || 'gear') !== 'gear') return 0;
+  return SOCKETS_BY_RARITY[template.rarity] || 0;
 }
 
 // Roll a drop for a defeated NPC. Consumes EXACTLY two random() values when an
@@ -136,5 +180,8 @@ module.exports = {
   NPC_DROP_TABLE,
   getTemplate,
   getItemCategory,
+  materiaLevelFromAp,
+  getMateriaEffect,
+  getItemSockets,
   rollNpcDrop
 };

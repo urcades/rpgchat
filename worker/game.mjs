@@ -55,6 +55,8 @@ const {
   SIGNATURE_ITEMS_BY_JOB,
   getTemplate,
   getItemCategory,
+  getMateriaEffect,
+  getItemSockets,
   rollNpcDrop
 } = itemsModule;
 
@@ -760,17 +762,27 @@ export async function getUserState(db, username) {
     vital: Boolean(part.vital)
   }));
   const inventoryRows = await getInventory(db, username);
-  // Carried items only (equipped items show up under `equipment`).
+  // Carried items only — equipped show under `equipment`; socketed materia (plan
+  // 020d) live inside a host, not loose in the bag.
   const inventory = inventoryRows
-    .filter(row => row.equippedPartId === null || row.equippedPartId === undefined)
+    .filter(row => (row.equippedPartId === null || row.equippedPartId === undefined) && !row.socketedInId)
     .map(row => ({
       name: row.name,
       slotType: row.slotType,
       rarity: row.rarity,
       category: getItemCategory(row.templateId),
       quantity: Number(row.quantity || 1),
+      sockets: getItemSockets(row.templateId),
       modifiers: parseItemModifiers(row.modifiers)
     }));
+  // Plan 020d: which materia sit in which host item (by host item id).
+  const materiaByHost = new Map();
+  for (const row of inventoryRows) {
+    if (!row.socketedInId) continue;
+    const list = materiaByHost.get(row.socketedInId) || [];
+    list.push(row.name);
+    materiaByHost.set(row.socketedInId, list);
+  }
   // Equipment keyed by part label: one entry per non-severed part, empty or filled.
   const equippedByPartId = new Map(
     inventoryRows
@@ -791,6 +803,14 @@ export async function getUserState(db, username) {
   let gearHealthBonus = 0;
   for (const equipped of equippedByPartId.values()) {
     gearHealthBonus += Number(parseItemModifiers(equipped.modifiers).maxHealth || 0);
+  }
+  // Plan 020d: socket summary for equipped gear that has sockets (read-only display).
+  const socketSummary = [];
+  for (const equipped of equippedByPartId.values()) {
+    const sockets = getItemSockets(equipped.templateId);
+    if (sockets > 0) {
+      socketSummary.push({ host: equipped.name, sockets, materia: materiaByHost.get(equipped.id) || [] });
+    }
   }
   // Plan 018c: merge item-granted active abilities into the innate kit for the
   // hotbar, deduped by id (a class may already own a granted ability).
@@ -854,6 +874,7 @@ export async function getUserState(db, username) {
     body,
     inventory,
     equipment,
+    socketSummary,
     gearBonuses,
     gearHealthBonus,
     currentRoom,
@@ -1630,7 +1651,7 @@ export async function getInventory(db, username) {
   return dbAll(
     db,
     `SELECT i.id, i.templateId, i.name, i.slotType, i.rarity, i.modifiers,
-            i.equippedPartId, bp.label AS partLabel
+            i.equippedPartId, i.quantity, i.socketedInId, bp.label AS partLabel
      FROM items i
      LEFT JOIN bodyParts bp ON bp.id = i.equippedPartId
      WHERE i.ownerUsername = ?
@@ -1644,15 +1665,30 @@ export async function getInventory(db, username) {
 // MODIFIER_KEYS EXCEPT maxHealth, which is intentionally excluded: plan 015
 // owns HP gear via part maxHp, and applying maxHealth to the effective layer
 // now would be an unfillable dead stat (applyBodyHeal caps fill at part maxHp).
+// Plan 020d: the effects injected by materia socketed into the given host items.
+async function getSocketedMateriaEffects(db, hostIds) {
+  if (!hostIds || !hostIds.length) {
+    return [];
+  }
+  const rows = await dbAll(
+    db,
+    `SELECT templateId, ap FROM items WHERE socketedInId IN (${hostIds.map(() => '?').join(',')})`,
+    hostIds
+  );
+  return rows.map(row => getMateriaEffect(row.templateId, row.ap)).filter(Boolean);
+}
+
 export async function getEquippedModifiers(db, username) {
   const rows = await dbAll(
     db,
-    'SELECT modifiers FROM items WHERE ownerUsername = ? AND equippedPartId IS NOT NULL',
+    'SELECT id, modifiers FROM items WHERE ownerUsername = ? AND equippedPartId IS NOT NULL',
     [username]
   );
   const modifiers = emptyModifiers();
   delete modifiers.maxHealth; // dead-stat guard: never surface gear maxHealth.
+  const equippedIds = [];
   for (const row of rows) {
+    equippedIds.push(row.id);
     const parsed = parseItemModifiers(row.modifiers);
     for (const key of MODIFIER_KEYS) {
       if (key === 'maxHealth') {
@@ -1662,6 +1698,12 @@ export async function getEquippedModifiers(db, username) {
       if (Number.isFinite(value)) {
         modifiers[key] = (modifiers[key] || 0) + value;
       }
+    }
+  }
+  // Plan 020d: socketed-materia stat effects (host must be equipped).
+  for (const effect of await getSocketedMateriaEffects(db, equippedIds)) {
+    if (effect.kind === 'stat' && effect.stat !== 'maxHealth') {
+      modifiers[effect.stat] = (modifiers[effect.stat] || 0) + effect.amount;
     }
   }
   return modifiers;
@@ -2418,16 +2460,24 @@ export async function getElementAffinity(db, username, element, partLabel, row, 
   let affinity = 0;
   const rows = await dbAll(
     db,
-    `SELECT i.templateId FROM items i
+    `SELECT i.id, i.templateId FROM items i
      LEFT JOIN bodyParts bp ON bp.id = i.equippedPartId
      WHERE i.ownerUsername = ? AND i.equippedPartId IS NOT NULL
        AND (? IS NULL OR bp.label = ?)`,
     [username, partLabel || null, partLabel || null]
   );
+  const partItemIds = [];
   for (const r of rows) {
+    partItemIds.push(r.id);
     const template = getTemplate(r.templateId);
     if (template && template.affinity && Number.isFinite(template.affinity[element])) {
       affinity += template.affinity[element];
+    }
+  }
+  // Plan 020d: materia socketed into the armor on this part contribute affinity too.
+  for (const effect of await getSocketedMateriaEffects(db, partItemIds)) {
+    if (effect.kind === 'affinity' && effect.element === element) {
+      affinity += effect.amount;
     }
   }
   const roomType = ELEMENT_ROOM[element];
@@ -2709,6 +2759,14 @@ async function awardExperience(db, username, amount) {
   } else {
     await dbRun(db, 'UPDATE users SET experience = ? WHERE username = ?', [nextExperience, username]);
   }
+
+  // Plan 020d: materia socketed in equipped gear grow with the wielder's deeds.
+  await dbRun(
+    db,
+    `UPDATE items SET ap = ap + 1
+     WHERE socketedInId IN (SELECT id FROM items WHERE ownerUsername = ? AND equippedPartId IS NOT NULL)`,
+    [username]
+  );
 
   return { experience: nextExperience, level: nextLevel, leveled: levelDelta > 0 };
 }
@@ -3031,15 +3089,23 @@ function getSkillTarget(invoker, targetUsername) {
 export async function getGrantedAbilityIds(db, username) {
   const rows = await dbAll(
     db,
-    'SELECT templateId FROM items WHERE ownerUsername = ? AND equippedPartId IS NOT NULL',
+    'SELECT id, templateId FROM items WHERE ownerUsername = ? AND equippedPartId IS NOT NULL',
     [username]
   );
   const granted = [];
+  const equippedIds = [];
   for (const row of rows) {
+    equippedIds.push(row.id);
     const template = getTemplate(row.templateId);
     const abilityId = template && template.grantsAbility;
     if (abilityId && getAbility(abilityId) && !granted.includes(abilityId)) {
       granted.push(abilityId);
+    }
+  }
+  // Plan 020d: abilities granted by materia socketed into equipped gear.
+  for (const effect of await getSocketedMateriaEffects(db, equippedIds)) {
+    if (effect.kind === 'grant_ability' && getAbility(effect.abilityId) && !granted.includes(effect.abilityId)) {
+      granted.push(effect.abilityId);
     }
   }
   // Plan 019: abilities granted by unlocked progression-grid nodes ride the same
@@ -3462,6 +3528,62 @@ export async function handleUseCommand(db, username, row, col, message) {
   return useItem(db, username, rest, row, col);
 }
 
+// --- Plan 020d: socketing materia into gear ---------------------------------
+// An owned item that isn't on a room floor (carried, equipped, or already socketed).
+async function findOwnedItemByName(db, username, itemName) {
+  return dbFirst(
+    db,
+    `SELECT id, templateId, name, equippedPartId, socketedInId FROM items
+     WHERE ownerUsername = ? AND roomRow IS NULL AND roomCol IS NULL
+       AND LOWER(name) = LOWER(?)
+     ORDER BY id ASC LIMIT 1`,
+    [username, itemName]
+  );
+}
+
+export async function socketMateria(db, username, materiaName, hostName) {
+  const materia = await findOwnedItemByName(db, username, materiaName);
+  assertAction(materia, `You are not carrying ${materiaName}.`, 404);
+  assertAction(getItemCategory(materia.templateId) === 'materia', `${materia.name} is not materia.`, 400);
+  assertAction(!materia.socketedInId, `${materia.name} is already socketed.`, 400);
+
+  const host = await findOwnedItemByName(db, username, hostName);
+  assertAction(host, `You are not carrying ${hostName}.`, 404);
+  assertAction(getItemCategory(host.templateId) === 'gear', `${host.name} cannot hold materia.`, 400);
+  const sockets = getItemSockets(host.templateId);
+  assertAction(sockets > 0, `${host.name} has no sockets.`, 400);
+  const used = await dbFirst(db, 'SELECT COUNT(*) AS c FROM items WHERE socketedInId = ?', [host.id]);
+  assertAction((used.c || 0) < sockets, `${host.name}'s sockets are full.`, 400);
+
+  await dbRun(db, 'UPDATE items SET socketedInId = ? WHERE id = ?', [host.id, materia.id]);
+  return { socketed: materia.name, into: host.name };
+}
+
+export async function unsocketMateria(db, username, materiaName) {
+  const materia = await findOwnedItemByName(db, username, materiaName);
+  assertAction(materia, `You are not carrying ${materiaName}.`, 404);
+  assertAction(materia.socketedInId, `${materia.name} is not socketed.`, 400);
+  await dbRun(db, 'UPDATE items SET socketedInId = NULL WHERE id = ?', [materia.id]);
+  return { unsocketed: materia.name };
+}
+
+export async function handleSocketCommand(db, username, message) {
+  const rest = commandRest(message, '/socket');
+  const parts = rest.split(/\s+into\s+/i);
+  if (parts.length !== 2 || !parts[0].trim() || !parts[1].trim()) {
+    throw new ActionError('Use /socket <materia> into <item>.');
+  }
+  return socketMateria(db, username, parts[0].trim(), parts[1].trim());
+}
+
+export async function handleUnsocketCommand(db, username, message) {
+  const rest = commandRest(message, '/unsocket');
+  if (!rest) {
+    throw new ActionError('Use /unsocket <materia>.');
+  }
+  return unsocketMateria(db, username, rest);
+}
+
 // Space-separated stance keys for usage/error messages, e.g. "standing,
 // aggressive, guarding, crouched".
 function stanceOptionList() {
@@ -3705,6 +3827,24 @@ export async function handleChatAction(db, username, row, col, message) {
       username,
       staminaCost: 1,
       perform: async () => handleUseCommand(db, username, row, col, message),
+      advanceTick: () => advanceGlobalTick(db)
+    });
+  }
+
+  if (message.trim().toLowerCase().startsWith('/unsocket')) {
+    return runPlayerAction(db, {
+      username,
+      staminaCost: 1,
+      perform: async () => handleUnsocketCommand(db, username, message),
+      advanceTick: () => advanceGlobalTick(db)
+    });
+  }
+
+  if (message.trim().toLowerCase().startsWith('/socket')) {
+    return runPlayerAction(db, {
+      username,
+      staminaCost: 1,
+      perform: async () => handleSocketCommand(db, username, message),
       advanceTick: () => advanceGlobalTick(db)
     });
   }

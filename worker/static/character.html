@@ -149,20 +149,32 @@
         return row(label, `${escapeHtml(itemName)} ${actionButton('unequip', label, 'unequip', canAct)}`);
       });
 
-      // Carried inventory. Consumables (plan 020a) get use + drop; gear gets equip + drop.
+      // Carried inventory. Consumables (020a) get use; gear gets equip; materia (020d)
+      // are socketed via the /socket command. All get drop.
       const inventory = data.inventory || [];
       const inventoryHtml = inventory.length
         ? `<ul class="inventory-list">${inventory.map(item => {
             const isConsumable = item.category === 'consumable';
+            const isMateria = item.category === 'materia';
             const qty = Number(item.quantity || 1) > 1 ? ` ×${escapeHtml(item.quantity)}` : '';
-            const meta = `${escapeHtml(item.name)}${qty} [${escapeHtml(isConsumable ? 'consumable' : item.slotType)}]${escapeHtml(itemModText(item.modifiers))}`;
+            const kind = isConsumable ? 'consumable' : (isMateria ? 'materia' : item.slotType);
+            const socketTag = Number(item.sockets || 0) > 0 ? ` (${escapeHtml(item.sockets)} sockets)` : '';
+            const meta = `${escapeHtml(item.name)}${qty} [${escapeHtml(kind)}]${socketTag}${escapeHtml(itemModText(item.modifiers))}`;
             const primary = isConsumable
               ? actionButton('use', item.name, 'use', canAct)
-              : actionButton('equip', item.name, 'equip', canAct);
+              : (isMateria ? '' : actionButton('equip', item.name, 'equip', canAct));
             const actions = `${primary}${actionButton('drop', item.name, 'drop', canAct)}`;
             return `<li>${meta} ${actions}</li>`;
           }).join('')}</ul>`
         : '<p>Nothing carried.</p>';
+
+      // Plan 020d: read-only socket summary for equipped gear with sockets.
+      const socketRows = (data.socketSummary || []).map(s => {
+        const filled = (s.materia || []).map(m => escapeHtml(m)).join(', ');
+        const free = Math.max(0, Number(s.sockets || 0) - (s.materia || []).length);
+        const slots = filled ? `${filled}${free > 0 ? `, +${free} empty` : ''}` : `${free} empty`;
+        return [s.host, slots];
+      });
 
       const baseItems = [
         `HP ${escapeHtml(base.maxHealth ?? 0)}`,
@@ -232,6 +244,10 @@
           <h2>Inventory</h2>
           ${roomHint}
           ${inventoryHtml}
+        </section>
+        <section class="character-section">
+          <h2>Sockets</h2>
+          ${socketRows.length ? renderRows(socketRows) : `<p>${escapeHtml('No socketed gear. Equip gear with sockets, then /socket <materia> into <item>.')}</p>`}
         </section>
         <section class="character-section">
           <h2>Base Stats</h2>
