@@ -578,12 +578,15 @@ test('Killing attack messages are shown before defeat and death system messages'
     await withMockedRandom([0.1, 0.99], () => handleAttackAction(db, 'fighter', calm.row, calm.col, '@npc_scout'));
 
     const messages = await getMessages(db, calm.row, calm.col);
-    const finalMessages = messages.slice(-2);
+    // Plan 022a: a defeated NPC now also leaves remains, so the defeat line is the
+    // second-to-last; the attack line precedes it.
+    const finalMessages = messages.slice(-3);
 
     assert.equal(finalMessages[0].username, 'fighter');
     assert.match(finalMessages[0].message, /fighter attacked npc_scout for \d+ damage/);
     assert.equal(finalMessages[1].username, 'System');
     assert.equal(finalMessages[1].message, 'Ash Scout is defeated by fighter.');
+    assert.match(finalMessages[2].message, /Ash Scout leaves behind remains\./);
 
     await withMockedRandom([0.1, 0.99], () => handleAttackAction(db, 'fighter', calm.row, calm.col, '@rival'));
 
@@ -2347,10 +2350,13 @@ test('Plan 005: defeating an NPC drops loot onto the room floor', async () => {
     const floorItems = await db.prepare(
       'SELECT name, ownerUsername, roomRow, roomCol FROM items WHERE ownerUsername IS NULL'
     ).all();
-    assert.equal(floorItems.results.length, 1);
-    assert.equal(floorItems.results[0].name, 'Rusty Knife');
-    assert.equal(floorItems.results[0].roomRow, calm.row);
-    assert.equal(floorItems.results[0].roomCol, calm.col);
+    // Plan 022a: the gear drop (Rusty Knife) PLUS the always-dropped Monster Remains.
+    const names = floorItems.results.map(i => i.name).sort();
+    assert.deepEqual(names, ['Monster Remains', 'Rusty Knife']);
+    for (const item of floorItems.results) {
+      assert.equal(item.roomRow, calm.row);
+      assert.equal(item.roomCol, calm.col);
+    }
 
     const dropMessage = await db.prepare(
       "SELECT message FROM messages WHERE username = 'System' AND message LIKE '%drops%' LIMIT 1"

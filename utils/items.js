@@ -80,7 +80,13 @@ const ITEM_TEMPLATES = [
   { templateId: 'swift_materia', name: 'Swift Materia', slotType: 'materia', category: 'materia', rarity: 'common', modifiers: {}, materia: { kind: 'stat', stat: 'speed', amount: 1 }, dropWeight: 1 },
   { templateId: 'mind_materia', name: 'Mind Materia', slotType: 'materia', category: 'materia', rarity: 'common', modifiers: {}, materia: { kind: 'stat', stat: 'intelligence', amount: 1 }, dropWeight: 1 },
   { templateId: 'spell_materia', name: 'Spell Materia', slotType: 'materia', category: 'materia', rarity: 'rare', modifiers: {}, materia: { kind: 'grant_ability', abilityId: 'arcane_pin' }, dropWeight: 1 },
-  { templateId: 'guard_materia', name: 'Guard Materia', slotType: 'materia', category: 'materia', rarity: 'rare', modifiers: {}, materia: { kind: 'affinity', element: 'fire', amount: -0.25 }, dropWeight: 1 }
+  { templateId: 'guard_materia', name: 'Guard Materia', slotType: 'materia', category: 'materia', rarity: 'rare', modifiers: {}, materia: { kind: 'affinity', element: 'fire', amount: -0.25 }, dropWeight: 1 },
+
+  // Plan 022a: crafting parts (dropped by defeated monsters) + craft outputs. Parts
+  // are inert raw inputs; the Cook verb turns remains into food. dropWeight 0 — parts
+  // drop via defeatNpc, outputs are crafted only.
+  { templateId: 'monster_remains', name: 'Monster Remains', slotType: 'part', category: 'part', rarity: 'common', modifiers: {}, dropWeight: 0 },
+  { templateId: 'cooked_remains', name: 'Cooked Remains', slotType: 'consumable', category: 'consumable', rarity: 'common', modifiers: {}, onUse: [{ kind: 'heal', amount: 10 }], dropWeight: 0 }
 ];
 
 const SIGNATURE_ITEMS_BY_JOB = {

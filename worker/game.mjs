@@ -6,6 +6,7 @@ import bodyModule from '../utils/body.js';
 import itemsModule from '../utils/items.js';
 import abilitiesModule from '../utils/abilities.js';
 import progressionModule from '../utils/progressionGrid.js';
+import recipesModule from '../utils/recipes.js';
 import { changes, dbAll, dbFirst, dbRun, lastInsertId } from './db.mjs';
 import { elapsedMs, logEvent, measureAsync, nowMs } from './observability.mjs';
 
@@ -28,6 +29,8 @@ const {
   getNode: getGridNode,
   getEntryNodeIds: getGridEntryNodeIds
 } = progressionModule;
+
+const { findRecipeByOutputName } = recipesModule;
 
 const {
   GRID_SIZE,
@@ -1453,7 +1456,7 @@ async function awardEventVictory(db, event, row, col, currentTick, options = {})
   await emitSystemMessage(db, row, col, `${event.title} has been cleared.`, options.deferredSystemMessages);
 }
 
-async function defeatNpc(db, npc, { killer, row, col, currentTick, deferredSystemMessages = null }) {
+export async function defeatNpc(db, npc, { killer, row, col, currentTick, deferredSystemMessages = null }) {
   const entity = await dbFirst(db, 'SELECT rewardExperience, rewardGold FROM worldEventEntities WHERE username = ?', [npc.username]);
   const event = npc.worldEventId
     ? await dbFirst(db, 'SELECT * FROM worldEvents WHERE id = ?', [npc.worldEventId])
@@ -1488,6 +1491,11 @@ async function defeatNpc(db, npc, { killer, row, col, currentTick, deferredSyste
     await dropItemOnFloor(db, drop.templateId, row, col);
     await emitSystemMessage(db, row, col, `${npc.displayName || npc.username} drops ${drop.name}.`, deferredSystemMessages);
   }
+
+  // Plan 022a: every defeated creature leaves remains — the corpse substrate that
+  // feeds crafting, far more common than finished gear.
+  await dropItemOnFloor(db, 'monster_remains', row, col);
+  await emitSystemMessage(db, row, col, `${npc.displayName || npc.username} leaves behind remains.`, deferredSystemMessages);
 
   if (event && ['raid', 'lesser'].includes(event.eventType) && npc.npcKind === 'raid_boss') {
     await awardEventVictory(db, event, row, col, currentTick, { deferredSystemMessages });
@@ -3609,6 +3617,54 @@ export async function handleUseCommand(db, username, row, col, message) {
   return useItem(db, username, rest, row, col);
 }
 
+// --- Plan 022a: crafting -----------------------------------------------------
+// A crafting verb (cook/brew/forge) consumes recipe inputs the player is carrying
+// and produces the output. Inputs are carried (not equipped/socketed/floor) items.
+export async function craftRecipe(db, username, verb, outputName) {
+  const recipe = findRecipeByOutputName(verb, outputName);
+  assertAction(recipe, `No ${verb} recipe makes "${outputName}".`, 404);
+
+  for (const input of recipe.inputs) {
+    const have = await dbFirst(
+      db,
+      `SELECT COUNT(*) AS c FROM items
+       WHERE ownerUsername = ? AND templateId = ?
+         AND equippedPartId IS NULL AND socketedInId IS NULL AND roomRow IS NULL AND roomCol IS NULL`,
+      [username, input.templateId]
+    );
+    assertAction((have.c || 0) >= input.qty, `You need ${input.qty} × ${getTemplate(input.templateId)?.name || input.templateId}.`, 400);
+  }
+
+  for (const input of recipe.inputs) {
+    const rows = await dbAll(
+      db,
+      `SELECT id FROM items
+       WHERE ownerUsername = ? AND templateId = ?
+         AND equippedPartId IS NULL AND socketedInId IS NULL AND roomRow IS NULL AND roomCol IS NULL
+       ORDER BY id ASC LIMIT ?`,
+      [username, input.templateId, input.qty]
+    );
+    for (const r of rows) {
+      await dbRun(db, 'DELETE FROM items WHERE id = ?', [r.id]);
+    }
+  }
+
+  for (let i = 0; i < (recipe.output.qty || 1); i += 1) {
+    await createItemForOwner(db, recipe.output.templateId, username);
+  }
+  return { crafted: recipe.label };
+}
+
+export async function handleCookCommand(db, username, row, col, message) {
+  const rest = commandRest(message, '/cook');
+  if (!rest) {
+    throw new ActionError('Use /cook <recipe>, e.g. /cook Cooked Remains.');
+  }
+  const result = await craftRecipe(db, username, 'cook', rest);
+  await insertSystemMessage(db, row, col, `${username} cooks ${result.crafted}.`, 'support');
+  return result;
+}
+
 // --- Plan 020d: socketing materia into gear ---------------------------------
 // An owned item that isn't on a room floor (carried, equipped, or already socketed).
 async function findOwnedItemByName(db, username, itemName) {
@@ -3908,6 +3964,15 @@ export async function handleChatAction(db, username, row, col, message) {
       username,
       staminaCost: 1,
       perform: async () => handleUseCommand(db, username, row, col, message),
+      advanceTick: () => advanceGlobalTick(db)
+    });
+  }
+
+  if (message.trim().toLowerCase().startsWith('/cook')) {
+    return runPlayerAction(db, {
+      username,
+      staminaCost: 1,
+      perform: async () => handleCookCommand(db, username, row, col, message),
       advanceTick: () => advanceGlobalTick(db)
     });
   }
