@@ -47,7 +47,7 @@ import {
   createResurrectionCheckout,
   fulfillResurrectionCheckout
 } from './resurrection.mjs';
-import { MODEL as NPC_MODEL, buildNpcPrompt, generateNpcResponse } from './npcVoice.mjs';
+import { MODEL as NPC_MODEL, buildNpcPrompt, generateNpcResponse, parseNpcResponse } from './npcVoice.mjs';
 import { canonicalLocalRequestUrl } from './localHost.mjs';
 import { wantsHtmlResponse, wantsJsonResponse } from './http.mjs';
 import { elapsedMs, logEvent, measureAsync, nowMs } from './observability.mjs';
@@ -768,13 +768,15 @@ app.get('/debug/ai', async c => {
     addressedBy: 'traveler',
     mode: 'reply'
   };
-  out.npc = await generateNpcResponse(c.env.AI, ctx);
+  // ONE NPC-prompt call, then show its raw output AND what parseNpcResponse makes of that
+  // exact output — so we can see whether the parser is rejecting good model text.
   try {
     const { system, user } = buildNpcPrompt(ctx);
     const r2 = await c.env.AI.run(NPC_MODEL, { messages: [{ role: 'system', content: system }, { role: 'user', content: user }], max_tokens: 120 });
-    out.npcRaw = (r2 && r2.response) ?? r2;
+    out.npcRunRaw = r2;
+    out.npcParsed = parseNpcResponse(r2 && r2.response, 'bartender');
   } catch (e) {
-    out.npcRawError = String((e && e.message) || e);
+    out.npcRunError = String((e && e.message) || e);
   }
   return c.json(out);
 });
