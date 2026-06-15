@@ -1671,14 +1671,15 @@ export async function getEquippedModifiers(db, username) {
 // every site that previously fed getBodyConditionModifiers / bodyPenaltyModifiers
 // into getEffectiveUser, so wounds and gear ride one modifier channel.
 export async function getConditionAndGearModifiers(db, username) {
-  const [condition, gear, progression] = await Promise.all([
+  const [condition, gear, progression, status] = await Promise.all([
     getBodyConditionModifiers(db, username),
     getEquippedModifiers(db, username),
-    getProgressionModifiers(db, username)
+    getProgressionModifiers(db, username),
+    getStatusStatModifiers(db, username)
   ]);
   const combined = {};
   for (const key of MODIFIER_KEYS) {
-    combined[key] = (Number(condition[key]) || 0) + (Number(gear[key]) || 0) + (Number(progression[key]) || 0);
+    combined[key] = (Number(condition[key]) || 0) + (Number(gear[key]) || 0) + (Number(progression[key]) || 0) + (Number(status[key]) || 0);
   }
   return combined;
 }
@@ -2391,6 +2392,92 @@ async function clearOneHarmfulEffect(db, username) {
   return true;
 }
 
+// --- Plan 020c: elemental affinities (model B — elements land STATUSES) --------
+// A weapon's `element` tags a hit; on landing it applies the element's status to the
+// struck part, magnitude scaled by the target's affinity there (worn armor +/− the
+// room's mood). No element → the hook never runs → combat stays byte-identical.
+const ELEMENT_STATUS = { fire: 'burn', cold: 'chill', shock: 'shock', holy: 'burn', dark: 'burn', poison: 'poison' };
+const ELEMENT_ROOM = { fire: 'sun_room', cold: 'cold_room', dark: 'moon_room', poison: 'poison_marsh' };
+const ELEMENT_BASE_MAGNITUDE = 2;
+const ELEMENT_DURATION = 4;
+const ROOM_ELEMENT_AMP = 0.5;
+
+// The element of a player's equipped weapon (first equipped item carrying one).
+export async function getAttackElement(db, username) {
+  const rows = await dbAll(db, 'SELECT templateId FROM items WHERE ownerUsername = ? AND equippedPartId IS NOT NULL', [username]);
+  for (const row of rows) {
+    const template = getTemplate(row.templateId);
+    if (template && template.element) return template.element;
+  }
+  return null;
+}
+
+// Net affinity to `element` on the struck part: armor worn there (resist − / weak +)
+// plus the room's amplification (which affects everyone present). 0 = neutral.
+export async function getElementAffinity(db, username, element, partLabel, row, col, tickValue) {
+  let affinity = 0;
+  const rows = await dbAll(
+    db,
+    `SELECT i.templateId FROM items i
+     LEFT JOIN bodyParts bp ON bp.id = i.equippedPartId
+     WHERE i.ownerUsername = ? AND i.equippedPartId IS NOT NULL
+       AND (? IS NULL OR bp.label = ?)`,
+    [username, partLabel || null, partLabel || null]
+  );
+  for (const r of rows) {
+    const template = getTemplate(r.templateId);
+    if (template && template.affinity && Number.isFinite(template.affinity[element])) {
+      affinity += template.affinity[element];
+    }
+  }
+  const roomType = ELEMENT_ROOM[element];
+  if (roomType && roomHasEffect(row, col, tickValue, roomType)) {
+    affinity += ROOM_ELEMENT_AMP;
+  }
+  return affinity;
+}
+
+// Apply an elemental hit's status to the struck part, scaled by affinity. A part
+// that resists hard enough (affinity ≤ −1) takes nothing.
+export async function applyElementOnHit(db, { attacker, target, element, partLabel, row, col, currentTick }) {
+  const statusType = ELEMENT_STATUS[element];
+  if (!statusType) {
+    return null;
+  }
+  const affinity = await getElementAffinity(db, target, element, partLabel, row, col, currentTick);
+  const magnitude = Math.round(ELEMENT_BASE_MAGNITUDE * (1 + affinity));
+  if (magnitude <= 0) {
+    return { element, status: statusType, resisted: true };
+  }
+  await addStatusEffect(db, {
+    username: target,
+    source: attacker,
+    effectType: statusType,
+    magnitude,
+    currentTick,
+    duration: ELEMENT_DURATION,
+    row,
+    col
+  });
+  return { element, status: statusType, magnitude };
+}
+
+// Active 'chill' (cold) saps effective speed while it lasts — folded into the
+// effective layer via getConditionAndGearModifiers so it reaches the speed contest.
+async function getStatusStatModifiers(db, username) {
+  const tickValue = await getCurrentTickValue(db);
+  const rows = await dbAll(
+    db,
+    "SELECT magnitude FROM statusEffects WHERE username = ? AND effectType = 'chill' AND expiryTick > ?",
+    [username, tickValue]
+  );
+  let chill = 0;
+  for (const row of rows) {
+    chill += Number(row.magnitude) || 0;
+  }
+  return chill > 0 ? { speed: -chill } : {};
+}
+
 export async function processStatusEffects(db, currentTick) {
   const activeEffects = await dbAll(
     db,
@@ -2398,7 +2485,7 @@ export async function processStatusEffects(db, currentTick) {
      FROM statusEffects
      WHERE expiryTick > ?
        AND createdTick < ?
-       AND effectType IN ('poison', 'arcane_pin', 'bless')
+       AND effectType IN ('poison', 'arcane_pin', 'bless', 'burn', 'shock')
      ORDER BY id ASC`,
     [currentTick, currentTick]
   );
@@ -2412,7 +2499,12 @@ export async function processStatusEffects(db, currentTick) {
     if (effect.effectType === 'poison') {
       const cause = effect.sourceUsername ? `dose by ${effect.sourceUsername}` : 'poison';
       await damageUser(db, effect.username, effect.magnitude || 1, cause, effect.roomRow, effect.roomCol);
-    } else if (effect.effectType === 'arcane_pin') {
+    } else if (effect.effectType === 'burn') {
+      // Plan 020c: fire DoT (also holy/dark, per ELEMENT_STATUS).
+      const cause = effect.sourceUsername ? `burn from ${effect.sourceUsername}` : 'burn';
+      await damageUser(db, effect.username, effect.magnitude || 1, cause, effect.roomRow, effect.roomCol);
+    } else if (effect.effectType === 'arcane_pin' || effect.effectType === 'shock') {
+      // Plan 020c: shock (lightning) saps stamina each tick, like arcane_pin.
       await drainStamina(db, effect.username, effect.magnitude || 1);
     } else if (effect.effectType === 'bless') {
       await healUser(db, effect.username, effect.magnitude || 1, effect.roomRow, effect.roomCol);
@@ -2864,6 +2956,27 @@ export async function handleAttack(db, username, message, row, col, options = {}
       : `${username} attacked ${user.username} for ${damage} damage`;
 
     attackMessages.push(attackMessage);
+
+    // Plan 020c: if the attacker's weapon is elemental and the (player) target
+    // survived, the hit lands the element's status on the struck part, scaled by
+    // affinity. No element → this whole block is skipped → combat is unchanged.
+    if (!wasKilled && !target.isNpc) {
+      const element = await getAttackElement(db, username);
+      if (element) {
+        const applied = await applyElementOnHit(db, {
+          attacker: username,
+          target: user.username,
+          element,
+          partLabel: calledShot,
+          row,
+          col,
+          currentTick: createdTick
+        });
+        if (applied && applied.status && !applied.resisted) {
+          attackMessages.push(`${user.username} suffers ${applied.status} (${applied.magnitude})`);
+        }
+      }
+    }
 
     const trace = getAttackTrace({
       row,

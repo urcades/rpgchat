@@ -32,9 +32,10 @@ const ITEM_TEMPLATES = [
   { templateId: 'lucky_bone', name: 'Lucky Bone', slotType: 'trinket', rarity: 'common', modifiers: { speed: 1 }, dropWeight: 2 },
   { templateId: 'heavy_boots', name: 'Heavy Boots', slotType: 'leg', rarity: 'common', modifiers: { maxHealth: 6, speed: -1 }, dropWeight: 2 },
   { templateId: 'tattered_hood', name: 'Tattered Hood', slotType: 'head', rarity: 'common', modifiers: { intelligence: 1 }, dropWeight: 2 },
+  { templateId: 'straw_hat', name: 'Straw Hat', slotType: 'head', rarity: 'common', modifiers: { speed: 1 }, affinity: { fire: 0.5 }, dropWeight: 2 },
 
   // Rare drop pool.
-  { templateId: 'wyrmscale_cloak', name: 'Wyrmscale Cloak', slotType: 'torso', rarity: 'rare', modifiers: { maxHealth: 9, speed: 1 }, dropWeight: 1 },
+  { templateId: 'wyrmscale_cloak', name: 'Wyrmscale Cloak', slotType: 'torso', rarity: 'rare', modifiers: { maxHealth: 9, speed: 1 }, affinity: { fire: -0.5 }, dropWeight: 1 },
   { templateId: 'frostbitten_fang', name: 'Frostbitten Fang', slotType: 'hand', rarity: 'rare', modifiers: { strength: 3 }, dropWeight: 1 },
   { templateId: 'coldlight_circlet', name: 'Coldlight Circlet', slotType: 'head', rarity: 'rare', modifiers: { intelligence: 3 }, dropWeight: 1 },
 
@@ -43,6 +44,12 @@ const ITEM_TEMPLATES = [
   { templateId: 'venom_fang', name: 'Venom Fang', slotType: 'hand', rarity: 'rare', modifiers: { speed: 1 }, grantsAbility: 'mark', dropWeight: 1 },
   { templateId: 'acolytes_censer', name: "Acolyte's Censer", slotType: 'trinket', rarity: 'rare', modifiers: { intelligence: 1 }, grantsAbility: 'bless', dropWeight: 1 },
   { templateId: 'spark_focus', name: 'Spark Focus', slotType: 'hand', rarity: 'rare', modifiers: { intelligence: 1 }, grantsAbility: 'arcane_pin', dropWeight: 1 },
+
+  // Plan 020c: elemental gear. A weapon's `element` tags its hits (→ a status on the
+  // struck part, model B). Armor's `affinity` resists (-) or worsens (+) an element
+  // on the part it's worn on. Appended (rare/common) so weighted-pick firsts hold.
+  { templateId: 'flametongue', name: 'Flametongue', slotType: 'hand', rarity: 'rare', modifiers: { strength: 2 }, element: 'fire', dropWeight: 1 },
+  { templateId: 'frostbrand', name: 'Frostbrand', slotType: 'hand', rarity: 'rare', modifiers: { strength: 1, speed: 1 }, element: 'cold', dropWeight: 1 },
 
   // Plan 007: shop stock — one per SHOP_ITEM_CATALOG name (utils/roomEcology.js).
   // The economy floor: cheap, modest gear bought via /buy. Never drops
