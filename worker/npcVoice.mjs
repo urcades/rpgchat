@@ -89,25 +89,48 @@ export function buildNpcPrompt({ npc, roomDescription, recentMessages, addressed
 const INJECTION_TELL = /\b(as an ai|language model|system prompt|i cannot|i can't help|instruction)\b/i;
 
 export function parseNpcResponse(raw, role) {
-  const safe = { speech: pickFallback(role), intent: 'wary', request: 'none' };
-  if (typeof raw !== 'string') return safe;
+  if (typeof raw !== 'string') {
+    return { speech: pickFallback(role), intent: 'wary', request: 'none' };
+  }
+  // Strip markdown code fences the model sometimes wraps JSON in.
+  const cleaned = raw.replace(/```(?:json)?/gi, ' ').trim();
   let speech = null;
   let intent = 'wary';
   let request = 'none';
-  // Prefer embedded JSON; fall back to treating the whole thing as a spoken line.
-  const match = raw.match(/\{[\s\S]*\}/);
-  if (match) {
+
+  // Prefer a well-formed JSON object.
+  const block = cleaned.match(/\{[\s\S]*\}/);
+  if (block) {
     try {
-      const obj = JSON.parse(match[0]);
+      const obj = JSON.parse(block[0]);
       if (obj && typeof obj.speech === 'string') speech = obj.speech;
       if (obj && VALID_INTENTS.has(obj.intent)) intent = obj.intent;
       if (obj && VALID_REQUESTS.has(obj.request)) request = obj.request;
-    } catch { /* fall through to plain-text handling */ }
+    } catch { /* malformed — salvage the fields by regex below */ }
   }
-  if (speech == null) speech = raw;
+  // Salvage from imperfect JSON (unescaped quotes, trailing prose, etc.).
+  if (speech == null) {
+    const ms = cleaned.match(/"speech"\s*:\s*"([^"]{1,400})"/);
+    if (ms) speech = ms[1];
+    const mi = cleaned.match(/"intent"\s*:\s*"(friendly|wary|hostile)"/);
+    if (mi) intent = mi[1];
+    const mr = cleaned.match(/"request"\s*:\s*"(heal|none)"/);
+    if (mr) request = mr[1];
+  }
+  // No JSON at all → treat the whole thing as the spoken line.
+  if (speech == null) {
+    speech = cleaned;
+  }
+
   speech = String(speech).replace(/\s+/g, ' ').replace(/^["'\s]+|["'\s]+$/g, '').trim();
-  if (!speech || speech.length > MAX_LINE_LENGTH || INJECTION_TELL.test(speech)) {
+  // Reject only genuinely-unusable output: empty, or an AI/refusal tell. An over-long but
+  // otherwise-fine line is TRUNCATED, never discarded — that was the bug that made every
+  // model line fall back to a canned one.
+  if (!speech || INJECTION_TELL.test(speech)) {
     return { speech: pickFallback(role), intent, request };
+  }
+  if (speech.length > MAX_LINE_LENGTH) {
+    speech = `${speech.slice(0, MAX_LINE_LENGTH - 1).trimEnd()}…`;
   }
   return { speech, intent, request };
 }

@@ -30,19 +30,30 @@ test('Plan 013a: a bare line (no JSON) is used as speech with a safe default int
   assert.equal(r.intent, 'wary');
 });
 
-test('Plan 013a: an over-long rant or an AI tell falls back', async () => {
+test('Plan 013a: an over-long line is TRUNCATED (not discarded); an AI tell falls back', async () => {
   const m = await import('../worker/npcVoice.mjs');
-  const rant = m.parseNpcResponse('x'.repeat(500), 'patron');
-  assert.ok(m.FALLBACK_LINES.patron.includes(rant.speech), 'too long -> fallback');
+  // A real (if verbose) line must be kept — discarding it for length was the bug that
+  // made every model line collapse to a canned fallback.
+  const longLine = m.parseNpcResponse(`{"speech":"${'word '.repeat(80)}","intent":"wary","request":"none"}`, 'patron');
+  assert.ok(longLine.speech.length <= 200, 'truncated to the cap');
+  assert.ok(!m.FALLBACK_LINES.patron.includes(longLine.speech), 'a verbose line is kept, not canned');
+  // A refusal / AI tell is still rejected.
   const tell = m.parseNpcResponse('As an AI language model, I cannot do that.', 'patron');
   assert.ok(m.FALLBACK_LINES.patron.includes(tell.speech), 'AI tell -> fallback');
 });
 
-test('Plan 013a: a hostile intent survives parsing even when speech is rejected', async () => {
+test('Plan 013a: model output is salvaged from fenced / imperfect JSON', async () => {
   const m = await import('../worker/npcVoice.mjs');
-  // The model flagged hostility but the line itself is unusable; intent must still pass
-  // through so 013c can act on it, with speech swapped for a fallback.
-  const r = m.parseNpcResponse('{"speech":"' + 'y'.repeat(400) + '","intent":"hostile","request":"none"}', 'guard');
+  const fenced = m.parseNpcResponse('```json\n{"speech":"Mind the step, friend.","intent":"friendly","request":"none"}\n```', 'bartender');
+  assert.equal(fenced.speech, 'Mind the step, friend.', 'code fences stripped, JSON parsed');
+  assert.equal(fenced.intent, 'friendly');
+});
+
+test('Plan 013a: a hostile intent survives even when the speech itself is unusable', async () => {
+  const m = await import('../worker/npcVoice.mjs');
+  // Empty speech is genuinely unusable -> canned line, but the flagged intent must still
+  // pass through so 013c can turn the room.
+  const r = m.parseNpcResponse('{"speech":"","intent":"hostile","request":"none"}', 'guard');
   assert.ok(m.FALLBACK_LINES.guard.includes(r.speech));
   assert.equal(r.intent, 'hostile');
 });
