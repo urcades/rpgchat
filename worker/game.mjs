@@ -1134,6 +1134,16 @@ export async function moveUserToCemetery(db, username, cause, row, col, options 
     await emitSystemMessage(db, row, col, `${username}'s belongings scatter across the floor.`, options.deferredSystemMessages);
   }
   await dbRun(db, 'DELETE FROM bodyParts WHERE username = ?', [username]);
+  // Plan 022c: the body drops as a corpse — the anchor of resurrection. While it
+  // exists (on a floor or in someone's bag) the player can be revived (paid or
+  // free); eat or destroy it and the tether snaps — true, permanent death.
+  await dbRun(
+    db,
+    `INSERT INTO items (templateId, name, slotType, rarity, modifiers, roomRow, roomCol, corpseOf)
+     VALUES ('player_corpse', ?, 'corpse', 'common', '{}', ?, ?, ?)`,
+    [`${username}'s Corpse`, row, col, username]
+  );
+  await emitSystemMessage(db, row, col, `${username}'s corpse lies here.`, options.deferredSystemMessages, 'death');
   await emitSystemMessage(db, row, col, `${username} has died from ${cause}.`, options.deferredSystemMessages, 'death');
   return true;
 }
@@ -3665,6 +3675,48 @@ export async function handleCookCommand(db, username, row, col, message) {
   return result;
 }
 
+// --- Plan 022b/c: eating remains and corpses ---------------------------------
+const EAT_HEAL_AMOUNT = 5;
+
+// An edible item the player can reach: carried, or on the floor of their room.
+async function findEatable(db, username, itemName, row, col) {
+  return dbFirst(
+    db,
+    `SELECT id, templateId, name, corpseOf FROM items
+     WHERE LOWER(name) = LOWER(?)
+       AND ( (ownerUsername = ? AND equippedPartId IS NULL AND socketedInId IS NULL AND roomRow IS NULL AND roomCol IS NULL)
+             OR (ownerUsername IS NULL AND roomRow = ? AND roomCol = ?) )
+     ORDER BY id ASC LIMIT 1`,
+    [itemName, username, row, col]
+  );
+}
+
+export async function eatItem(db, username, itemName, row, col) {
+  const item = await findEatable(db, username, itemName, row, col);
+  assertAction(item, `There is no ${itemName} to eat here.`, 404);
+  const category = getItemCategory(item.templateId);
+  assertAction(category === 'part' || category === 'corpse', `${item.name} is not edible.`, 400);
+
+  await healUser(db, username, EAT_HEAL_AMOUNT, row, col);
+  await dbRun(db, 'DELETE FROM items WHERE id = ?', [item.id]);
+
+  if (item.corpseOf) {
+    // Plan 022c: devouring a corpse severs that player's resurrection — for good.
+    await insertSystemMessage(db, row, col, `${username} devours ${item.name}. ${item.corpseOf} can never return.`, 'death');
+    return { ate: item.name, severed: item.corpseOf };
+  }
+  await insertSystemMessage(db, row, col, `${username} eats ${item.name}.`, 'support');
+  return { ate: item.name };
+}
+
+export async function handleEatCommand(db, username, row, col, message) {
+  const rest = commandRest(message, '/eat');
+  if (!rest) {
+    throw new ActionError('Use /eat <item>.');
+  }
+  return eatItem(db, username, rest, row, col);
+}
+
 // --- Plan 020d: socketing materia into gear ---------------------------------
 // An owned item that isn't on a room floor (carried, equipped, or already socketed).
 async function findOwnedItemByName(db, username, itemName) {
@@ -3973,6 +4025,15 @@ export async function handleChatAction(db, username, row, col, message) {
       username,
       staminaCost: 1,
       perform: async () => handleCookCommand(db, username, row, col, message),
+      advanceTick: () => advanceGlobalTick(db)
+    });
+  }
+
+  if (message.trim().toLowerCase().startsWith('/eat')) {
+    return runPlayerAction(db, {
+      username,
+      staminaCost: 1,
+      perform: async () => handleEatCommand(db, username, row, col, message),
       advanceTick: () => advanceGlobalTick(db)
     });
   }

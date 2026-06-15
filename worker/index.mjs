@@ -513,6 +513,10 @@ app.post('/resurrection-link', async c => {
   if (!checkout) {
     return c.json({ error: 'Grave not found' }, 404);
   }
+  // Plan 022c: the corpse was eaten/destroyed — resurrection is impossible.
+  if (checkout.severed) {
+    return c.json({ error: 'Your corpse was destroyed. There is no coming back.' }, 410);
+  }
 
   return c.json({ url: checkout.url });
 });

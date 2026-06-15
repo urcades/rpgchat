@@ -74,6 +74,10 @@ async function seedGrave(db, username, overrides = {}) {
   await db.prepare(
     'INSERT INTO cemetery (username, password, level, gold, job) VALUES (?, ?, ?, ?, ?)'
   ).bind(username, grave.password, grave.level, grave.gold, grave.job).run();
+  // Plan 022c: resurrection requires the corpse to still exist.
+  await db.prepare(
+    "INSERT INTO items (templateId, name, slotType, rarity, modifiers, roomRow, roomCol, corpseOf) VALUES ('player_corpse', ?, 'corpse', 'common', '{}', 1, 1, ?)"
+  ).bind(`${username}'s Corpse`, username).run();
 }
 
 async function countUsers(db, username) {

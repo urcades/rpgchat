@@ -18,10 +18,22 @@ async function latestGrave(db, username) {
   );
 }
 
+// Plan 022c: resurrection requires the player's corpse to still exist (a floor item
+// or in someone's bag). If it has been eaten/destroyed, the tether is severed — no
+// resurrection is possible, even a paid one.
+async function hasCorpse(db, username) {
+  const row = await dbFirst(db, 'SELECT 1 AS present FROM items WHERE corpseOf = ? LIMIT 1', [username]);
+  return Boolean(row);
+}
+
 export async function createResurrectionCheckout(db, username, paymentLinkUrl) {
   const grave = await latestGrave(db, username);
   if (!grave) {
     return null;
+  }
+  // Plan 022c: never sell a resurrection that can't happen — the corpse must exist.
+  if (!await hasCorpse(db, username)) {
+    return { severed: true };
   }
 
   const token = crypto.randomUUID();
@@ -92,6 +104,13 @@ export async function fulfillResurrectionCheckout(db, token, stripeSessionId) {
     return { revived: false, reason: 'grave_not_found' };
   }
 
+  // Plan 022c: re-check the corpse at fulfillment — it may have been destroyed
+  // between checkout and payment. If it's gone, the tether is severed: do not revive.
+  if (!await hasCorpse(db, request.username)) {
+    await dbRun(db, `UPDATE resurrectionRequests SET status = 'corpse_destroyed' WHERE token = ?`, [token]);
+    return { revived: false, reason: 'corpse_destroyed' };
+  }
+
   const liveUser = await dbFirst(db, 'SELECT username FROM users WHERE username = ?', [grave.username]);
   if (!liveUser) {
     await dbRun(
@@ -104,6 +123,8 @@ export async function fulfillResurrectionCheckout(db, token, stripeSessionId) {
   }
 
   await dbRun(db, 'DELETE FROM cemetery WHERE id = ?', [grave.id]);
+  // Plan 022c: the body returns to life — consume the corpse so it can't be reused.
+  await dbRun(db, 'DELETE FROM items WHERE corpseOf = ?', [grave.username]);
   await dbRun(
     db,
     `UPDATE sessions

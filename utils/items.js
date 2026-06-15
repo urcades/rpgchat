@@ -86,7 +86,12 @@ const ITEM_TEMPLATES = [
   // are inert raw inputs; the Cook verb turns remains into food. dropWeight 0 — parts
   // drop via defeatNpc, outputs are crafted only.
   { templateId: 'monster_remains', name: 'Monster Remains', slotType: 'part', category: 'part', rarity: 'common', modifiers: {}, dropWeight: 0 },
-  { templateId: 'cooked_remains', name: 'Cooked Remains', slotType: 'consumable', category: 'consumable', rarity: 'common', modifiers: {}, onUse: [{ kind: 'heal', amount: 10 }], dropWeight: 0 }
+  { templateId: 'cooked_remains', name: 'Cooked Remains', slotType: 'consumable', category: 'consumable', rarity: 'common', modifiers: {}, onUse: [{ kind: 'heal', amount: 10 }], dropWeight: 0 },
+
+  // Plan 022c: a player corpse — the resurrection anchor. The per-instance name is
+  // "<player>'s Corpse" and `corpseOf` tags whose it is; category 'corpse' makes it
+  // edible (and destroying it severs that player's resurrection forever).
+  { templateId: 'player_corpse', name: 'Corpse', slotType: 'corpse', category: 'corpse', rarity: 'common', modifiers: {}, dropWeight: 0 }
 ];
 
 const SIGNATURE_ITEMS_BY_JOB = {

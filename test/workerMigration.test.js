@@ -591,12 +591,15 @@ test('Killing attack messages are shown before defeat and death system messages'
     await withMockedRandom([0.1, 0.99], () => handleAttackAction(db, 'fighter', calm.row, calm.col, '@rival'));
 
     const updatedMessages = await getMessages(db, calm.row, calm.col);
-    const finalPlayerDeathMessages = updatedMessages.slice(-2);
+    // Plan 022c: a dead player also drops a corpse, so the death line is now last,
+    // preceded by the corpse line and the attack line.
+    const finalPlayerDeathMessages = updatedMessages.slice(-3);
 
     assert.equal(finalPlayerDeathMessages[0].username, 'fighter');
     assert.match(finalPlayerDeathMessages[0].message, /fighter attacked rival for \d+ damage/);
-    assert.equal(finalPlayerDeathMessages[1].username, 'System');
-    assert.equal(finalPlayerDeathMessages[1].message, 'rival has died from attack by fighter.');
+    assert.match(finalPlayerDeathMessages[1].message, /rival's corpse lies here\./);
+    assert.equal(finalPlayerDeathMessages[2].username, 'System');
+    assert.equal(finalPlayerDeathMessages[2].message, 'rival has died from attack by fighter.');
   } finally {
     await db.close();
   }
@@ -988,6 +991,10 @@ test('Worker resurrection link creates a pending request for the current grave',
         (username, password, level, gold, job, cause, roomRow, roomCol)
        VALUES ('fallen', 'pw', 4, 7, 'Mage', 'test', 2, 3)`
     ).run();
+    // Plan 022c: resurrection requires the corpse to still exist.
+    await db.prepare(
+      "INSERT INTO items (templateId, name, slotType, rarity, modifiers, roomRow, roomCol, corpseOf) VALUES ('player_corpse', ?, 'corpse', 'common', '{}', 2, 3, 'fallen')"
+    ).bind("fallen's Corpse").run();
 
     const checkout = await createResurrectionCheckout(db, 'fallen', 'https://buy.stripe.com/test_link');
     const request = await db.prepare(
@@ -1013,6 +1020,10 @@ test('Worker resurrection fulfillment revives a paid grave only once', async () 
         (username, password, level, gold, job, cause, roomRow, roomCol)
        VALUES ('fallen', 'pw', 4, 7, 'Mage', 'test', 2, 3)`
     ).run();
+    // Plan 022c: resurrection requires the corpse to still exist.
+    await db.prepare(
+      "INSERT INTO items (templateId, name, slotType, rarity, modifiers, roomRow, roomCol, corpseOf) VALUES ('player_corpse', ?, 'corpse', 'common', '{}', 2, 3, 'fallen')"
+    ).bind("fallen's Corpse").run();
 
     const checkout = await createResurrectionCheckout(db, 'fallen', 'https://buy.stripe.com/test_link');
     const first = await fulfillResurrectionCheckout(db, checkout.token, 'cs_test_123');
@@ -2381,8 +2392,10 @@ test('Plan 005: a dying player scatters all carried and equipped items', async (
 
     await moveUserToCemetery(db, 'corpse', 'a test fall', 4, 7);
 
+    // Plan 022c: exclude the corpse (also dropped on death) — this asserts the
+    // scattered belongings.
     const items = await db.prepare(
-      "SELECT name, ownerUsername, equippedPartId, roomRow, roomCol FROM items ORDER BY name"
+      "SELECT name, ownerUsername, equippedPartId, roomRow, roomCol FROM items WHERE corpseOf IS NULL ORDER BY name"
     ).all();
     assert.equal(items.results.length, 2);
     for (const item of items.results) {
@@ -2391,6 +2404,8 @@ test('Plan 005: a dying player scatters all carried and equipped items', async (
       assert.equal(item.roomRow, 4);
       assert.equal(item.roomCol, 7);
     }
+    const corpse = await db.prepare("SELECT 1 AS c FROM items WHERE corpseOf = 'corpse'").first();
+    assert.ok(corpse, 'the body itself dropped as a corpse');
 
     const scatterMessage = await db.prepare(
       "SELECT message FROM messages WHERE username = 'System' AND message LIKE '%belongings scatter%' LIMIT 1"
