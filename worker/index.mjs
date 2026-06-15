@@ -47,7 +47,6 @@ import {
   createResurrectionCheckout,
   fulfillResurrectionCheckout
 } from './resurrection.mjs';
-import { MODEL as NPC_MODEL, buildNpcPrompt, generateNpcResponse, parseNpcResponse } from './npcVoice.mjs';
 import { canonicalLocalRequestUrl } from './localHost.mjs';
 import { wantsHtmlResponse, wantsJsonResponse } from './http.mjs';
 import { elapsedMs, logEvent, measureAsync, nowMs } from './observability.mjs';
@@ -740,46 +739,6 @@ app.post('/grid/respec', async c => {
 });
 
 app.get('/tick', async c => c.json({ tick: await getCurrentTickValue(c.env.DB) }));
-
-// TEMPORARY diagnostic (plan 013): hits the AI binding directly and returns the raw
-// result/error so we can see WHY NPC dialogue is falling back to canned lines. Key-gated
-// to avoid drive-by Neuron spend. REMOVE once the binding is confirmed working.
-app.get('/debug/ai', async c => {
-  if (c.req.query('key') !== 'ai-probe-013') {
-    return c.json({ error: 'forbidden' }, 403);
-  }
-  const out = { hasBinding: Boolean(c.env.AI && typeof c.env.AI.run === 'function'), model: NPC_MODEL };
-  if (!out.hasBinding) {
-    return c.json(out);
-  }
-  // 1) Raw model call (proves the binding works at all).
-  try {
-    const r = await c.env.AI.run(NPC_MODEL, { messages: [{ role: 'user', content: 'Reply with a three-word greeting.' }], max_tokens: 20 });
-    out.raw = (r && r.response) ?? r;
-  } catch (e) {
-    out.rawError = String((e && e.message) || e);
-  }
-  // 2) The ACTUAL NPC generation path (same prompt + parse NPCs use) — reveals whether the
-  //    model's output is failing our JSON parse (source 'model' but speech falls back).
-  const ctx = {
-    npc: { displayName: 'Hask', role: 'bartender', disposition: 'neutral' },
-    roomDescription: 'A smoky tavern, low light.',
-    recentMessages: [{ username: 'traveler', message: 'barkeep, what is the strangest thing you have seen this week?' }],
-    addressedBy: 'traveler',
-    mode: 'reply'
-  };
-  // ONE NPC-prompt call, then show its raw output AND what parseNpcResponse makes of that
-  // exact output — so we can see whether the parser is rejecting good model text.
-  try {
-    const { system, user } = buildNpcPrompt(ctx);
-    const r2 = await c.env.AI.run(NPC_MODEL, { messages: [{ role: 'system', content: system }, { role: 'user', content: user }], max_tokens: 120 });
-    out.npcRunRaw = r2;
-    out.npcParsed = parseNpcResponse(r2 && r2.response, 'bartender');
-  } catch (e) {
-    out.npcRunError = String((e && e.message) || e);
-  }
-  return c.json(out);
-});
 
 app.get('/messages/:row/:col', async c => {
   const auth = await currentUserOrResponse(c);
