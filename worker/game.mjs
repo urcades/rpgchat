@@ -351,6 +351,12 @@ export async function cleanupOldWorldDayData(db, worldDay = getWorldDay()) {
      WHERE eventId IN (SELECT id FROM worldEvents WHERE worldDay != ?)`,
     [worldDay]
   );
+  // Plan 013b: social NPCs are anchored to their spawn day; clear yesterday's cast.
+  await dbRun(
+    db,
+    "DELETE FROM users WHERE isNpc = 1 AND npcKind = 'social' AND (npcWorldDay IS NULL OR npcWorldDay != ?)",
+    [worldDay]
+  );
   await dbRun(db, 'DELETE FROM worldEvents WHERE worldDay != ? AND status != ?', [worldDay, 'completed']);
   await dbRun(db, 'DELETE FROM roomPresence WHERE worldDay != ?', [worldDay]);
   await dbRun(db, 'DELETE FROM roomEffectCooldowns WHERE worldDay != ?', [worldDay]);
@@ -420,6 +426,8 @@ async function getRoomPresence(db, row, col, worldDay) {
             u.worldEventId,
             u.incapacitated,
             u.deathClock,
+            u.disposition,
+            u.role,
             rp.lastSeenTick
      FROM roomPresence rp
      JOIN users u ON u.username = rp.username
@@ -534,8 +542,8 @@ export async function createNpcForEvent(db, npc) {
     db,
     `INSERT OR IGNORE INTO users
       (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold,
-       experience, isNpc, displayName, npcKind, worldEventId)
-     VALUES (?, 'npc', 'Novice', ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 1, ?, ?, ?)`,
+       experience, isNpc, displayName, npcKind, worldEventId, disposition)
+     VALUES (?, 'npc', 'Novice', ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 1, ?, ?, ?, 'hostile')`,
     [
       npc.username,
       npc.health,
@@ -586,6 +594,99 @@ export async function createNpcForEvent(db, npc) {
     ]
   );
   return npc;
+}
+
+// Plan 013b: the living social cast. Friendly/neutral NPCs that inhabit a room by its
+// daily archetype — a pub gets a bartender, a barmaid, a patron, a guard. Each carries a
+// REAL job (so 013d reuses the player skill path), a disposition (so they sit out combat
+// until provoked — 013c), and a role (dialogue demeanor + fallback lines). They are
+// anchored to the worldDay and culled on the daily reset, exactly like rooms.
+const SOCIAL_NAME_POOLS = {
+  bartender: ['Hask', 'Bryn', 'Old Pell'],
+  barmaid: ['Sil', 'Mara', 'Joss'],
+  patron: ['a sodden regular', 'a hooded drinker', 'a quiet dicer'],
+  guard: ['Bren', 'Tovin', 'the house guard'],
+  clerk: ['Auria', 'the guild clerk']
+};
+const SOCIAL_ROSTERS = {
+  tavern: [
+    { role: 'bartender', job: 'Fighter', disposition: 'neutral', level: 3 },
+    { role: 'barmaid', job: 'Novice', disposition: 'friendly', level: 1 },
+    { role: 'patron', job: 'Novice', disposition: 'friendly', level: 1 },
+    { role: 'guard', job: 'Fighter', disposition: 'neutral', level: 4 }
+  ],
+  guild: [
+    { role: 'clerk', job: 'Novice', disposition: 'friendly', level: 1 },
+    { role: 'guard', job: 'Fighter', disposition: 'neutral', level: 4 }
+  ]
+};
+
+function socialArchetypeFor(row, col, tickValue, worldDay) {
+  if (roomHasEffect(row, col, tickValue, 'pub', worldDay) || roomHasEffect(row, col, tickValue, 'inn', worldDay)) return 'tavern';
+  if (roomHasEffect(row, col, tickValue, 'guild', worldDay)) return 'guild';
+  return null;
+}
+
+function socialNpcName(role, row, col, index) {
+  const pool = SOCIAL_NAME_POOLS[role] || [role];
+  return pool[(row + col + index) % pool.length];
+}
+
+async function createSocialNpc(db, { username, displayName, role, job, disposition, level, row, col, worldDay, tick }) {
+  await dbRun(
+    db,
+    `INSERT OR IGNORE INTO users
+      (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold,
+       experience, isNpc, displayName, npcKind, disposition, role, npcWorldDay)
+     VALUES (?, 'npc', ?, 24, 24, 100, 100, 4, 5, 3, ?, 0, 0, 1, ?, 'social', ?, ?, ?)`,
+    [username, job, level, displayName, disposition, role, worldDay]
+  );
+  await dbRun(
+    db,
+    `INSERT INTO roomPresence (username, roomRow, roomCol, lastSeenTick, worldDay, lastSeenAt)
+     VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(username, worldDay) DO UPDATE SET
+       roomRow = excluded.roomRow, roomCol = excluded.roomCol,
+       lastSeenTick = excluded.lastSeenTick, lastSeenAt = CURRENT_TIMESTAMP`,
+    [username, row, col, tick, worldDay]
+  );
+}
+
+// Lazily populate a social room when a human is present and it is under-staffed. Idempotent
+// (deterministic per-day usernames + INSERT OR IGNORE), cheap (runs only when a human enters
+// a social room), and self-clearing on the daily reset. Returns { spawned, archetype }.
+export async function ensureSocialPopulation(db, row, col) {
+  const worldDay = getWorldDay();
+  const tick = await getCurrentTickValue(db);
+  const archetype = socialArchetypeFor(row, col, tick, worldDay);
+  if (!archetype) return { spawned: 0, archetype: null };
+  const roster = SOCIAL_ROSTERS[archetype] || [];
+
+  // Alive only when observed — never populate an empty room.
+  const presence = await getRoomPresence(db, row, col, worldDay);
+  if (!presence.some(p => !p.isNpc)) return { spawned: 0, archetype };
+
+  const present = new Set(presence.filter(p => p.isNpc && p.npcKind === 'social').map(p => p.username));
+  let spawned = 0;
+  for (let i = 0; i < roster.length; i += 1) {
+    const entry = roster[i];
+    const username = `soc:${worldDay}:${row}:${col}:${entry.role}:${i}`;
+    if (present.has(username)) continue;
+    await createSocialNpc(db, {
+      username,
+      displayName: socialNpcName(entry.role, row, col, i),
+      role: entry.role,
+      job: entry.job,
+      disposition: entry.disposition,
+      level: entry.level,
+      row,
+      col,
+      worldDay,
+      tick
+    });
+    spawned += 1;
+  }
+  return { spawned, archetype };
 }
 
 async function canSpawnEventNpc(db, npc, currentTick) {
@@ -2946,6 +3047,7 @@ export async function roomHasActiveHostiles(db, row, col) {
      JOIN roomPresence rp ON rp.username = u.username
      WHERE u.isNpc = 1
        AND u.health > 0
+       AND (u.disposition IS NULL OR u.disposition = 'hostile')
        AND rp.roomRow = ?
        AND rp.roomCol = ?
        AND rp.worldDay = ?
@@ -2979,6 +3081,7 @@ export async function runHostileRoomAction(db, row, col) {
      JOIN roomPresence rp ON rp.username = u.username
      WHERE u.isNpc = 1
        AND u.health > 0
+       AND (u.disposition IS NULL OR u.disposition = 'hostile')
        AND rp.roomRow = ?
        AND rp.roomCol = ?
        AND rp.worldDay = ?

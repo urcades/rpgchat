@@ -33,6 +33,7 @@ import {
   unlockProgressionNode,
   payInnAccess,
   requireRoomUse,
+  ensureSocialPopulation,
   roomHasActiveHostiles,
   runHostileRoomAction,
   runNpcReply,
@@ -800,6 +801,12 @@ app.post('/room-presence/:row/:col', async c => {
     runAfterResponse(c, { action: 'presence', roomRow: row, roomCol: col }, async () => {
       const broadcast = await measureAsync(() => broadcastRoom(c.env, row, col, { type: 'presence', username: auth.user.username }));
       const hostileLoop = await measureAsync(() => startHostileLoopIfNeeded(c.env, row, col));
+      // Plan 013b: a player entering a social room (pub/inn/guild) lazily summons its
+      // cast if it's under-staffed; re-broadcast so the newcomers appear immediately.
+      const populated = await measureAsync(() => ensureSocialPopulation(c.env.DB, row, col));
+      if (populated.value && populated.value.spawned > 0) {
+        await broadcastRoom(c.env, row, col, { type: 'presence', username: auth.user.username });
+      }
       logEvent({
         event: 'action.background',
         action: 'presence',
