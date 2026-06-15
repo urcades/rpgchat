@@ -47,7 +47,7 @@ import {
   createResurrectionCheckout,
   fulfillResurrectionCheckout
 } from './resurrection.mjs';
-import { MODEL as NPC_MODEL } from './npcVoice.mjs';
+import { MODEL as NPC_MODEL, buildNpcPrompt, generateNpcResponse } from './npcVoice.mjs';
 import { canonicalLocalRequestUrl } from './localHost.mjs';
 import { wantsHtmlResponse, wantsJsonResponse } from './http.mjs';
 import { elapsedMs, logEvent, measureAsync, nowMs } from './observability.mjs';
@@ -752,13 +752,29 @@ app.get('/debug/ai', async c => {
   if (!out.hasBinding) {
     return c.json(out);
   }
+  // 1) Raw model call (proves the binding works at all).
   try {
     const r = await c.env.AI.run(NPC_MODEL, { messages: [{ role: 'user', content: 'Reply with a three-word greeting.' }], max_tokens: 20 });
-    out.ok = true;
-    out.response = (r && r.response) ?? r;
+    out.raw = (r && r.response) ?? r;
   } catch (e) {
-    out.ok = false;
-    out.error = String((e && e.message) || e);
+    out.rawError = String((e && e.message) || e);
+  }
+  // 2) The ACTUAL NPC generation path (same prompt + parse NPCs use) — reveals whether the
+  //    model's output is failing our JSON parse (source 'model' but speech falls back).
+  const ctx = {
+    npc: { displayName: 'Hask', role: 'bartender', disposition: 'neutral' },
+    roomDescription: 'A smoky tavern, low light.',
+    recentMessages: [{ username: 'traveler', message: 'barkeep, what is the strangest thing you have seen this week?' }],
+    addressedBy: 'traveler',
+    mode: 'reply'
+  };
+  out.npc = await generateNpcResponse(c.env.AI, ctx);
+  try {
+    const { system, user } = buildNpcPrompt(ctx);
+    const r2 = await c.env.AI.run(NPC_MODEL, { messages: [{ role: 'system', content: system }, { role: 'user', content: user }], max_tokens: 120 });
+    out.npcRaw = (r2 && r2.response) ?? r2;
+  } catch (e) {
+    out.npcRawError = String((e && e.message) || e);
   }
   return c.json(out);
 });
