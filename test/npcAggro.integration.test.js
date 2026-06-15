@@ -182,7 +182,11 @@ test('Plan 013e: a social NPC is attackable by DISPLAY NAME (its username is an 
     // Username has colons (like a real social NPC) — unmentionable; only the display name works.
     await addSocialNpc(db, game, 'soc:2099:1:1:barmaid:0', 'Mara', 'friendly', 'barmaid', room.row, room.col);
 
-    await withForcedHit(() => game.handleAttack(db, 'brawler', 'attack Mara', room.row, room.col));
+    const result = await withForcedHit(() => game.handleAttack(db, 'brawler', 'attack Mara', room.row, room.col));
+
+    // The combat log must read by display name, never the opaque soc:... username.
+    assert.match(result, /attacked Mara|critical hit on Mara/, 'combat line uses the display name');
+    assert.ok(!result.includes('soc:2099'), 'the internal username never leaks into the log');
 
     const mara = await db.prepare("SELECT disposition, health FROM users WHERE username = 'soc:2099:1:1:barmaid:0'").first();
     assert.equal(mara.disposition, 'hostile', 'striking her by name turned her hostile');

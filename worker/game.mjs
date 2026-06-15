@@ -3284,7 +3284,7 @@ export async function runHostileRoomAction(db, row, col) {
   const { damage: baseDamage, isCriticalAttack } = await calculateAttackDamage(db, npc, player.username, tick.tick, null);
   const damage = Math.max(0, baseDamage + playerStance.damageTakenDelta);
   const damageResult = await applyBodyDamage(db, player, damage, {
-    cause: `attack by ${npc.username}`,
+    cause: `attack by ${npc.displayName || npc.username}`,
     row,
     col
   });
@@ -3310,7 +3310,7 @@ export async function runHostileRoomAction(db, row, col) {
   if (damageResult.died) {
     // Plan 023b: a creature's killing bite downs the player (or finishes a downed one).
     await descendTowardDeath(db, player.username, {
-      cause: `attack by ${npc.username}`,
+      cause: `attack by ${npc.displayName || npc.username}`,
       row,
       col,
       blowDamage: damage,
@@ -3608,8 +3608,11 @@ export async function handleAttack(db, username, message, row, col, options = {}
     const dodgeDelta = targetStance.dodgeBonus;
 
     const speedContest = rollSpeedContest(attacker, target, attackerMods, targetMods, { hitDelta, dodgeDelta });
+    // Plan 013e fix: NPC usernames are opaque ids (soc:..:barmaid:1) — combat lines must
+    // read by display name. Players have none, so displayName falls back to username.
+    const targetName = user.displayName || user.username;
     if (!speedContest.hit) {
-      attackMessages.push(`${user.username} dodged ${username}'s attack`);
+      attackMessages.push(`${targetName} dodged ${username}'s attack`);
       continue;
     }
 
@@ -3629,8 +3632,8 @@ export async function handleAttack(db, username, message, row, col, options = {}
     const remainingHealth = attackedUser ? attackedUser.health : 0;
     const wasKilled = damageResult.died;
     const attackMessage = isCriticalAttack
-      ? `${username} landed a critical hit on ${user.username} for ${damage} damage!`
-      : `${username} attacked ${user.username} for ${damage} damage`;
+      ? `${username} landed a critical hit on ${targetName} for ${damage} damage!`
+      : `${username} attacked ${targetName} for ${damage} damage`;
 
     attackMessages.push(attackMessage);
 
@@ -3653,7 +3656,7 @@ export async function handleAttack(db, username, message, row, col, options = {}
           targetDisplayName: target.displayName || null
         });
         if (applied && applied.status && !applied.resisted) {
-          attackMessages.push(`${user.username} suffers ${applied.status} (${applied.magnitude})`);
+          attackMessages.push(`${targetName} suffers ${applied.status} (${applied.magnitude})`);
         }
       }
     }

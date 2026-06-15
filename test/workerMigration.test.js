@@ -583,7 +583,7 @@ test('Killing attack messages are shown before defeat and death system messages'
     const finalMessages = messages.slice(-3);
 
     assert.equal(finalMessages[0].username, 'fighter');
-    assert.match(finalMessages[0].message, /fighter attacked npc_scout for \d+ damage/);
+    assert.match(finalMessages[0].message, /fighter attacked Ash Scout for \d+ damage/);
     assert.equal(finalMessages[1].username, 'System');
     assert.equal(finalMessages[1].message, 'Ash Scout is defeated by fighter.');
     assert.match(finalMessages[2].message, /Ash Scout leaves behind remains\./);
@@ -646,7 +646,7 @@ test('Hostile NPC room action can kill a present player through the normal cemet
 
     assert.equal(livePlayer, null);
     assert.equal(grave.username, 'victim');
-    assert.match(grave.cause, /raid_brute_test/);
+    assert.match(grave.cause, /Raid Brute/);
   } finally {
     await db.close();
   }
