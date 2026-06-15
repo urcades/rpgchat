@@ -335,16 +335,11 @@ a, button, input, select {
   font-style: italic;
 }
 
-/* Plan 023c: the bleeding-out state — a stark banner for the downed, and a marker
-   on prone bystanders in the room presence line. */
-.bleeding-banner {
-  background: #b00020;
-  color: #ffffff;
+/* Plan 023c/013e: the bleeding-out state. The Health stat goes red + negative inline
+   (no layout-breaking banner); prone bystanders are marked in the presence line. */
+.bleeding-out {
+  color: #b00020;
   font-weight: 700;
-  letter-spacing: 0.03em;
-  margin: 0 0 0.5rem;
-  padding: 0.4em 0.6em;
-  text-align: center;
 }
 
 .prone-marker {

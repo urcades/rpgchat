@@ -146,14 +146,14 @@ test('Plan 023b: the passive bleed drives the clock to the floor, then true deat
     await downOneVictim(db, 'slayer', 'fading', room);
     const { processIncapacitationBleed } = await import('../worker/game.mjs');
 
-    // One pulse: clock -3, still alive.
+    // Plan 013e: one tick bleeds exactly one point — smooth, not batched.
     await processIncapacitationBleed(db, 1);
     const afterOne = await db.prepare("SELECT incapacitated, deathClock FROM users WHERE username = 'fading'").first();
-    assert.equal(afterOne.deathClock, -3);
+    assert.equal(afterOne.deathClock, -1);
     assert.equal(afterOne.incapacitated, 1);
 
-    // Bleed the rest of the way out (0 -> -30 at -3/pulse => 10 pulses total).
-    for (let i = 0; i < 10; i += 1) {
+    // Bleed the rest of the way out (0 -> -30 at -1/tick => ~30 ticks).
+    for (let i = 0; i < 30; i += 1) {
       await processIncapacitationBleed(db, 2 + i);
     }
 

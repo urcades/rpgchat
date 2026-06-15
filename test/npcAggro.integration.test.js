@@ -73,6 +73,12 @@ async function humanSays(db, username, row, col, message) {
   await db.prepare('INSERT INTO messages (roomRow, roomCol, username, message, kind) VALUES (?, ?, ?, ?, ?)').bind(row, col, username, message, 'chat').run();
 }
 
+async function withForcedHit(fn) {
+  const real = Math.random;
+  Math.random = () => 0; // low roll => attacker wins the speed contest
+  try { return await fn(); } finally { Math.random = real; }
+}
+
 test('Plan 013c: provoking the room flips every friendly NPC hostile, and combat wakes', async () => {
   const db = await createMigratedDb();
   const game = await import('../worker/game.mjs');
@@ -162,6 +168,64 @@ test('Plan 013c (fixed): a threat provokes even while NPC dialogue is on cooldow
     assert.ok(result.provoked >= 1, 'but the threat still turned the room (provoke decoupled from cooldown)');
     const mara = await db.prepare("SELECT disposition FROM users WHERE username = 'soc_bar_cd'").first();
     assert.equal(mara.disposition, 'hostile');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 013e: a social NPC is attackable by DISPLAY NAME (its username is an unmentionable id)', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  try {
+    const room = findCalmRoom(getWorldDay());
+    await addHuman(db, game, 'brawler', room.row, room.col);
+    // Username has colons (like a real social NPC) — unmentionable; only the display name works.
+    await addSocialNpc(db, game, 'soc:2099:1:1:barmaid:0', 'Mara', 'friendly', 'barmaid', room.row, room.col);
+
+    await withForcedHit(() => game.handleAttack(db, 'brawler', 'attack Mara', room.row, room.col));
+
+    const mara = await db.prepare("SELECT disposition, health FROM users WHERE username = 'soc:2099:1:1:barmaid:0'").first();
+    assert.equal(mara.disposition, 'hostile', 'striking her by name turned her hostile');
+    assert.ok(mara.health < 20, `she took the blow (${mara.health})`);
+    const snarl = await db.prepare("SELECT message FROM messages WHERE message LIKE '%snarls:%' ORDER BY id DESC LIMIT 1").first();
+    assert.ok(snarl, 'an enmity bark was emitted on provocation');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 013e: a player can attack themselves (@self)', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  try {
+    const room = findCalmRoom(getWorldDay());
+    await addHuman(db, game, 'masochist', room.row, room.col);
+    await game.getUserState(db, 'masochist'); // instantiate body
+    const before = (await db.prepare("SELECT health FROM users WHERE username = 'masochist'").first()).health;
+
+    await withForcedHit(() => game.handleAttack(db, 'masochist', '@self', room.row, room.col));
+
+    const after = (await db.prepare("SELECT health FROM users WHERE username = 'masochist'").first()).health;
+    assert.ok(after < before, `self-harm dealt damage (${before} -> ${after})`);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 013e: a downed (incapacitated) player keeps the hostile room active', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  try {
+    const room = findCalmRoom(getWorldDay());
+    await addSocialNpc(db, game, 'soc:2099:1:1:guard:0', 'Bren', 'hostile', 'guard', room.row, room.col);
+    await addHuman(db, game, 'victim', room.row, room.col);
+    await game.getUserState(db, 'victim');
+    await game.descendTowardDeath(db, 'victim', { cause: 'attack by Bren', row: room.row, col: room.col, blowDamage: 6, overkill: 2, currentTick: 1 });
+
+    const downed = await db.prepare("SELECT incapacitated, health FROM users WHERE username = 'victim'").first();
+    assert.equal(downed.incapacitated, 1);
+    assert.equal(downed.health, 0);
+    assert.equal(await game.roomHasActiveHostiles(db, room.row, room.col), true, 'the mob keeps at the downed player');
   } finally {
     await db.close();
   }

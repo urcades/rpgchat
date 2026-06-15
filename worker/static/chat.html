@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
+  <meta charset="utf-8">
   <title>Chat</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
@@ -251,15 +252,14 @@
       currentJob = data.job || 'Novice';
       incapacitated = !!data.incapacitated; // Plan 023b/c
       document.getElementById('character-link').textContent = data.displayName || data.username || 'Status';
-      // Plan 023c: a downed player gets a stark banner instead of a stat block — they
-      // are bleeding out, and can do nothing but whisper while the clock ticks down.
-      const banner = incapacitated
-        ? `<p class="bleeding-banner">YOU ARE BLEEDING OUT — ${data.deathClock ?? 0} / -30. You can only whisper.</p>`
-        : '';
+      // Plan 013e: while bleeding out, the Health stat itself goes negative — the death
+      // clock IS your health now — with an inline note, instead of a layout-breaking banner.
+      const healthLine = incapacitated
+        ? `<p class="bleeding-out">Health: ${data.deathClock ?? 0}/${effective.maxHealth} — bleeding out, whisper only</p>`
+        : `<p>Health: ${effective.health}/${effective.maxHealth}</p>`;
       attributesDiv.innerHTML = `
-        ${banner}
         <p>${data.job || 'Novice'} ~ Level ${data.level}</p>
-        <p>Health: ${effective.health}/${effective.maxHealth}</p>
+        ${healthLine}
         <p>Stamina: ${effective.stamina}/${effective.maxStamina}</p>
         <p>Speed: ${effective.speed}</p>
         <p>Strength: ${effective.strength}</p>

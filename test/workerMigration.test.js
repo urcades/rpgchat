@@ -981,9 +981,9 @@ test('Worker skill deaths record the skill and source in the cemetery cause', as
       "SELECT incapacitated, downedCause FROM users WHERE username = 'poisoned'"
     ).first();
 
-    // Bleed the poisoned victim all the way out (clock 0 -> -30 at -3/pulse) and confirm
+    // Bleed the poisoned victim all the way out (clock 0 -> -30 at -1/tick) and confirm
     // the skill+source survives into the cemetery cause.
-    for (let i = 0; i < 11; i += 1) {
+    for (let i = 0; i < 31; i += 1) {
       await processIncapacitationBleed(db, 3 + i);
     }
     const poisonGrave = await db.prepare(

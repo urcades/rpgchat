@@ -96,7 +96,7 @@ const REGROW_STAMINA_COST = 20;
 const REGROW_EFFECT_TYPE = 'regrow';
 const HARMFUL_EFFECTS = new Set(['poison', 'arcane_pin', 'marked']);
 const AMBIENT_HOSTILE_RESPAWN_INTERVAL = 6;
-const NPC_VOICE_INTERVAL = 4; // Plan 013a: min ticks between NPC dialogue lines per room
+const NPC_VOICE_INTERVAL = 1; // Plan 013e: near-immediate replies — NPCs answer almost every line
 const NPC_HEAL_AMOUNT = 12; // Plan 013d: HP a friendly NPC cleric restores when tending a wounded asker
 // Plan 023b: the incapacitated negative-HP band. At 0 HP a player falls
 // incapacitated (deathClock 0); further blows and the passive pulse drive the
@@ -104,7 +104,7 @@ const NPC_HEAL_AMOUNT = 12; // Plan 013d: HP a friendly NPC cleric restores when
 // GIB_OVERKILL or more (or overkill spilling past a live body) dismembers them
 // outright — the gib — skipping the clock entirely.
 const DEATH_FLOOR = -30;
-const INCAP_BLEED_PER_PULSE = 3; // ~10-minute window at one cron pulse/min
+const INCAP_BLEED_PER_TICK = 1; // Plan 013e: bleed one point per world tick, smoothly — not batched
 const GIB_OVERKILL = 15;
 const INCAP_BLOW_MIN = 5;
 const REVIVE_HEAL_AMOUNT = 12; // Plan 023d: HP a Cleric's revive restores when lifting a downed ally
@@ -1160,6 +1160,17 @@ export function classifyHostileText(text) {
   return HOSTILE_SPEECH.test(String(text || ''));
 }
 
+// Plan 013e: what a freshly-provoked NPC snarls so the player knows they started a fight.
+const HOSTILE_BARKS = [
+  'Stop that — now!',
+  "You'll bleed for that.",
+  'Guards! Take him!',
+  'Draw steel, then.',
+  "That's the last mistake you'll make.",
+  'You dare?!',
+  "Wrong tavern to try that in."
+];
+
 // Plan 013d: the model-absent floor for a plea. The model also flags request:'heal' for
 // subtler asks; this catches the overt ones (and survives a downed player's garbled cry).
 const HELP_REQUEST = /\b(help|heal|save|revive|raise me|mercy|don'?t let me die|please)\b/i;
@@ -1186,10 +1197,13 @@ export async function provokeRoomNpcs(db, row, col, { deferredSystemMessages = n
     await dbRun(db, "UPDATE users SET disposition = 'hostile' WHERE username = ?", [npc.username]);
   }
   const names = turning.map(n => n.displayName || n.username);
-  const message = names.length > 1
-    ? `${names[0]} and the others turn on you!`
-    : `${names[0]} turns hostile!`;
-  await emitSystemMessage(db, row, col, message, deferredSystemMessages, 'combat');
+  // Plan 013e: enmity is announced — the lead NPC snarls a warning so the player KNOWS
+  // they just bought a fight (not a silent disposition flip).
+  const bark = HOSTILE_BARKS[Math.floor(Math.random() * HOSTILE_BARKS.length)];
+  await emitSystemMessage(db, row, col, `${names[0]} snarls: "${bark}"`, deferredSystemMessages, 'combat');
+  if (names.length > 1) {
+    await emitSystemMessage(db, row, col, `${names.slice(1).join(', ')} round on you too.`, deferredSystemMessages, 'combat');
+  }
   return { provoked: turning.length, names };
 }
 
@@ -1240,10 +1254,15 @@ export async function runNpcReply(db, ai, row, col) {
     return { spoke: false, provoked };
   }
 
-  // Responder: an NPC named in the human's line, else a present NPC at random.
+  // Responder: an NPC named in the human's line; else (Plan 013e) the NPC who last spoke
+  // here, so a back-and-forth stays with the same character; else a present NPC at random.
   const text = String(last.message || '').toLowerCase();
   const addressed = npcs.find(n => (n.displayName && text.includes(String(n.displayName).toLowerCase())) || text.includes(String(n.username).toLowerCase()));
-  const speaker = addressed || npcs[Math.floor(Math.random() * npcs.length)];
+  let speaker = addressed;
+  if (!speaker) {
+    const lastNpcLine = [...recent].reverse().find(m => npcs.some(n => n.username === m.username));
+    speaker = (lastNpcLine && npcs.find(n => n.username === lastNpcLine.username)) || npcs[Math.floor(Math.random() * npcs.length)];
+  }
   if (!speaker) {
     return { spoke: false, provoked };
   }
@@ -1556,13 +1575,17 @@ export async function processIncapacitationBleed(db, currentTick = null) {
   for (const d of downed) {
     const row = d.roomRow ?? 0;
     const col = d.roomCol ?? 0;
-    const next = d.deathClock - INCAP_BLEED_PER_PULSE;
+    const next = d.deathClock - INCAP_BLEED_PER_TICK;
     if (next <= DEATH_FLOOR) {
       const cause = d.downedCause ? `bled out after ${d.downedCause}` : 'bled out';
       await trueDeath(db, d.username, cause, row, col, { currentTick });
     } else {
       await dbRun(db, 'UPDATE users SET deathClock = ? WHERE username = ?', [next, d.username]);
-      await insertSystemMessage(db, row, col, `${d.username} bleeds, fading (${next}/${DEATH_FLOOR}).`, 'death');
+      // Plan 013e: the health bar now shows the falling count live, so the room only gets
+      // an occasional gasp (every ~5 points) instead of a line every single tick.
+      if (next % 5 === 0) {
+        await insertSystemMessage(db, row, col, `${d.username} bleeds, fading (${next}/${DEATH_FLOOR}).`, 'death');
+      }
     }
   }
 }
@@ -1585,13 +1608,29 @@ async function isIncapacitated(db, username) {
 // come out in ragged fragments — only ~every fourth survives, the rest collapse into
 // an ellipsis ("please … … help … …"). Deterministic by position so it is testable
 // and never RNG-flaky.
-export function garbleSpeech(text) {
+export const DEATH_NOISES = ['*gurgles*', '*coughs blood*', '*wheezes*', '*chokes*', '*rattles*', '*spits red*'];
+
+export function garbleSpeech(text, random = Math.random) {
+  // Plan 013e: a drowning, broken voice. Each word RANDOMLY survives (~1 in 4), is lost to
+  // an ellipsis, or breaks into a wet death-noise — so no two pleas read the same. `random`
+  // is injectable for tests.
+  const noise = () => DEATH_NOISES[Math.floor(random() * DEATH_NOISES.length)] || DEATH_NOISES[0];
   const words = String(text || '').trim().split(/\s+/).filter(Boolean);
   if (words.length === 0) {
-    return '…';
+    return noise();
   }
-  const kept = words.map((word, index) => (index % 4 === 0 ? word : '…'));
-  return kept.join(' ').replace(/(?:…\s*){2,}/g, '… ').trim();
+  const out = words.map(word => {
+    const r = random();
+    if (r < 0.25) return word;       // survives
+    if (r < 0.34) return noise();    // a wet noise breaks through
+    return '…';                      // lost
+  });
+  let line = out.join(' ').replace(/(?:…\s*){2,}/g, '… ').trim();
+  // Never let it collapse to nothing or a lone ellipsis — surface a death rattle.
+  if (!line || line === '…') {
+    line = `${noise()} …`;
+  }
+  return line;
 }
 
 function getKillerFromCause(cause) {
@@ -3158,7 +3197,7 @@ export async function roomHasActiveHostiles(db, row, col) {
      FROM users u
      JOIN roomPresence rp ON rp.username = u.username
      WHERE u.isNpc = 0
-       AND u.health > 0
+       AND (u.health > 0 OR u.incapacitated = 1)
        AND rp.roomRow = ?
        AND rp.roomCol = ?
        AND rp.worldDay = ?
@@ -3193,7 +3232,7 @@ export async function runHostileRoomAction(db, row, col) {
      FROM users u
      JOIN roomPresence rp ON rp.username = u.username
      WHERE u.isNpc = 0
-       AND u.health > 0
+       AND (u.health > 0 OR u.incapacitated = 1)
        AND rp.roomRow = ?
        AND rp.roomCol = ?
        AND rp.worldDay = ?
@@ -3484,36 +3523,55 @@ export async function validateAttackTargets(db, message, row, col, attackerUsern
   const worldDay = getWorldDay();
   const occupants = await dbAll(
     db,
-    `SELECT u.username
+    `SELECT u.username, COALESCE(u.displayName, u.username) AS displayName
      FROM roomPresence rp
      JOIN users u ON u.username = rp.username
      WHERE rp.roomRow = ?
        AND rp.roomCol = ?
        AND rp.worldDay = ?
        AND rp.username != 'System'
-       AND u.username != ?
        AND (u.isNpc = 1 OR rp.lastSeenAt >= datetime('now', ?))`,
-    [row, col, worldDay, attackerUsername, `-${PRESENCE_MAX_AGE_SECONDS} seconds`]
+    [row, col, worldDay, `-${PRESENCE_MAX_AGE_SECONDS} seconds`]
   );
+  // Plan 013e: self-attack is allowed when explicitly named (or @self / @me). Put the
+  // attacker in the pool so naming yourself resolves; everyone else stays a normal target.
+  const attacker = await dbFirst(db, 'SELECT username, COALESCE(displayName, username) AS displayName FROM users WHERE username = ?', [attackerUsername]);
+  const pool = attacker
+    ? [...occupants.filter(o => o.username !== attackerUsername), attacker]
+    : occupants;
 
-  const mentioned = [...message.matchAll(/@([A-Za-z0-9_-]+)/g)].map(m => m[1]);
-  if (mentioned.length > 0) {
-    const byName = new Map(occupants.map(user => [user.username, user]));
-    const targets = [...new Set(mentioned)]
-      .map(name => byName.get(name))
-      .filter(Boolean);
-    if (targets.length === 0) {
+  const mentioned = [...message.matchAll(/@([A-Za-z0-9_-]+)/g)].map(m => m[1].toLowerCase());
+  const selfNamed = mentioned.includes('self') || mentioned.includes('me');
+  // Plan 013e: match by displayName (what players SEE) as well as username — social NPC
+  // usernames are unmentionable ids like "soc:..:clerk:0", so naming them needs the display
+  // name. Whole-name boundaries (not raw substring) so "moss" doesn't match "mossy".
+  const matchesName = (name) => {
+    const n = String(name || '').toLowerCase();
+    if (n.length < 2) {
+      return false;
+    }
+    return new RegExp(`(^|[^a-z0-9_-])${escapeRegExp(n)}([^a-z0-9_-]|$)`, 'i').test(message);
+  };
+
+  const matches = pool.filter(target => {
+    if (selfNamed && target.username === attackerUsername) {
+      return true;
+    }
+    const uname = String(target.username).toLowerCase();
+    const dname = String(target.displayName).toLowerCase();
+    if (mentioned.includes(uname) || mentioned.includes(dname)) {
+      return true;
+    }
+    return matchesName(dname) || matchesName(uname);
+  });
+  const targets = [...new Map(matches.map(target => [target.username, target])).values()];
+  if (targets.length === 0) {
+    // A specific @mention that matched no one => that target isn't here; otherwise the
+    // player simply named no one.
+    if (mentioned.length > 0) {
       throw new ActionError('No such target here.');
     }
-    return targets;
-  }
-
-  const targets = occupants.filter(user => {
-    const pattern = new RegExp(`(^|[^A-Za-z0-9_-])${escapeRegExp(user.username)}([^A-Za-z0-9_-]|$)`);
-    return pattern.test(message);
-  });
-  if (targets.length === 0) {
-    throw new ActionError('Attack needs a target name.');
+    throw new ActionError("Attack needs a target name (the NPC's name, or @self).");
   }
   return targets;
 }
