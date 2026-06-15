@@ -84,6 +84,24 @@ const ABILITIES = {
     ]
   },
 
+  // Plan 012 — keyword rites: language AS mechanics (the moat). Cast via
+  // /cast <incantation> @target. Stamina cost AND damage scale with the
+  // incantation's word count (cost.linguistic + the behavior reads ctx.incantation):
+  // a verbose rite hits harder but costs more; brevity is cheap but weak. (Mastery —
+  // doing more with fewer words at higher level — is a future tuning lever.)
+  word_bolt: {
+    id: 'word_bolt', label: 'Word Bolt', kind: 'active', target: 'enemy', contest: true,
+    costStamina: 1,
+    cost: { stamina: 1, linguistic: { perWord: 1, max: 12 } },
+    description: 'A spoken bolt — the more words you incant, the harder it strikes (and the more it costs).',
+    effects: [
+      'Cast via /cast <incantation> @target.',
+      'Damage = 2 + the word count of your incantation.',
+      'Stamina = 1 + word count (capped at 13).',
+      'Uses a speed contest, so faster targets can dodge it.'
+    ]
+  },
+
   // Plan 011 — the Cleric's revival rite. Target 'corpse' skips the live-target
   // check (the ally is dead); the behavior finds their corpse in the room and
   // restores them from the grave (consuming the corpse). Ties into the 022c anchor.
@@ -150,7 +168,7 @@ const CLASS_ABILITIES = {
   Fighter: ['power_strike', 'brace', 'toughness'],
   Chemist: ['dose'],
   Dungeoneer: ['survey'],
-  Mage: ['arcane_pin'],
+  Mage: ['arcane_pin', 'word_bolt'],
   Assassin: ['mark'],
   Cleric: ['bless', 'revive']
 };

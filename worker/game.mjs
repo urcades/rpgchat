@@ -3268,16 +3268,16 @@ async function tryHarmfulSkillHit(db, { effectiveActor, target, skillLabel, row,
   return false;
 }
 
-export async function useClassSkill(db, { username, skillId, targetUsername, row, col, currentTick, phase }) {
+export async function useClassSkill(db, { username, skillId, targetUsername, row, col, currentTick, phase, incantation = '' }) {
   const { effectiveActor, target } = await validateClassSkillUse(db, { username, skillId, targetUsername });
-  return runAbility(db, skillId, { username, effectiveActor, target, row, col, currentTick, phase });
+  return runAbility(db, skillId, { username, effectiveActor, target, row, col, currentTick, phase, incantation });
 }
 
 // The ability resolver: behavior keyed by ability id, callable by any invoker (a
 // player class skill today; an equipped item or an NPC tomorrow — plans 018c/021).
 // Behavior parity with the per-class switch it replaced: identical formulas,
 // messages, and message kinds. Validation and targeting happen in the caller.
-export async function runAbility(db, abilityId, { username, effectiveActor, target, row, col, currentTick, phase }) {
+export async function runAbility(db, abilityId, { username, effectiveActor, target, row, col, currentTick, phase, incantation = '' }) {
   switch (abilityId) {
     case 'scrounge': {
       const gold = 1 + Math.max(1, Math.floor(effectiveActor.intelligence / 2));
@@ -3492,6 +3492,22 @@ export async function runAbility(db, abilityId, { username, effectiveActor, targ
       const message = `${username} revives ${target}!`;
       await insertSystemMessage(db, row, col, message, 'support');
       return { message, revived: target };
+    }
+    case 'word_bolt': {
+      // Plan 012: the rite's power scales with the incantation's word count (its
+      // stamina cost already scaled, in handleSkillAction). Language as mechanics.
+      const hit = await tryHarmfulSkillHit(db, { effectiveActor, target, skillLabel: 'Word Bolt', row, col });
+      if (!hit) {
+        return { message: `${target} dodged ${username}'s Word Bolt.`, missed: true };
+      }
+      const words = String(incantation || '').trim().split(/\s+/).filter(Boolean).length;
+      const damage = 2 + words;
+      const result = await damageUser(db, target, damage, `word bolt by ${username}`, row, col);
+      const message = words > 0
+        ? `${username} incants a ${words}-word bolt at ${target} for ${damage} damage.`
+        : `${username} sputters a wordless bolt at ${target} for ${damage} damage.`;
+      await insertSystemMessage(db, row, col, message, 'rite');
+      return { message, damage, words, ...result };
     }
     default:
       throw new ActionError('Unknown skill.');
@@ -4056,6 +4072,12 @@ export async function handleChatAction(db, username, row, col, message) {
     });
   }
 
+  if (message.trim().toLowerCase().startsWith('/cast')) {
+    // handleCastAction routes through handleSkillAction, which owns the
+    // runPlayerAction (stamina/tick), so it isn't wrapped again here.
+    return handleCastAction(db, username, row, col, message);
+  }
+
   if (message.trim().toLowerCase().startsWith('/unsocket')) {
     return runPlayerAction(db, {
       username,
@@ -4165,10 +4187,38 @@ export async function handleSkillAction(db, username, row, col, skillId, targetU
       row,
       col,
       currentTick: actionTick,
-      phase: getPhaseFromTick(actionTick)
+      phase: getPhaseFromTick(actionTick),
+      incantation
     }),
     advanceTick: () => advanceGlobalTick(db)
   });
+}
+
+// Plan 012: cast a keyword rite from chat — /cast <incantation> @target. Resolves
+// the player's linguistic ability (one whose cost reads the words), extracts the
+// @mention target, and runs it through the normal skill flow with the incantation
+// (which scales both its stamina cost and its power).
+export async function handleCastAction(db, username, row, col, message) {
+  const rest = commandRest(message, '/cast');
+  if (!rest) {
+    throw new ActionError('Use /cast <incantation> @target.');
+  }
+  const mention = rest.match(/@([A-Za-z0-9_-]+)/);
+  const target = mention ? mention[1] : '';
+  assertAction(target, 'Name a target: /cast <incantation> @who.', 400);
+  const incantation = rest.replace(/@[A-Za-z0-9_-]+/g, '').replace(/\s+/g, ' ').trim();
+
+  const actor = await getUser(db, username);
+  const effectiveActor = getEffectiveUser(actor);
+  const usable = await getUsableAbilityIds(db, username, effectiveActor);
+  const abilityId = usable.find(id => {
+    const ability = getAbility(id);
+    return ability && ability.cost && ability.cost.linguistic;
+  });
+  assertAction(abilityId, 'You know no rites to cast.', 400);
+
+  const actionTick = await getCurrentTickValue(db);
+  return handleSkillAction(db, username, row, col, abilityId, target, actionTick, incantation);
 }
 
 export async function handleJobChangeAction(db, username, row, col, nextJob, roomUse) {

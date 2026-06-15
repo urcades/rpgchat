@@ -319,6 +319,12 @@ a, button, input, select {
   color: #6f4aa5;
 }
 
+/* Plan 012: keyword rites — incanted spells read as arcane, set-apart speech. */
+.rite-message {
+  color: #7a3ea5;
+  font-style: italic;
+}
+
 .death-message {
   color: #b00020;
 }
