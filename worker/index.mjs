@@ -47,6 +47,7 @@ import {
   createResurrectionCheckout,
   fulfillResurrectionCheckout
 } from './resurrection.mjs';
+import { MODEL as NPC_MODEL } from './npcVoice.mjs';
 import { canonicalLocalRequestUrl } from './localHost.mjs';
 import { wantsHtmlResponse, wantsJsonResponse } from './http.mjs';
 import { elapsedMs, logEvent, measureAsync, nowMs } from './observability.mjs';
@@ -739,6 +740,28 @@ app.post('/grid/respec', async c => {
 });
 
 app.get('/tick', async c => c.json({ tick: await getCurrentTickValue(c.env.DB) }));
+
+// TEMPORARY diagnostic (plan 013): hits the AI binding directly and returns the raw
+// result/error so we can see WHY NPC dialogue is falling back to canned lines. Key-gated
+// to avoid drive-by Neuron spend. REMOVE once the binding is confirmed working.
+app.get('/debug/ai', async c => {
+  if (c.req.query('key') !== 'ai-probe-013') {
+    return c.json({ error: 'forbidden' }, 403);
+  }
+  const out = { hasBinding: Boolean(c.env.AI && typeof c.env.AI.run === 'function'), model: NPC_MODEL };
+  if (!out.hasBinding) {
+    return c.json(out);
+  }
+  try {
+    const r = await c.env.AI.run(NPC_MODEL, { messages: [{ role: 'user', content: 'Reply with a three-word greeting.' }], max_tokens: 20 });
+    out.ok = true;
+    out.response = (r && r.response) ?? r;
+  } catch (e) {
+    out.ok = false;
+    out.error = String((e && e.message) || e);
+  }
+  return c.json(out);
+});
 
 app.get('/messages/:row/:col', async c => {
   const auth = await currentUserOrResponse(c);

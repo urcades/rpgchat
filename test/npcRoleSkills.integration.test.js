@@ -80,6 +80,15 @@ async function downThePlayer(db, game, attacker, victim, room) {
   await game.descendTowardDeath(db, victim, { cause: `attack by ${attacker}`, row: room.row, col: room.col, blowDamage: 6, overkill: 2, currentTick: 1 });
 }
 
+async function addWoundedHuman(db, game, username, row, col, health) {
+  await db.prepare(
+    `INSERT INTO users (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level)
+     VALUES (?, 'pw', 'Fighter', ?, 30, 100, 100, 5, 5, 5, 1)`
+  ).bind(username, health).run();
+  await game.updatePresence(db, username, row, col);
+  await game.getUserState(db, username); // body parts sum to health/maxHealth
+}
+
 async function humanSays(db, username, row, col, message) {
   await db.prepare('INSERT INTO messages (roomRow, roomCol, username, message, kind) VALUES (?, ?, ?, ?, ?)').bind(row, col, username, message, 'chat').run();
 }
@@ -124,6 +133,28 @@ test('Plan 013d: a HOSTILE cleric does not heal you, no matter how nicely you as
     assert.equal(result.helped, null, 'a hostile cleric will not lift a finger');
     const after = await db.prepare("SELECT incapacitated FROM users WHERE username = 'pilgrim'").first();
     assert.equal(after.incapacitated, 1, 'still down');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 013d: a friendly NPC cleric TENDS a wounded (not downed) player who asks', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  try {
+    const room = findCalmRoom(getWorldDay());
+    await addWoundedHuman(db, game, 'scout', room.row, room.col, 10); // 10/30 health
+    await addCleric(db, game, 'soc_healer_w', 'Sister Maeve', 'friendly', room.row, room.col);
+    await humanSays(db, 'scout', room.row, room.col, 'please heal me, I am hurt');
+
+    const before = (await db.prepare("SELECT health FROM users WHERE username = 'scout'").first()).health;
+    const result = await game.runNpcReply(db, null, room.row, room.col);
+
+    assert.ok(result.helped, 'the cleric acted');
+    assert.equal(result.helped.action, 'heal');
+    const after = await db.prepare("SELECT health, incapacitated FROM users WHERE username = 'scout'").first();
+    assert.ok(after.health > before, `wounds tended (${before} -> ${after.health})`);
+    assert.equal(after.incapacitated, 0, 'was wounded, never downed');
   } finally {
     await db.close();
   }

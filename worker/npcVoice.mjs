@@ -10,7 +10,7 @@
 // model is advisory, a successful injection can at worst make an NPC say something
 // odd — never execute an action.
 
-const MODEL = '@cf/meta/llama-3.2-3b-instruct'; // cheap; swap to llama-3.2-1b-instruct for the cheapest tier
+export const MODEL = '@cf/meta/llama-3.2-3b-instruct'; // cheap; swap to llama-3.2-1b-instruct for the cheapest tier
 const MAX_LINE_LENGTH = 200;
 const GENERATION_TIMEOUT_MS = 3000;
 const VALID_INTENTS = new Set(['friendly', 'wary', 'hostile']);
@@ -114,8 +114,11 @@ export function parseNpcResponse(raw, role) {
 
 export async function generateNpcResponse(ai, context, { timeoutMs = GENERATION_TIMEOUT_MS } = {}) {
   const role = context?.npc?.role || context?.npc?.npcKind || 'patron';
+  // Plan 013a + diagnostic: `source` records WHY a line is what it is — 'model' when the
+  // call succeeded, or 'fallback:<reason>' so the caller can log why we degraded (the
+  // failure used to be swallowed silently, which hid a non-working binding).
   if (!ai || typeof ai.run !== 'function') {
-    return { speech: pickFallback(role), intent: 'wary', request: 'none' };
+    return { speech: pickFallback(role), intent: 'wary', request: 'none', source: 'fallback:no-binding' };
   }
   try {
     const { system, user } = buildNpcPrompt(context);
@@ -123,8 +126,8 @@ export async function generateNpcResponse(ai, context, { timeoutMs = GENERATION_
       ai.run(MODEL, { messages: [{ role: 'system', content: system }, { role: 'user', content: user }], max_tokens: 120 }),
       new Promise((_, reject) => setTimeout(() => reject(new Error('npc-voice timeout')), timeoutMs))
     ]);
-    return parseNpcResponse(result?.response, role);
-  } catch {
-    return { speech: pickFallback(role), intent: 'wary', request: 'none' };
+    return { ...parseNpcResponse(result?.response, role), source: 'model' };
+  } catch (err) {
+    return { speech: pickFallback(role), intent: 'wary', request: 'none', source: `fallback:error`, error: String(err && err.message || err) };
   }
 }

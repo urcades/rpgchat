@@ -97,6 +97,7 @@ const REGROW_EFFECT_TYPE = 'regrow';
 const HARMFUL_EFFECTS = new Set(['poison', 'arcane_pin', 'marked']);
 const AMBIENT_HOSTILE_RESPAWN_INTERVAL = 6;
 const NPC_VOICE_INTERVAL = 4; // Plan 013a: min ticks between NPC dialogue lines per room
+const NPC_HEAL_AMOUNT = 12; // Plan 013d: HP a friendly NPC cleric restores when tending a wounded asker
 // Plan 023b: the incapacitated negative-HP band. At 0 HP a player falls
 // incapacitated (deathClock 0); further blows and the passive pulse drive the
 // clock down toward DEATH_FLOOR, at which point they truly die. A single blow of
@@ -1210,14 +1211,23 @@ export async function runNpcReply(db, ai, row, col) {
 
   const recent = await getMessages(db, row, col, currentTick);
   if (recent.length === 0) {
-    return { spoke: false };
+    return { spoke: false, provoked: 0 };
   }
   // Only react when the LAST room line is a human's (they just spoke); never pile onto
   // an NPC's own line, which prevents NPC↔NPC reply loops on this reactive path.
   const last = recent[recent.length - 1];
   const lastIsHuman = last.username && last.username !== 'System' && !npcs.some(n => n.username === last.username);
   if (!lastIsHuman) {
-    return { spoke: false };
+    return { spoke: false, provoked: 0 };
+  }
+
+  // Plan 013c (fixed 2026-06-15): provocation is evaluated on EVERY player line, BEFORE
+  // the dialogue cooldown — so an overt threat turns the room even if an NPC just spoke
+  // and is on cooldown. (The old bug: "i'm going to kill you" was dropped during the
+  // cooldown window because the provoke check sat after the early return.)
+  let provoked = 0;
+  if (classifyHostileText(last.message)) {
+    provoked = (await provokeRoomNpcs(db, row, col)).provoked;
   }
 
   const cooldown = await dbFirst(
@@ -1227,7 +1237,7 @@ export async function runNpcReply(db, ai, row, col) {
     [row, col, worldDay]
   );
   if (!shouldApplyEffect({ currentTick, lastAppliedTick: cooldown ? cooldown.lastAppliedTick : null, interval: NPC_VOICE_INTERVAL })) {
-    return { spoke: false };
+    return { spoke: false, provoked };
   }
 
   // Responder: an NPC named in the human's line, else a present NPC at random.
@@ -1235,7 +1245,7 @@ export async function runNpcReply(db, ai, row, col) {
   const addressed = npcs.find(n => (n.displayName && text.includes(String(n.displayName).toLowerCase())) || text.includes(String(n.username).toLowerCase()));
   const speaker = addressed || npcs[Math.floor(Math.random() * npcs.length)];
   if (!speaker) {
-    return { spoke: false };
+    return { spoke: false, provoked };
   }
 
   const ecology = await getRoomEcology(db, speaker.username, row, col, worldDay, currentTick);
@@ -1251,34 +1261,36 @@ export async function runNpcReply(db, ai, row, col) {
     addressedBy: last.displayName || last.username,
     mode: 'reply'
   });
+  // Diagnostic (2026-06-15): surface whether the line came from the model or a fallback,
+  // and why — the failure used to be swallowed silently, hiding a non-working binding.
+  logEvent({ event: 'npc.reply', roomRow: row, roomCol: col, npc: speaker.username, source: response.source, error: response.error });
   if (!response.speech) {
-    return { spoke: false };
+    return { spoke: false, provoked };
   }
 
   await insertMessage(db, row, col, speaker.username, response.speech, 'npc');
   await upsertCooldown(db, '__npc_voice', row, col, 'npc_voice', currentTick, worldDay);
 
-  // Plan 013c: if the player's words read as hostile — the model's intent, or the
-  // keyword floor for the model-absent path — the room's social cast turns on them.
-  let provoked = 0;
-  if (response.intent === 'hostile' || classifyHostileText(last.message)) {
+  // Model-detected hostility (subtler than the keyword floor — aggressive "rizz", veiled
+  // menace) also turns the room, if the keyword pass didn't already.
+  if (!provoked && response.intent === 'hostile') {
     provoked = (await provokeRoomNpcs(db, row, col)).provoked;
   }
 
-  // Plan 013d: a plea for help. If the asker is DOWNED and a friendly NPC present can
-  // revive (a Cleric's rite), the engine runs it — the NPC only ever ASKS via intent;
-  // the deterministic engine gates it on disposition + ability + the target being down.
-  // This closes the loop with 023's incapacitation window: ask nicely, get raised.
+  // Plan 013d: a plea for help, engine-gated. A friendly NPC cleric REVIVES a downed asker,
+  // or TENDS a wounded (but upright) one. The model only asks (request:'heal' / a keyword
+  // floor); the engine decides + executes, gated on disposition + the cleric's ability.
   let helped = null;
   if (!provoked && (response.request === 'heal' || classifyHelpRequest(last.message))) {
-    const asker = await dbFirst(db, 'SELECT username, incapacitated FROM users WHERE username = ? AND isNpc = 0', [last.username]);
-    if (asker && asker.incapacitated) {
-      const healer = npcs.find(n => n.disposition !== 'hostile' && n.job && npcCanRevive(n.job));
-      if (healer) {
-        try {
+    const asker = await dbFirst(db, 'SELECT username, incapacitated, health, maxHealth FROM users WHERE username = ? AND isNpc = 0', [last.username]);
+    const healer = asker ? npcs.find(n => n.disposition !== 'hostile' && n.job && npcCanRevive(n.job)) : null;
+    if (asker && healer) {
+      const healerName = healer.displayName || healer.username;
+      try {
+        if (asker.incapacitated) {
           const healerRow = await dbFirst(db, 'SELECT * FROM users WHERE username = ?', [healer.username]);
           await runAbility(db, 'revive', {
-            username: healer.displayName || healer.username,
+            username: healerName,
             effectiveActor: getEffectiveUser(healerRow),
             target: asker.username,
             row,
@@ -1286,14 +1298,19 @@ export async function runNpcReply(db, ai, row, col) {
             currentTick
           });
           helped = { by: healer.username, action: 'revive', target: asker.username };
-        } catch {
-          // Gated/failed (e.g. target rose already) — the NPC simply couldn't; no-op.
+        } else if ((asker.health || 0) < (asker.maxHealth || 0)) {
+          const askerRow = await dbFirst(db, 'SELECT * FROM users WHERE username = ?', [asker.username]);
+          await applyBodyHeal(db, askerRow, NPC_HEAL_AMOUNT, { row, col });
+          await insertSystemMessage(db, row, col, `${healerName} tends ${asker.username}'s wounds.`, 'support');
+          helped = { by: healer.username, action: 'heal', target: asker.username };
         }
+      } catch {
+        // Gated/failed (e.g. target rose already) — the NPC simply couldn't; no-op.
       }
     }
   }
 
-  return { spoke: true, npc: speaker.username, speech: response.speech, intent: response.intent, request: response.request, provoked, helped };
+  return { spoke: true, npc: speaker.username, speech: response.speech, intent: response.intent, request: response.request, source: response.source, provoked, helped };
 }
 
 export async function assertEnoughStamina(db, username, cost = 1) {

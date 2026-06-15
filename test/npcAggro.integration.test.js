@@ -142,6 +142,31 @@ test('Plan 013c: a friendly exchange does NOT provoke', async () => {
   }
 });
 
+test('Plan 013c (fixed): a threat provokes even while NPC dialogue is on cooldown', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  try {
+    const room = findCalmRoom(getWorldDay());
+    await addHuman(db, game, 'menace', room.row, room.col);
+    await addSocialNpc(db, game, 'soc_bar_cd', 'Mara', 'friendly', 'barmaid', room.row, room.col);
+    // Put NPC dialogue on cooldown right now (an NPC "just spoke").
+    const tick = await game.getCurrentTickValue(db);
+    await db.prepare(
+      "INSERT INTO roomEffectCooldowns (username, roomRow, roomCol, effectType, lastAppliedTick, worldDay) VALUES ('__npc_voice', ?, ?, 'npc_voice', ?, ?)"
+    ).bind(room.row, room.col, tick, getWorldDay()).run();
+
+    await humanSays(db, 'menace', room.row, room.col, 'I will gut you all');
+    const result = await game.runNpcReply(db, null, room.row, room.col);
+
+    assert.equal(result.spoke, false, 'on cooldown, no spoken reply');
+    assert.ok(result.provoked >= 1, 'but the threat still turned the room (provoke decoupled from cooldown)');
+    const mara = await db.prepare("SELECT disposition FROM users WHERE username = 'soc_bar_cd'").first();
+    assert.equal(mara.disposition, 'hostile');
+  } finally {
+    await db.close();
+  }
+});
+
 test('Plan 013c: with no model, a threatening line still provokes via the keyword floor', async () => {
   const db = await createMigratedDb();
   const game = await import('../worker/game.mjs');
