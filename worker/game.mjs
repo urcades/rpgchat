@@ -95,6 +95,15 @@ const REGROW_STAMINA_COST = 20;
 const REGROW_EFFECT_TYPE = 'regrow';
 const HARMFUL_EFFECTS = new Set(['poison', 'arcane_pin', 'marked']);
 const AMBIENT_HOSTILE_RESPAWN_INTERVAL = 6;
+// Plan 023b: the incapacitated negative-HP band. At 0 HP a player falls
+// incapacitated (deathClock 0); further blows and the passive pulse drive the
+// clock down toward DEATH_FLOOR, at which point they truly die. A single blow of
+// GIB_OVERKILL or more (or overkill spilling past a live body) dismembers them
+// outright — the gib — skipping the clock entirely.
+const DEATH_FLOOR = -30;
+const INCAP_BLEED_PER_PULSE = 3; // ~10-minute window at one cron pulse/min
+const GIB_OVERKILL = 15;
+const INCAP_BLOW_MIN = 5;
 const PASSIVE_EFFECT_TYPES = new Set([
   'pub',
   'inn',
@@ -255,6 +264,12 @@ export async function validateMovement(db, username, row, col) {
     return { allowed: true, first: true };
   }
   const distance = Math.max(Math.abs(position.row - row), Math.abs(position.col - col));
+  // Plan 023b: the incapacitated can't crawl to another room. Staying put
+  // (distance 0 — the presence heartbeat) is allowed, so the prone body stays
+  // visible to the room and keeps bleeding where it fell.
+  if (distance >= 1 && await isIncapacitated(db, username)) {
+    return { allowed: false, from: position, incapacitated: true };
+  }
   if (distance <= 1) {
     return { allowed: true, from: position };
   }
@@ -269,7 +284,7 @@ export async function requireRoomUse(db, username, row, col) {
   // object so the pay-to-enter flow still renders.
   const movement = await validateMovement(db, username, row, col);
   if (!movement.allowed) {
-    throw new ActionError('Too far to walk there.', 403);
+    throw new ActionError(movement.incapacitated ? 'You are incapacitated — you cannot move.' : 'Too far to walk there.', 403);
   }
 
   const worldDay = getWorldDay();
@@ -400,6 +415,8 @@ async function getRoomPresence(db, row, col, worldDay) {
             u.isNpc,
             u.npcKind,
             u.worldEventId,
+            u.incapacitated,
+            u.deathClock,
             rp.lastSeenTick
      FROM roomPresence rp
      JOIN users u ON u.username = rp.username
@@ -751,7 +768,7 @@ export async function getRoomEcology(db, username, row, col, worldDay = getWorld
 export async function getUserState(db, username) {
   const user = await dbFirst(
     db,
-    'SELECT username, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold, experience, attributePoints, skillPoints, displayName, stance FROM users WHERE username = ? AND isNpc = 0',
+    'SELECT username, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold, experience, attributePoints, skillPoints, displayName, stance, incapacitated, deathClock FROM users WHERE username = ? AND isNpc = 0',
     [username]
   );
   if (!user) {
@@ -1149,6 +1166,148 @@ export async function moveUserToCemetery(db, username, cause, row, col, options 
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Plan 023b: the death progression. Combat no longer entombs a player the instant
+// HP hits 0 — it routes through descendTowardDeath, which decides between falling
+// incapacitated (the negative-HP band), hastening the death clock, and true death
+// or a gib. moveUserToCemetery is now reached only via trueDeath / gibAndKill (and
+// the room-hazard path), never directly from a combat site.
+
+// Down but not dead: prone, looted, mute but for garbled speech, bleeding out. The
+// body gives out entirely — health and every part drop to 0 so the death clock (not
+// stray limb HP) is the single measure of the life left in them. This also keeps the
+// `users.health == Σ part hp` invariant exact (0 == 0) through the downed state.
+async function incapacitate(db, username, cause, row, col, { currentTick = null, deferredSystemMessages = null } = {}) {
+  await dbRun(
+    db,
+    "UPDATE users SET incapacitated = 1, deathClock = 0, downedCause = ?, stance = 'prone', health = 0 WHERE username = ?",
+    [cause, username]
+  );
+  await dbRun(db, 'UPDATE bodyParts SET hp = 0 WHERE username = ?', [username]);
+  await dbRun(db, 'DELETE FROM statusEffects WHERE username = ?', [username]); // falling clears chill/burn/etc.
+  // Items spill NOW, while they still draw breath — the vulnerability is the point.
+  const dropped = await dropPlayerItemsOnDeath(db, username, row, col);
+  if (dropped > 0) {
+    await emitSystemMessage(db, row, col, `${username}'s belongings spill across the floor as they fall.`, deferredSystemMessages, 'death');
+  }
+  await emitSystemMessage(db, row, col, `${username} collapses in a spreading pool of blood, unable to stand.`, deferredSystemMessages, 'death');
+  await createTrace(db, { row, col, traceType: 'body', intensity: 2, attacker: getKillerFromCause(cause), target: username, createdTick: currentTick ?? 0, expiryTick: null, worldDay: getWorldDay() });
+}
+
+// True death without dismemberment — a finishing blow on the downed, or a bleed-out.
+async function trueDeath(db, username, cause, row, col, { currentTick = null, deferredSystemMessages = null } = {}) {
+  const downed = await dbFirst(db, 'SELECT downedCause, level FROM users WHERE username = ?', [username]);
+  const effectiveCause = cause || downed?.downedCause || 'their wounds';
+  await recordKill(db, {
+    killer: getKillerFromCause(effectiveCause),
+    defeatedUsername: username,
+    defeatedName: username,
+    defeatedKind: 'player',
+    defeatedLevel: downed?.level || 0,
+    row,
+    col,
+    currentTick
+  });
+  await moveUserToCemetery(db, username, effectiveCause, row, col, { deferredSystemMessages });
+}
+
+// True death WITH dismemberment — the gib. Up to two non-torso limbs burst free as
+// grotesque floor items before the body is entombed.
+async function gibAndKill(db, username, cause, row, col, { currentTick = null, deferredSystemMessages = null } = {}) {
+  const parts = await getBodyParts(db, username);
+  const flying = parts.filter(part => !part.severed && part.partType !== 'torso').slice(0, 2);
+  for (const part of flying) {
+    await emitSystemMessage(db, row, col, `${username}'s ${part.label} bursts free in a spray of gore.`, deferredSystemMessages, 'death');
+    await dropItemOnFloor(db, 'severed_part', row, col, { name: `${username}'s severed ${part.label}` });
+  }
+  await createTrace(db, { row, col, traceType: 'body', intensity: 3, attacker: getKillerFromCause(cause), target: username, createdTick: currentTick ?? 0, expiryTick: null, worldDay: getWorldDay() });
+  await emitSystemMessage(db, row, col, `${username} is torn apart.`, deferredSystemMessages, 'death');
+  await trueDeath(db, username, cause, row, col, { currentTick, deferredSystemMessages });
+}
+
+// The single decision point every combat death site calls. `blowDamage` is the
+// blow's intended damage; `overkill` is damage that spilled past a live body.
+export async function descendTowardDeath(db, username, { cause, row, col, blowDamage = 0, overkill = 0, currentTick = null, deferredSystemMessages = null } = {}) {
+  const u = await dbFirst(db, 'SELECT username, incapacitated, deathClock FROM users WHERE username = ? AND isNpc = 0', [username]);
+  if (!u) {
+    return { state: 'gone' };
+  }
+  const gib = overkill >= GIB_OVERKILL || blowDamage >= GIB_OVERKILL;
+
+  if (!u.incapacitated) {
+    if (gib) {
+      await gibAndKill(db, username, cause, row, col, { currentTick, deferredSystemMessages });
+      return { state: 'gibbed' };
+    }
+    await incapacitate(db, username, cause, row, col, { currentTick, deferredSystemMessages });
+    return { state: 'incapacitated' };
+  }
+
+  // Already down: a fresh blow hastens the end.
+  const loss = Math.max(INCAP_BLOW_MIN, blowDamage);
+  const next = u.deathClock - loss;
+  if (gib || next <= DEATH_FLOOR) {
+    if (gib) {
+      await gibAndKill(db, username, cause, row, col, { currentTick, deferredSystemMessages });
+    } else {
+      await trueDeath(db, username, cause, row, col, { currentTick, deferredSystemMessages });
+    }
+    return { state: gib ? 'gibbed' : 'died' };
+  }
+  await dbRun(db, 'UPDATE users SET deathClock = ? WHERE username = ?', [next, username]);
+  await emitSystemMessage(db, row, col, `${username} is struck where they lie — life pooling out (${next}/${DEATH_FLOOR}).`, deferredSystemMessages, 'death');
+  return { state: 'bleeding', deathClock: next };
+}
+
+// Healed above 0 while down — back on their feet, clock reset.
+async function reviveFromIncapacitation(db, username, row, col) {
+  await dbRun(
+    db,
+    "UPDATE users SET incapacitated = 0, deathClock = 0, downedCause = NULL, stance = 'standing' WHERE username = ?",
+    [username]
+  );
+  await insertSystemMessage(db, row, col, `${username} staggers back to their feet.`, 'support');
+}
+
+// Plan 023b: the passive bleed. Runs each world pulse (~1/min); every incapacitated
+// player loses INCAP_BLEED_PER_PULSE from their clock and truly dies at the floor.
+// Queries users directly (not via roomPresence) so a disconnected body still bleeds.
+export async function processIncapacitationBleed(db, currentTick = null) {
+  const downed = await dbAll(
+    db,
+    `SELECT u.username, u.deathClock, u.downedCause, rp.roomRow, rp.roomCol
+     FROM users u
+     LEFT JOIN roomPresence rp ON rp.username = u.username
+     WHERE u.incapacitated = 1 AND u.isNpc = 0`
+  );
+  for (const d of downed) {
+    const row = d.roomRow ?? 0;
+    const col = d.roomCol ?? 0;
+    const next = d.deathClock - INCAP_BLEED_PER_PULSE;
+    if (next <= DEATH_FLOOR) {
+      const cause = d.downedCause ? `bled out after ${d.downedCause}` : 'bled out';
+      await trueDeath(db, d.username, cause, row, col, { currentTick });
+    } else {
+      await dbRun(db, 'UPDATE users SET deathClock = ? WHERE username = ?', [next, d.username]);
+      await insertSystemMessage(db, row, col, `${d.username} bleeds, fading (${next}/${DEATH_FLOOR}).`, 'death');
+    }
+  }
+}
+
+// Plan 023b: an incapacitated actor can do nothing but whisper (garbled). Every
+// non-speech action verb calls this gate; speech falls through to handleChatAction.
+export async function assertActable(db, username) {
+  const u = await dbFirst(db, 'SELECT incapacitated FROM users WHERE username = ? AND isNpc = 0', [username]);
+  if (u && u.incapacitated) {
+    throw new ActionError('You are incapacitated — you can do nothing but whisper.', 409);
+  }
+}
+
+async function isIncapacitated(db, username) {
+  const u = await dbFirst(db, 'SELECT incapacitated FROM users WHERE username = ? AND isNpc = 0', [username]);
+  return Boolean(u && u.incapacitated);
+}
+
 function getKillerFromCause(cause) {
   const match = String(cause || '').match(/\bby\s+(.+)$/);
   return match ? match[1].trim() : null;
@@ -1196,22 +1355,6 @@ async function recordKill(db, {
   );
 }
 
-async function moveUserToCemeteryFromRoomEffect(db, user, row, col, effectType, currentTick, worldDay) {
-  const cause = effectType.replace(/_/g, ' ');
-  await moveUserToCemetery(db, user.username, cause, row, col);
-  await createTrace(db, {
-    row,
-    col,
-    traceType: 'body',
-    intensity: 3,
-    attacker: cause,
-    target: user.username,
-    createdTick: currentTick,
-    expiryTick: null,
-    worldDay
-  });
-}
-
 async function processUserEffect(db, presence, effect, currentTick, worldDay) {
   if (!PASSIVE_EFFECT_TYPES.has(effect.type)) {
     return false;
@@ -1257,7 +1400,15 @@ async function processUserEffect(db, presence, effect, currentTick, worldDay) {
   const after = applyPassiveEffectToUser(before, effect.type, phase);
 
   if (after.health <= 0 && before.health > 0) {
-    await moveUserToCemeteryFromRoomEffect(db, presence, presence.roomRow, presence.roomCol, effect.type, currentTick, worldDay);
+    // Plan 023b: a hazard downs rather than entombs — the passive bleed finishes them.
+    await descendTowardDeath(db, presence.username, {
+      cause: effect.type.replace(/_/g, ' '),
+      row: presence.roomRow,
+      col: presence.roomCol,
+      blowDamage: 0,
+      currentTick
+    });
+    presence.health = 0;
     return true;
   }
 
@@ -2081,16 +2232,19 @@ export async function createItemForOwner(db, templateId, username, { equip = fal
 
 // Drop a fresh template-minted item onto a room floor (ownerUsername NULL).
 // Used for NPC defeat loot.
-export async function dropItemOnFloor(db, templateId, row, col) {
+export async function dropItemOnFloor(db, templateId, row, col, options = {}) {
   const template = getTemplate(templateId);
   if (!template) {
     return null;
   }
+  // Plan 023b: an optional name override lets a gib drop a victim-named severed
+  // part ("X's severed left arm") from a generic template.
+  const name = options.name || template.name;
   await dbRun(
     db,
     `INSERT INTO items (templateId, name, slotType, rarity, modifiers, ownerUsername, roomRow, roomCol)
      VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
-    [template.templateId, template.name, template.slotType, template.rarity, JSON.stringify(template.modifiers || {}), row, col]
+    [template.templateId, name, template.slotType, template.rarity, JSON.stringify(template.modifiers || {}), row, col]
   );
 }
 
@@ -2203,7 +2357,7 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
   if (isBodylessUser(user)) {
     const nextHealth = Math.max(0, (user.health || 0) - damage);
     await dbRun(db, 'UPDATE users SET health = MAX(health - ?, 0) WHERE username = ?', [damage, user.username]);
-    return { died: nextHealth <= 0, npc: true, healthAfter: nextHealth, severedLabels: [] };
+    return { died: nextHealth <= 0, npc: true, healthAfter: nextHealth, severedLabels: [], overkill: Math.max(0, damage - (user.health || 0)) };
   }
 
   const partsBefore = await ensureBody(db, user);
@@ -2318,7 +2472,9 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
   }
 
   const died = vitalDestroyed || healthAfter <= 0;
-  return { died, npc: false, healthAfter, severedLabels };
+  // Plan 023b: `remaining` is damage that found no HP to land on — the overkill that
+  // separates a barely-lethal blow (incapacitate) from an obliterating one (gib).
+  return { died, npc: false, healthAfter, severedLabels, overkill: Math.max(0, remaining) };
 }
 
 export async function applyBodyHeal(db, user, amount, options = {}) {
@@ -2376,6 +2532,13 @@ export async function applyBodyHeal(db, user, amount, options = {}) {
   const healthAfter = Math.max(0, (user.health || 0) + totalHealed);
   await dbRun(db, 'UPDATE users SET health = ? WHERE username = ?', [healthAfter, user.username]);
   await emitConditionTransitions(db, user.username, partsBefore, working, row, col);
+  // Plan 023b: a heal that lifts a downed player back above 0 stands them up.
+  if (healthAfter > 0 && row !== undefined && row !== null && col !== undefined && col !== null) {
+    const downed = await dbFirst(db, 'SELECT incapacitated FROM users WHERE username = ?', [user.username]);
+    if (downed && downed.incapacitated) {
+      await reviveFromIncapacitation(db, user.username, row, col);
+    }
+  }
   return healthAfter;
 }
 
@@ -2384,23 +2547,27 @@ async function damageUser(db, username, amount, cause, row, col) {
   const result = await applyBodyDamage(db, target, amount, { cause, row, col });
   const nextHealth = result.healthAfter;
 
-  if (result.died && target.health > 0) {
+  if (result.died) {
     if (target.isNpc) {
-      await defeatNpc(db, target, { killer: cause.replace(/.* by /, ''), row, col, currentTick: await getCurrentTickValue(db) });
+      // NPCs still die instantly; the health>0 guard avoids a double-defeat.
+      if (target.health > 0) {
+        await defeatNpc(db, target, { killer: cause.replace(/.* by /, ''), row, col, currentTick: await getCurrentTickValue(db) });
+      }
       return { killed: true, remainingHealth: 0 };
     }
-    await recordKill(db, {
-      killer: getKillerFromCause(cause),
-      defeatedUsername: target.username,
-      defeatedName: target.username,
-      defeatedKind: 'player',
-      defeatedLevel: target.level || 0,
+    // Plan 023b: a player doesn't die here — they descend. descendTowardDeath reads
+    // their incapacitated state and either downs them, hastens the clock, or finishes
+    // them (true death / gib). recordKill now fires inside trueDeath, once, on actual death.
+    const outcome = await descendTowardDeath(db, username, {
+      cause,
       row,
       col,
+      blowDamage: amount,
+      overkill: result.overkill || 0,
       currentTick: await getCurrentTickValue(db)
     });
-    await moveUserToCemetery(db, username, cause, row, col);
-    return { killed: true, remainingHealth: 0 };
+    const killed = outcome.state === 'died' || outcome.state === 'gibbed';
+    return { killed, incapacitated: outcome.state === 'incapacitated', remainingHealth: 0 };
   }
 
   return { killed: false, remainingHealth: nextHealth };
@@ -2629,6 +2796,7 @@ export async function advanceGlobalTick(db) {
   }
 
   await processRoomEffects(db, tickValue);
+  await processIncapacitationBleed(db, tickValue);
   await processStatusEffects(db, tickValue);
   await resolveExpiredGamblingRounds(db, tickValue);
 
@@ -2813,7 +2981,15 @@ export async function runHostileRoomAction(db, row, col) {
   }
 
   if (damageResult.died) {
-    await moveUserToCemetery(db, player.username, `attack by ${npc.username}`, row, col);
+    // Plan 023b: a creature's killing bite downs the player (or finishes a downed one).
+    await descendTowardDeath(db, player.username, {
+      cause: `attack by ${npc.username}`,
+      row,
+      col,
+      blowDamage: damage,
+      overkill: damageResult.overkill || 0,
+      currentTick: tick.tick
+    });
   }
 
   return { tick, acted: true, target: player.username, damage };
@@ -3158,17 +3334,16 @@ export async function handleAttack(db, username, message, row, col, options = {}
         deferredSystemMessages: options.deferredSystemMessages
       });
     } else if (wasKilled) {
-      await recordKill(db, {
-        killer: username,
-        defeatedUsername: attackedUser.username,
-        defeatedName: attackedUser.username,
-        defeatedKind: 'player',
-        defeatedLevel: attackedUser.level || 0,
+      // Plan 023b: the blow downs (or gibs/finishes) — it doesn't auto-entomb. The
+      // overkill from applyBodyDamage decides incapacitate vs. instant gib; a blow on
+      // an already-downed body hastens their death clock. recordKill fires in trueDeath.
+      await descendTowardDeath(db, user.username, {
+        cause: `attack by ${username}`,
         row,
         col,
-        currentTick: createdTick
-      });
-      await moveUserToCemetery(db, user.username, `attack by ${username}`, row, col, {
+        blowDamage: damage,
+        overkill: damageResult.overkill || 0,
+        currentTick: createdTick,
         deferredSystemMessages: options.deferredSystemMessages
       });
     }
@@ -3980,6 +4155,13 @@ export async function handleBuyCommand(db, username, row, col, message) {
 }
 
 export async function handleChatAction(db, username, row, col, message) {
+  // Plan 023b: the incapacitated may speak (garbled — see the plain-speech path
+  // below) but every slash-command is an action and is refused.
+  const downed = await isIncapacitated(db, username);
+  if (downed && message.trim().startsWith('/')) {
+    throw new ActionError('You are incapacitated — you can do nothing but whisper.', 409);
+  }
+
   if (message.trim().toLowerCase().startsWith('/stance')) {
     return runPlayerAction(db, {
       username,
@@ -4148,6 +4330,7 @@ async function validateCalledShot(db, message, targets) {
 }
 
 export async function handleAttackAction(db, username, row, col, message) {
+  await assertActable(db, username); // Plan 023b: the downed cannot strike.
   return runPlayerAction(db, {
     username,
     staminaCost: 1,
@@ -4172,6 +4355,7 @@ export async function handleAttackAction(db, username, row, col, message) {
 }
 
 export async function handleSkillAction(db, username, row, col, skillId, targetUsername, actionTick, incantation = '') {
+  await assertActable(db, username); // Plan 023b: the downed cannot invoke skills (incl. their own rescue).
   // Plan 018c: cost is data-driven — base plus any linguistic surcharge from the
   // typed incantation. Every ability defaults to 1 stamina with no prose, so this
   // is parity today; plan 012 supplies linguistic abilities and the prose path.
@@ -4199,6 +4383,7 @@ export async function handleSkillAction(db, username, row, col, skillId, targetU
 // @mention target, and runs it through the normal skill flow with the incantation
 // (which scales both its stamina cost and its power).
 export async function handleCastAction(db, username, row, col, message) {
+  await assertActable(db, username); // Plan 023b: no incanting while bleeding out.
   const rest = commandRest(message, '/cast');
   if (!rest) {
     throw new ActionError('Use /cast <incantation> @target.');
@@ -4222,6 +4407,7 @@ export async function handleCastAction(db, username, row, col, message) {
 }
 
 export async function handleJobChangeAction(db, username, row, col, nextJob, roomUse) {
+  await assertActable(db, username); // Plan 023b: the downed cannot change jobs.
   return runPlayerAction(db, {
     username,
     staminaCost: 1,

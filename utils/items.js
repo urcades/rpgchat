@@ -91,7 +91,12 @@ const ITEM_TEMPLATES = [
   // Plan 022c: a player corpse — the resurrection anchor. The per-instance name is
   // "<player>'s Corpse" and `corpseOf` tags whose it is; category 'corpse' makes it
   // edible (and destroying it severs that player's resurrection forever).
-  { templateId: 'player_corpse', name: 'Corpse', slotType: 'corpse', category: 'corpse', rarity: 'common', modifiers: {}, dropWeight: 0 }
+  { templateId: 'player_corpse', name: 'Corpse', slotType: 'corpse', category: 'corpse', rarity: 'common', modifiers: {}, dropWeight: 0 },
+
+  // Plan 023b: a limb torn off in a gib. Per-instance name is "<player>'s severed
+  // <part>". category 'part' so it feeds crafting like monster_remains (a grotesque
+  // trophy/ingredient); dropWeight 0 — only a gib spawns these.
+  { templateId: 'severed_part', name: 'Severed Part', slotType: 'part', category: 'part', rarity: 'common', modifiers: {}, dropWeight: 0 }
 ];
 
 const SIGNATURE_ITEMS_BY_JOB = {

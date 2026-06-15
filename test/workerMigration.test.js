@@ -591,15 +591,19 @@ test('Killing attack messages are shown before defeat and death system messages'
     await withMockedRandom([0.1, 0.99], () => handleAttackAction(db, 'fighter', calm.row, calm.col, '@rival'));
 
     const updatedMessages = await getMessages(db, calm.row, calm.col);
-    // Plan 022c: a dead player also drops a corpse, so the death line is now last,
-    // preceded by the corpse line and the attack line.
-    const finalPlayerDeathMessages = updatedMessages.slice(-3);
-
-    assert.equal(finalPlayerDeathMessages[0].username, 'fighter');
-    assert.match(finalPlayerDeathMessages[0].message, /fighter attacked rival for \d+ damage/);
-    assert.match(finalPlayerDeathMessages[1].message, /rival's corpse lies here\./);
-    assert.equal(finalPlayerDeathMessages[2].username, 'System');
-    assert.equal(finalPlayerDeathMessages[2].message, 'rival has died from attack by fighter.');
+    // Plan 023b: a one-shot blow this far past 0 HP gibs the victim outright (overkill
+    // >= the gib threshold), so gore + "torn apart" lines precede the corpse and death
+    // lines. The ordering contract still holds: the attack line precedes the death line,
+    // and the death line is last.
+    const msgs = updatedMessages.map(m => m.message);
+    const attackIdx = msgs.findIndex(m => /fighter attacked rival for \d+ damage/.test(m));
+    const diedIdx = msgs.findIndex(m => m === 'rival has died from attack by fighter.');
+    assert.ok(attackIdx >= 0, 'attack line present');
+    assert.ok(diedIdx >= 0, 'death line present');
+    assert.ok(attackIdx < diedIdx, 'attack precedes death');
+    assert.ok(msgs.some(m => /rival is torn apart\./.test(m)), 'gib line present');
+    assert.match(updatedMessages[updatedMessages.length - 1].message, /rival has died from attack by fighter\./);
+    assert.match(updatedMessages[updatedMessages.length - 2].message, /rival's corpse lies here\./);
   } finally {
     await db.close();
   }
@@ -939,7 +943,7 @@ test('Worker missed attacks do not consume mark or ward until a later hit', asyn
 
 test('Worker skill deaths record the skill and source in the cemetery cause', async () => {
   const db = await createMigratedDb();
-  const { handleSkillAction, processStatusEffects } = await import('../worker/game.mjs');
+  const { handleSkillAction, processStatusEffects, processIncapacitationBleed } = await import('../worker/game.mjs');
 
   try {
     await db.prepare(
@@ -953,9 +957,12 @@ test('Worker skill deaths record the skill and source in the cemetery cause', as
        VALUES ('target', 'pw', 'Novice', 1, 10, 100, 100, 1, 1, 1, 0)`
     ).run();
 
+    // Plan 023b: a killing skill blow now DOWNS the victim (incapacitated) rather than
+    // entombing them instantly. The skill + source is recorded immediately as the
+    // downedCause, and rides into the cemetery cause when they finally bleed out.
     await withMockedRandom([0.1], () => handleSkillAction(db, 'fighter', 1, 1, 'power_strike', 'target', 1));
-    const powerStrikeGrave = await db.prepare(
-      "SELECT cause FROM cemetery WHERE username = 'target'"
+    const downedByStrike = await db.prepare(
+      "SELECT incapacitated, downedCause FROM users WHERE username = 'target'"
     ).first();
 
     await db.prepare(
@@ -970,12 +977,24 @@ test('Worker skill deaths record the skill and source in the cemetery cause', as
     ).run();
 
     await processStatusEffects(db, 2);
+    const downedByPoison = await db.prepare(
+      "SELECT incapacitated, downedCause FROM users WHERE username = 'poisoned'"
+    ).first();
+
+    // Bleed the poisoned victim all the way out (clock 0 -> -30 at -3/pulse) and confirm
+    // the skill+source survives into the cemetery cause.
+    for (let i = 0; i < 11; i += 1) {
+      await processIncapacitationBleed(db, 3 + i);
+    }
     const poisonGrave = await db.prepare(
       "SELECT cause FROM cemetery WHERE username = 'poisoned'"
     ).first();
 
-    assert.equal(powerStrikeGrave.cause, 'power strike by fighter');
-    assert.equal(poisonGrave.cause, 'dose by chemist');
+    assert.equal(downedByStrike.incapacitated, 1, 'power strike downs the target');
+    assert.equal(downedByStrike.downedCause, 'power strike by fighter');
+    assert.equal(downedByPoison.incapacitated, 1, 'poison downs the target');
+    assert.equal(downedByPoison.downedCause, 'dose by chemist');
+    assert.equal(poisonGrave.cause, 'bled out after dose by chemist');
   } finally {
     await db.close();
   }
@@ -1408,8 +1427,11 @@ test('Body invariant holds after a battle: users.health equals sum of part hp', 
 
   try {
     // Attacker hits hard enough to wound but the victim has a deep pool so it
-    // survives several rounds; the invariant must hold after every blow.
-    await seedLiveUser(db, 'striker', { job: 'Fighter', health: 30, maxHealth: 30, speed: 20, strength: 40 });
+    // survives several rounds; the invariant must hold after every blow. Plan 023b:
+    // strength is kept modest so the bag never bleeds out / falls incapacitated mid-test
+    // (a downed body zeroes to 0==0, which would trivially satisfy the invariant and
+    // stop testing the live-combat lockstep this guards).
+    await seedLiveUser(db, 'striker', { job: 'Fighter', health: 30, maxHealth: 30, speed: 20, strength: 8 });
     await seedLiveUser(db, 'punching_bag', { health: 90, maxHealth: 90, speed: 1 });
 
     const calm = findCalmRoom(getWorldDay());

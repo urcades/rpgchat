@@ -434,6 +434,11 @@ app.get('/map-state', async c => {
   if (auth instanceof Response) {
     return auth;
   }
+  // Plan 023b: the incapacitated can't rise to survey the world — the map is denied
+  // while they bleed out (they may still speak in-room).
+  if (auth.user.incapacitated) {
+    return c.json({ position: null, prone: true });
+  }
   const position = await getCurrentPosition(c.env.DB, auth.user.username);
   return c.json({ position: position ? { row: position.row, col: position.col } : null });
 });
