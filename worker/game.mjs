@@ -435,6 +435,7 @@ function npcTemplateFor(event, suffix) {
       username: npcUsername(event.id, 'boss'),
       displayName: 'Frost Wyrm',
       npcKind: 'raid_boss',
+      level: 6,
       health: 20,
       stamina: 100,
       speed: 7,
@@ -450,6 +451,7 @@ function npcTemplateFor(event, suffix) {
       username: npcUsername(event.id, suffix),
       displayName: suffix === 'add_1' ? 'Frost Thrall' : 'Ice Gnawer',
       npcKind: 'raid_add',
+      level: 2,
       health: 10,
       stamina: 80,
       speed: 5,
@@ -465,6 +467,7 @@ function npcTemplateFor(event, suffix) {
       username: npcUsername(event.id, 'brute'),
       displayName: 'Restless Brute',
       npcKind: 'lesser_hostile',
+      level: 3,
       health: 14,
       stamina: 80,
       speed: 4,
@@ -479,6 +482,7 @@ function npcTemplateFor(event, suffix) {
     username: npcUsername(event.id, 'lurker'),
     displayName: 'Room Lurker',
     npcKind: 'ambient_hostile',
+    level: 1,
     health: 8,
     stamina: 60,
     speed: 3,
@@ -507,7 +511,7 @@ export async function createNpcForEvent(db, npc) {
     `INSERT OR IGNORE INTO users
       (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold,
        experience, isNpc, displayName, npcKind, worldEventId)
-     VALUES (?, 'npc', 'Novice', ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 1, ?, ?, ?)`,
+     VALUES (?, 'npc', 'Novice', ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 1, ?, ?, ?)`,
     [
       npc.username,
       npc.health,
@@ -517,6 +521,7 @@ export async function createNpcForEvent(db, npc) {
       npc.speed,
       npc.strength,
       npc.intelligence,
+      npc.level ?? 0,
       npc.displayName,
       npc.npcKind,
       npc.worldEventId
@@ -2444,6 +2449,27 @@ const ELEMENT_BASE_MAGNITUDE = 2;
 const ELEMENT_DURATION = 4;
 const ROOM_ELEMENT_AMP = 0.5;
 
+// Plan 021a: creature-level affinities (NPCs have no per-part armor; weak/resist is
+// intrinsic to the beast). Keyed by displayName; absent = neutral.
+const CREATURE_AFFINITY = {
+  'Frost Wyrm': { fire: 0.5, cold: -0.5 },
+  'Frost Thrall': { fire: 0.5, cold: -0.5 },
+  'Ice Gnawer': { fire: 0.5, cold: -0.5 }
+};
+function getCreatureAffinity(displayName, element) {
+  const map = CREATURE_AFFINITY[displayName] || {};
+  return Number(map[element]) || 0;
+}
+
+// Plan 021b: a creature's elemental basic attack (chills/burns on hit) and its
+// offensive ability kit (drawn from the 018 registry, invoked via runAbility).
+// Keyed by displayName; absent = a plain physical brute with no kit.
+const CREATURE_ELEMENT = { 'Frost Wyrm': 'cold', 'Frost Thrall': 'cold', 'Ice Gnawer': 'cold' };
+const CREATURE_ABILITIES = {
+  'Frost Wyrm': ['arcane_pin', 'power_strike'],
+  'Restless Brute': ['power_strike']
+};
+
 // The element of a player's equipped weapon (first equipped item carrying one).
 export async function getAttackElement(db, username) {
   const rows = await dbAll(db, 'SELECT templateId FROM items WHERE ownerUsername = ? AND equippedPartId IS NOT NULL', [username]);
@@ -2489,12 +2515,23 @@ export async function getElementAffinity(db, username, element, partLabel, row, 
 
 // Apply an elemental hit's status to the struck part, scaled by affinity. A part
 // that resists hard enough (affinity ≤ −1) takes nothing.
-export async function applyElementOnHit(db, { attacker, target, element, partLabel, row, col, currentTick }) {
+export async function applyElementOnHit(db, { attacker, target, element, partLabel, row, col, currentTick, targetIsNpc = false, targetDisplayName = null }) {
   const statusType = ELEMENT_STATUS[element];
   if (!statusType) {
     return null;
   }
-  const affinity = await getElementAffinity(db, target, element, partLabel, row, col, currentTick);
+  // Plan 021a: NPCs have no per-part armor — their weak/resist is intrinsic (creature
+  // affinity), plus the room's amplification. Players use per-part armor affinity.
+  let affinity;
+  if (targetIsNpc) {
+    affinity = getCreatureAffinity(targetDisplayName, element);
+    const roomType = ELEMENT_ROOM[element];
+    if (roomType && roomHasEffect(row, col, currentTick, roomType)) {
+      affinity += ROOM_ELEMENT_AMP;
+    }
+  } else {
+    affinity = await getElementAffinity(db, target, element, partLabel, row, col, currentTick);
+  }
   const magnitude = Math.round(ELEMENT_BASE_MAGNITUDE * (1 + affinity));
   if (magnitude <= 0) {
     return { element, status: statusType, resisted: true };
@@ -2695,6 +2732,31 @@ export async function runHostileRoomAction(db, row, col) {
     return { tick, acted: false };
   }
 
+  // Plan 021b: a creature with an ability kit CASTS on alternating ticks — drawn
+  // from the 018 registry and invoked via runAbility (the same resolver players use),
+  // with a display-named actor so the messages read well. Other ticks fall through
+  // to the basic attack below.
+  const kit = CREATURE_ABILITIES[npc.displayName] || [];
+  if (kit.length && tick.tick % 2 === 0) {
+    const abilityId = kit[Math.floor(tick.tick / 2) % kit.length];
+    const actorName = npc.displayName || npc.username;
+    const effectiveActor = { ...getEffectiveUser(npc), username: actorName };
+    try {
+      await runAbility(db, abilityId, {
+        username: actorName,
+        effectiveActor,
+        target: player.username,
+        row,
+        col,
+        currentTick: tick.tick,
+        phase: getPhaseFromTick(tick.tick)
+      });
+      return { tick, acted: true, target: player.username, cast: abilityId };
+    } catch (err) {
+      // Any ability error → fall through to a basic attack.
+    }
+  }
+
   const playerMods = await getConditionAndGearModifiers(db, player.username);
   // Only the defending PLAYER's stance applies against an NPC: dodgeBonus makes
   // them harder to hit, damageTakenDelta adjusts the blow. The NPC has no stance.
@@ -2714,6 +2776,22 @@ export async function runHostileRoomAction(db, row, col) {
   });
   const hitText = isCriticalAttack ? 'critically hits' : 'attacks';
   await insertSystemMessage(db, row, col, `${npc.displayName || npc.username} ${hitText} ${player.username} for ${damage} damage.`, 'combat');
+
+  // Plan 021b: a creature's elemental bite lands its element's status on the player.
+  if (!damageResult.died) {
+    const element = CREATURE_ELEMENT[npc.displayName];
+    if (element) {
+      await applyElementOnHit(db, {
+        attacker: npc.displayName || npc.username,
+        target: player.username,
+        element,
+        partLabel: null,
+        row,
+        col,
+        currentTick: tick.tick
+      });
+    }
+  }
 
   if (damageResult.died) {
     await moveUserToCemetery(db, player.username, `attack by ${npc.username}`, row, col);
@@ -3015,10 +3093,11 @@ export async function handleAttack(db, username, message, row, col, options = {}
 
     attackMessages.push(attackMessage);
 
-    // Plan 020c: if the attacker's weapon is elemental and the (player) target
-    // survived, the hit lands the element's status on the struck part, scaled by
-    // affinity. No element → this whole block is skipped → combat is unchanged.
-    if (!wasKilled && !target.isNpc) {
+    // Plan 020c/021a: if the attacker's weapon is elemental and the target survived,
+    // the hit lands the element's status — on a player's struck part (per-part armor
+    // affinity) or on an NPC (intrinsic creature affinity). No element → skipped →
+    // combat is byte-identical.
+    if (!wasKilled) {
       const element = await getAttackElement(db, username);
       if (element) {
         const applied = await applyElementOnHit(db, {
@@ -3028,7 +3107,9 @@ export async function handleAttack(db, username, message, row, col, options = {}
           partLabel: calledShot,
           row,
           col,
-          currentTick: createdTick
+          currentTick: createdTick,
+          targetIsNpc: Boolean(target.isNpc),
+          targetDisplayName: target.displayName || null
         });
         if (applied && applied.status && !applied.resisted) {
           attackMessages.push(`${user.username} suffers ${applied.status} (${applied.magnitude})`);
