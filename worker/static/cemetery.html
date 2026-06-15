@@ -21,7 +21,10 @@
         }
         players.forEach(player => {
           const div = document.createElement('div');
-          div.textContent = `${player.username} [${player.job || 'Novice'}] level ${player.level || 0}, ${player.gold || 0} gold, ${player.cause || 'unknown cause'}`;
+          div.className = 'grave-row';
+          const slainBy = player.slayer ? ` — slain by ${player.slayer}` : '';
+          const when = player.diedAt ? ` (${player.diedAt})` : '';
+          div.textContent = `${player.username} [${player.job || 'Novice'}] lvl ${player.level || 0}, ${player.gold || 0}g — ${player.cause || 'unknown cause'}${slainBy}${when}`;
           root.appendChild(div);
         });
       });

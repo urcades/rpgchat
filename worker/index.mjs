@@ -496,7 +496,27 @@ app.get('/death-data', async c => {
   if (!grave) {
     return c.json({ error: 'Grave not found' }, 404);
   }
-  return c.json({ ...grave, kills: 0, achievements: [] });
+  // Plan 023a: the kill count is already written to killHistory on every kill —
+  // surface it instead of the old hardcoded 0. The most recent kill of THIS player
+  // (if any) gives the slayer's name for the brutal headline; the grave's `cause`
+  // carries the manner, `diedAt` the time.
+  const [kills, slain] = await Promise.all([
+    dbFirst(c.env.DB, 'SELECT COUNT(*) AS n FROM killHistory WHERE killerUsername = ?', [grave.username]),
+    dbFirst(
+      c.env.DB,
+      `SELECT killerUsername, roomRow, roomCol, tick
+       FROM killHistory
+       WHERE defeatedUsername = ? AND defeatedKind = 'player'
+       ORDER BY id DESC LIMIT 1`,
+      [grave.username]
+    )
+  ]);
+  return c.json({
+    ...grave,
+    kills: kills?.n ?? 0,
+    slayer: slain?.killerUsername ?? null,
+    achievements: []
+  });
 });
 
 app.post('/resurrection-link', async c => {
@@ -522,9 +542,16 @@ app.post('/resurrection-link', async c => {
 });
 
 app.get('/cemetery-data', async c => {
+  // Plan 023a: each grave carries who felled them (the most recent killHistory row),
+  // so the graveyard reads as a record of slaughter, not a flat name list.
   const players = await dbAll(
     c.env.DB,
-    'SELECT username, level, gold, job, cause, roomRow, roomCol, diedAt FROM cemetery ORDER BY diedAt DESC, id DESC'
+    `SELECT cm.username, cm.level, cm.gold, cm.job, cm.cause, cm.roomRow, cm.roomCol, cm.diedAt,
+            (SELECT kh.killerUsername FROM killHistory kh
+             WHERE kh.defeatedUsername = cm.username AND kh.defeatedKind = 'player'
+             ORDER BY kh.id DESC LIMIT 1) AS slayer
+     FROM cemetery cm
+     ORDER BY cm.diedAt DESC, cm.id DESC`
   );
   return c.json(players);
 });

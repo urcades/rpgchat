@@ -30,6 +30,18 @@
         text: grave => `${grave.username} killed themself.`
       },
       {
+        match: (grave, cause) => cause.startsWith('bled out after attack by '),
+        text: (grave, cause) => `${grave.username} was cut down by ${cause.replace('bled out after attack by ', '')} and bled out where they lay.`
+      },
+      {
+        match: (grave, cause) => cause.startsWith('bled out after '),
+        text: (grave, cause) => `${grave.username} succumbed to ${cause.replace('bled out after ', '')} and bled out.`
+      },
+      {
+        match: (grave, cause) => cause === 'bled out',
+        text: grave => `${grave.username} bled out, alone and unaided.`
+      },
+      {
         match: (grave, cause) => cause.startsWith('attack by '),
         text: (grave, cause) => `${grave.username} was killed by ${cause.replace('attack by ', '')}.`
       },

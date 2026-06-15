@@ -102,6 +102,21 @@ test('death headline references skill deaths and environmental deaths', async ()
   assert.equal(environmentalDeath.getElement('grave-name').textContent, 'moss was claimed by the poison marsh.');
 });
 
+test('Plan 023a: bled-out deaths get their own brutal headlines', async () => {
+  const bledAfterKiller = await loadDeathPage({ username: 'moss', cause: 'bled out after attack by angel' });
+  const bledAfterHazard = await loadDeathPage({ username: 'moss', cause: 'bled out after poison marsh' });
+  const bledAlone = await loadDeathPage({ username: 'moss', cause: 'bled out' });
+
+  assert.equal(bledAfterKiller.getElement('grave-name').textContent, 'moss was cut down by angel and bled out where they lay.');
+  assert.equal(bledAfterHazard.getElement('grave-name').textContent, 'moss succumbed to poison marsh and bled out.');
+  assert.equal(bledAlone.getElement('grave-name').textContent, 'moss bled out, alone and unaided.');
+});
+
+test('Plan 023a: the real kill count is rendered (no longer hardcoded 0)', async () => {
+  const page = await loadDeathPage({ username: 'reaper', cause: 'bled out', kills: 7, achievements: [] });
+  assert.equal(String(page.getElement('grave-kills').textContent), '7');
+});
+
 test('resurrection action uses link styling like the other death actions', () => {
   const html = fs.readFileSync(path.join(__dirname, '../worker/static/death.html'), 'utf8');
   const css = fs.readFileSync(path.join(__dirname, '../worker/static/styles.css'), 'utf8');
