@@ -487,3 +487,93 @@ test('Plan 021 (production): a hostile event spawns a BODIED creature with a pla
     await db.close();
   }
 });
+
+test('Plan 024-fix (presence): getRoomEcology presence carries plan-derived aimParts — bodied NPC, player, and bodyless NPC', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  try {
+    const room = findCalmRoom(getWorldDay());
+    const worldDay = getWorldDay();
+
+    // A real player (humanoid) in the room.
+    await db.prepare(
+      `INSERT INTO users (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level)
+       VALUES ('aimer', 'pw', 'Fighter', 30, 30, 100, 100, 5, 10, 5, 4)`
+    ).run();
+    await game.updatePresence(db, 'aimer', room.row, room.col);
+
+    // A BODIED NPC (wyrm) — creatureBodyPlan='wyrm'.
+    await game.createNpcForEvent(db, {
+      username: 'wyrm', displayName: 'Frost Wyrm', npcKind: 'raid_boss', level: 6,
+      health: 100, maxHealth: 100, stamina: 100, speed: 5, strength: 6, intelligence: 1,
+      worldEventId: 'evt-presence', row: room.row, col: room.col, worldDay,
+      creatureBodyPlan: 'wyrm'
+    });
+
+    // A BODYLESS NPC (creatureBodyPlan omitted → NULL → scalar).
+    await game.createNpcForEvent(db, {
+      username: 'mob', displayName: 'Legacy Mob', npcKind: 'ambient_hostile', level: 1,
+      health: 12, stamina: 60, speed: 3, strength: 4, intelligence: 1,
+      worldEventId: 'evt-presence', row: room.row, col: room.col, worldDay
+    });
+
+    // The CLIENT path: getRoomEcology carries the presence the chat toolbar reads.
+    const ecology = await game.getRoomEcology(db, 'aimer', room.row, room.col, worldDay);
+    const byName = Object.fromEntries(ecology.presence.map(p => [p.displayName, p]));
+
+    // A bodied wyrm exposes its OWN plan's labels — a wing and a tail, not the humanoid set.
+    assert.ok(byName['Frost Wyrm'], 'the wyrm is present');
+    assert.deepEqual(
+      byName['Frost Wyrm'].aimParts,
+      ['head', 'body', 'left wing', 'right wing', 'left foreleg', 'right foreleg', 'tail'],
+      'a bodied NPC lists its creature-plan labels (wing + tail present)'
+    );
+    assert.ok(byName['Frost Wyrm'].aimParts.includes('left wing'), 'a wing label is offered');
+    assert.ok(byName['Frost Wyrm'].aimParts.includes('tail'), 'a tail label is offered');
+
+    // A player/humanoid exposes the humanoid labels.
+    assert.deepEqual(
+      byName['aimer'].aimParts,
+      ['head', 'torso', 'neck', 'left arm', 'right arm', 'left leg', 'right leg'],
+      'a player lists the humanoid labels'
+    );
+
+    // A bodyless NPC exposes NO aimable parts.
+    assert.deepEqual(byName['Legacy Mob'].aimParts, [], 'a bodyless (scalar) NPC has empty aimParts');
+
+    // aimParts is purely ADDITIVE — every pre-existing field the combat loop / ally
+    // resolver depend on is still present on each occupant row.
+    for (const occ of ecology.presence) {
+      for (const field of ['username', 'displayName', 'isNpc', 'health', 'incapacitated', 'lastSeenTick']) {
+        assert.ok(Object.prototype.hasOwnProperty.call(occ, field), `${occ.username} keeps the ${field} field`);
+      }
+    }
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 024-fix (server accepts the structured aim): handleAttack honors options.targetPart vs a bodied NPC (the toolbar field path, no part named in prose)', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  try {
+    const room = findCalmRoom(getWorldDay());
+    // strength 40 → base damage 11, enough to sever a 10-HP wing.
+    await db.prepare(
+      `INSERT INTO users (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level)
+       VALUES ('hunter', 'pw', 'Fighter', 30, 30, 100, 100, 1, 40, 5, 4)`
+    ).run();
+    await game.updatePresence(db, 'hunter', room.row, room.col);
+    await seedBodiedNpc(db, game, { username: 'wyrm', displayName: 'Frost Wyrm', plan: 'wyrm', health: 100, room, strength: 6 });
+
+    // The prose names NO body part — the aim rides ONLY in options.targetPart, exactly
+    // as the (now-fixed) toolbar sends it for an NPC. RNG: speed (hit), crit (no), pick (consumed).
+    const out = await withMockedRandom([0.0, 0.99, 0.5], () =>
+      game.handleAttack(db, 'hunter', 'strike @wyrm', room.row, room.col, { targetPart: 'left wing' }));
+    assert.match(out, /hunter attacked Frost Wyrm/, 'the wyrm was struck');
+    const wing = (await game.getBodyParts(db, 'wyrm')).find(p => p.label === 'left wing');
+    assert.equal(wing.severed, 1, 'the structured targetPart severed the named wing on the bodied NPC');
+  } finally {
+    await db.close();
+  }
+});

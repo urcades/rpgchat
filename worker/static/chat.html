@@ -64,8 +64,17 @@
     let currentJob = 'Novice';
     let selectedTarget = '';
     let selectedTargetLabel = ''; // Plan 013e: display name for the hint/echo (selectedTarget stays the key)
-    let selectedTargetIsNpc = false; // Plan 024: NPCs are bodyless — the called-shot bar stays hidden for them
+    let selectedTargetIsNpc = false; // Plan 024: tracks NPC-ness; the aim bar now keys off aimParts, not this (a bodied NPC CAN be aimed at — plan 024-fix)
     let selectedTargetPart = '';     // Plan 024: '' = no aim (weighted-random hit, the default); else a body-part label
+    // Plan 024-fix: the selected target's AIMABLE body-part labels, supplied by the
+    // server's presence (aimParts — plan-derived, so a wyrm shows wing/tail, a
+    // quadruped four legs, a humanoid/player the humanoid set, a bodyless NPC []).
+    // The called-shot bar is built from THIS, not a hardcoded humanoid list.
+    let selectedTargetAimParts = [];
+    // Plan 024-fix: the latest room presence array (the same data the presence list
+    // renders from). A chat-line click only knows a username, so it looks the
+    // occupant up here to recover its aimParts.
+    let latestPresence = [];
     let incapacitated = false; // Plan 023c: when down, only the chat input stays live
 
     const pathParts = window.location.pathname.split('/');
@@ -331,6 +340,9 @@
     }
 
     function setPresenceParagraph(parent, presence) {
+      // Plan 024-fix: cache the presence array so a chat-line click (which only
+      // carries a username) can recover that occupant's aimParts by lookup.
+      latestPresence = presence || [];
       const paragraph = document.createElement('p');
       paragraph.className = 'room-presence-line';
       setText(paragraph, 'Present: ');
@@ -348,7 +360,7 @@
         button.type = 'button';
         button.className = 'room-presence-target';
         button.textContent = player.displayName || player.username;
-        button.addEventListener('click', () => selectTarget(player.username, player.displayName || player.username, Boolean(player.isNpc)));
+        button.addEventListener('click', () => selectTarget(player.username, player.displayName || player.username, Boolean(player.isNpc), player.aimParts));
         paragraph.appendChild(button);
         // Plan 023c: a fallen body is marked prone so the room can see who to help — or finish.
         if (player.incapacitated) {
@@ -567,11 +579,18 @@
       clearTargetButton.textContent = 'Untarget';
     }
 
-    function selectTarget(username, label, isNpc = false) {
+    function selectTarget(username, label, isNpc = false, aimParts = null) {
       selectedTarget = username;
       selectedTargetLabel = label || username; // Plan 013e: show the name, not the soc:… id
       selectedTargetIsNpc = Boolean(isNpc);
       selectedTargetPart = ''; // Plan 024: a fresh target starts un-aimed
+      // Plan 024-fix: record the target's aimable parts (plan-derived, from the
+      // server's presence). The presence-list click passes them directly; the
+      // chat-line click passes null, so fall back to a by-username lookup in the
+      // cached presence (empty if the speaker is no longer present).
+      selectedTargetAimParts = Array.isArray(aimParts)
+        ? aimParts
+        : (latestPresence.find(p => p.username === username)?.aimParts || []);
       updateTargetHint();
       renderTargetPartBar();
       document.getElementById('message').focus();
@@ -582,6 +601,7 @@
       selectedTargetLabel = '';
       selectedTargetIsNpc = false;
       selectedTargetPart = '';
+      selectedTargetAimParts = []; // Plan 024-fix
       updateTargetHint();
       renderTargetPartBar();
       document.getElementById('message').focus();
@@ -654,10 +674,14 @@
       }
       const endpoint = attack ? `/attack/${row}/${col}` : `/chat/${row}/${col}`;
       // Plan 024: the aimed limb rides as structured data, never in the prose, so the
-      // chat log stays clean. Player targets only — NPCs are bodyless (the bar is
-      // hidden for them, so selectedTargetPart is already clear, but guard anyway).
+      // chat log stays clean.
+      // Plan 024-fix: send it for ANY bodied target — NPC or player. The aim bar only
+      // sets selectedTargetPart when the target is bodied (a bodyless target has no
+      // bar), and the server accepts a targetPart against any bodied target (a player,
+      // or an NPC whose creatureBodyPlan is set), so the old !selectedTargetIsNpc
+      // guard — which wrongly stripped aim from every NPC — is gone.
       let body = `message=${encodeURIComponent(actionMessage)}`;
-      if (attack && selectedTargetPart && !selectedTargetIsNpc) {
+      if (attack && selectedTargetPart) {
         body += `&targetPart=${encodeURIComponent(selectedTargetPart)}`;
       }
       postForm(endpoint, body, () => {
@@ -702,37 +726,50 @@
     }
 
     // Plan 024: the called-shot toolbar — pick the limb the next Attack aims at.
-    // Labels mirror the humanoid body plan in utils/body.js; the server routes the
-    // hit to the named part (parseCalledShot/applyBodyDamage). 'Anywhere' clears the
-    // aim back to the default weighted-random hit. The aimed part rides as a separate
-    // field on /attack, so it never has to be typed into chat.
-    const TARGET_PART_OPTIONS = [
-      { label: 'head', text: 'Head' },
-      { label: 'torso', text: 'Torso' },
-      { label: 'neck', text: 'Neck' },
-      { label: 'left arm', text: 'Left arm' },
-      { label: 'right arm', text: 'Right arm' },
-      { label: 'left leg', text: 'Left leg' },
-      { label: 'right leg', text: 'Right leg' }
-    ];
+    // The server routes the hit to the named part (parseCalledShot/applyBodyDamage).
+    // 'Anywhere' clears the aim back to the default weighted-random hit. The aimed
+    // part rides as a separate field on /attack, so it never has to be typed.
+    //
+    // Plan 024-fix: the per-target buttons are now built from the SELECTED TARGET's
+    // aimParts (the server's plan-derived labels), not this list — so a wyrm shows
+    // its wings/tail and a quadruped its four legs, not the humanoid set. This stays
+    // only as a humanoid FALLBACK for a player whose aimParts is somehow missing.
+    const TARGET_PART_OPTIONS = ['head', 'torso', 'neck', 'left arm', 'right arm', 'left leg', 'right leg'];
 
-    // Shown only with an embodied target selected. NPCs are bodyless, so there is
-    // nothing to aim at and the bar stays hidden (a called shot against them would
-    // be rejected server-side anyway). Mirrors the stance bar's disabled-while-downed
-    // behavior so the whole toolbar stack reads consistently.
+    // A body-part label -> the button caption ('left wing' -> 'Left wing').
+    function targetPartText(label) {
+      return label.replace(/^\w/, c => c.toUpperCase());
+    }
+
+    // The labels offered for the current target: its server-supplied aimParts when
+    // present, else (a player only) the humanoid fallback. A bodyless target has an
+    // empty aimParts and no fallback, so the bar stays hidden.
+    function currentAimParts() {
+      if (Array.isArray(selectedTargetAimParts) && selectedTargetAimParts.length > 0) {
+        return selectedTargetAimParts;
+      }
+      return selectedTargetIsNpc ? [] : TARGET_PART_OPTIONS;
+    }
+
+    // Shown whenever the selected target is BODIED — i.e. has a non-empty aimParts —
+    // be it an NPC (wyrm/quadruped/brute) or a player. A bodyless target (empty
+    // aimParts, e.g. a scalar NPC) keeps the bar hidden, matching the server's gate
+    // (a called shot against it is rejected). Mirrors the stance bar's
+    // disabled-while-downed behavior so the whole toolbar stack reads consistently.
     function renderTargetPartBar() {
       const bar = document.getElementById('target-part-bar');
       if (!bar) {
         return;
       }
-      const show = Boolean(selectedTarget) && !selectedTargetIsNpc;
+      const parts = currentAimParts();
+      const show = Boolean(selectedTarget) && parts.length > 0;
       bar.style.display = show ? 'flex' : 'none';
       bar.innerHTML = '';
       if (!show) {
         return;
       }
       setText(bar, 'Aim: ');
-      const options = [{ label: '', text: 'Anywhere' }, ...TARGET_PART_OPTIONS];
+      const options = [{ label: '', text: 'Anywhere' }, ...parts.map(label => ({ label, text: targetPartText(label) }))];
       options.forEach(part => {
         const button = document.createElement('button');
         button.type = 'button';

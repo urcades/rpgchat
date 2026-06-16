@@ -495,6 +495,127 @@ test('target button keeps a fixed untarget label when a player is selected', () 
   assert.equal(page.getElement('clear-target').textContent, 'Untarget');
 });
 
+// Plan 024-fix: the called-shot ("Aim") bar must work against a BODIED NPC, not just
+// players. The server's presence now carries each occupant's plan-derived aimParts;
+// the toolbar builds its limb buttons from THAT, shows the bar for any non-empty
+// aimParts, and stays hidden for a bodyless NPC (empty aimParts).
+function aimBarLabels(page) {
+  return page.getElement('target-part-bar').children
+    .filter(child => child.tagName === 'button')
+    .map(child => child.textContent);
+}
+
+function presenceWithAimParts() {
+  return {
+    room: { row: 1, col: 1 },
+    event: null,
+    features: [],
+    traceSummary: { labels: [] },
+    effects: [],
+    presence: [
+      // A player → humanoid labels.
+      { username: 'angel', displayName: 'angel', aimParts: ['head', 'torso', 'neck', 'left arm', 'right arm', 'left leg', 'right leg'] },
+      // A bodied NPC (wyrm) → wings + tail, NOT the humanoid set.
+      { username: 'raid_boss_x', displayName: 'Frost Wyrm', npcKind: 'raid_boss', isNpc: 1, aimParts: ['head', 'body', 'left wing', 'right wing', 'left foreleg', 'right foreleg', 'tail'] },
+      // A bodyless NPC → empty aimParts → no aim bar.
+      { username: 'mob_x', displayName: 'Legacy Mob', npcKind: 'ambient_hostile', isNpc: 1, aimParts: [] }
+    ],
+    stock: [],
+    commands: [],
+    description: 'A room.',
+    nextResetAt: '2026-05-29T00:00:00.000Z'
+  };
+}
+
+function clickPresence(page, displayName) {
+  const presentLine = page.getElement('room-ecology-toolbar').children
+    .find(child => child.textContent.startsWith('Present:'));
+  const button = presentLine.children.find(child => child.textContent === displayName);
+  button.listeners.click();
+  return button;
+}
+
+test('Plan 024-fix: the Aim bar offers a BODIED NPC its own creature limbs (wyrm wings + tail), not the humanoid set', async () => {
+  const page = loadChatPage({ roomEcology: presenceWithAimParts() });
+  await page.context.loadRoomEcology();
+  await flushPromises();
+
+  clickPresence(page, 'Frost Wyrm');
+
+  const bar = page.getElement('target-part-bar');
+  assert.equal(bar.style.display, 'flex', 'the aim bar SHOWS for a bodied NPC (the bug: it was hidden for any NPC)');
+  const labels = aimBarLabels(page);
+  assert.deepEqual(
+    labels,
+    ['Anywhere', 'Head', 'Body', 'Left wing', 'Right wing', 'Left foreleg', 'Right foreleg', 'Tail'],
+    'the limb buttons are built from the wyrm plan (wings/tail), with the leading Anywhere clear-aim'
+  );
+  assert.ok(!labels.includes('Left arm'), 'no hardcoded humanoid limbs leak onto a wyrm');
+});
+
+test('Plan 024-fix: aiming at a bodied NPC sends &targetPart on /attack (the !isNpc guard is gone)', async () => {
+  const page = loadChatPage({ roomEcology: presenceWithAimParts() });
+  await page.context.loadRoomEcology();
+  await flushPromises();
+
+  clickPresence(page, 'Frost Wyrm');
+  // Pick the wing from the bar.
+  const wingButton = page.getElement('target-part-bar').children
+    .find(child => child.textContent === 'Left wing');
+  wingButton.listeners.click();
+
+  page.getElement('message').value = 'strike';
+  page.getElement('attack-button').listeners.click({ preventDefault() {} });
+  await flushPromises();
+
+  // Later heartbeats also POST, so pick the /attack post specifically.
+  const attack = page.posts.find(p => p.endpoint === '/attack/1/1');
+  assert.ok(attack, 'an /attack request was sent');
+  assert.match(attack.body, /targetPart=left%20wing/, 'the aimed limb rides as a structured field for the NPC too');
+});
+
+test('Plan 024-fix: a bodyless NPC keeps the Aim bar hidden (empty aimParts)', async () => {
+  const page = loadChatPage({ roomEcology: presenceWithAimParts() });
+  await page.context.loadRoomEcology();
+  await flushPromises();
+
+  clickPresence(page, 'Legacy Mob');
+
+  assert.equal(page.getElement('target-part-bar').style.display, 'none', 'a scalar (bodyless) NPC has nothing to aim at');
+});
+
+test('Plan 024-fix: a player target still gets the humanoid limbs (byte-identical feel)', async () => {
+  const page = loadChatPage({ roomEcology: presenceWithAimParts() });
+  await page.context.loadRoomEcology();
+  await flushPromises();
+
+  clickPresence(page, 'angel');
+
+  assert.equal(page.getElement('target-part-bar').style.display, 'flex');
+  assert.deepEqual(
+    aimBarLabels(page),
+    ['Anywhere', 'Head', 'Torso', 'Neck', 'Left arm', 'Right arm', 'Left leg', 'Right leg'],
+    'players still see the full humanoid aim set'
+  );
+});
+
+test('Plan 024-fix: a chat-line click recovers the speaker aimParts from the cached presence', async () => {
+  const page = loadChatPage({ roomEcology: presenceWithAimParts() });
+  await page.context.loadRoomEcology();
+  await flushPromises();
+
+  // The chat-line click only knows a username (no aimParts arg). It must look the
+  // wyrm up in the cached presence and still raise the creature aim bar.
+  page.context.selectTarget('raid_boss_x', 'Frost Wyrm', true);
+
+  assert.equal(page.getElement('target-part-bar').style.display, 'flex', 'the bar shows from a chat-line click too');
+  assert.deepEqual(
+    aimBarLabels(page),
+    ['Anywhere', 'Head', 'Body', 'Left wing', 'Right wing', 'Left foreleg', 'Right foreleg', 'Tail'],
+    'the lookup recovered the wyrm aimParts'
+  );
+});
+
 test('chat actions route death responses to the death interstitial without alerting', async () => {
   const page = loadChatPage({
     postResponse: {
