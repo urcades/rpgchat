@@ -46,6 +46,7 @@ import {
   applyBodyHeal,
   clearOneHarmfulEffect,
   damageUser,
+  ensureBody,
   getConditionAndGearModifiers,
   healUser
 } from './body.mjs';
@@ -668,8 +669,27 @@ export async function handleAttack(db, username, message, row, col, options = {}
     // when it carries a plan; a scalar NPC (null plan) still ignores aim (no parts to hit).
     // Players are byte-identical (the else branch is the original expression).
     const targetIsBodied = target.isNpc ? Boolean(target.creatureBodyPlan) : true;
-    const calledShot = targetIsBodied ? (aimedPart || parseCalledShot(message)) : null;
+    let calledShot = targetIsBodied ? (aimedPart || parseCalledShot(message)) : null;
     const targetStance = target.isNpc ? STANCES[DEFAULT_STANCE] : STANCES[normalizeStance(target.stance)];
+
+    // Plan: aiming is best-effort — a called shot must NEVER block the attack. If the
+    // aimed part is no longer on this bodied target (missing or already severed), we drop
+    // the aim BEFORE the accuracy penalty/head-bonus are figured and let the blow land as a
+    // normal weighted-random hit (applyBodyDamage falls back to pickTargetPart when
+    // targetLabel doesn't match a live part). The flavor note (pushed on a landed hit
+    // below, so it never reads alongside a "dodged" line) tells the player why their aim
+    // didn't take. The toolbar aim is sticky, so this is the common case once a head/limb
+    // is destroyed mid-fight. `aimedLabel` is held for the note since calledShot is nulled.
+    const targetName = user.displayName || user.username;
+    let aimDroppedLabel = null;
+    if (calledShot && targetIsBodied) {
+      const liveParts = (await ensureBody(db, target)) || [];
+      const aimed = liveParts.find(part => part.label === calledShot);
+      if (!aimed || aimed.severed) {
+        aimDroppedLabel = calledShot;
+        calledShot = null;
+      }
+    }
 
     // Contest deltas: attacker stance hitBonus and (when aiming) the called-shot
     // accuracy penalty raise/lower the attacker; defender stance dodgeBonus
@@ -681,9 +701,6 @@ export async function handleAttack(db, username, message, row, col, options = {}
     const dodgeDelta = targetStance.dodgeBonus;
 
     const speedContest = rollSpeedContest(attacker, target, attackerMods, targetMods, { hitDelta, dodgeDelta });
-    // Plan 013e fix: NPC usernames are opaque ids (soc:..:barmaid:1) — combat lines must
-    // read by display name. Players have none, so displayName falls back to username.
-    const targetName = user.displayName || user.username;
     if (!speedContest.hit) {
       attackMessages.push(`${targetName} dodged ${username}'s attack`);
       continue;
@@ -713,6 +730,10 @@ export async function handleAttack(db, username, message, row, col, options = {}
       : `${username} attacked ${targetName} for ${damage} damage`;
 
     attackMessages.push(attackMessage);
+    // Best-effort aim: the named part was gone, so the blow landed where it could.
+    if (aimDroppedLabel) {
+      attackMessages.push(`${username} can't get a clean shot at the ${aimDroppedLabel} — strikes where they can.`);
+    }
 
     // Plan 020c/021a: if the attacker's weapon is elemental and the target survived,
     // the hit lands the element's status — on a player's struck part (per-part armor

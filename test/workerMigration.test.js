@@ -2589,12 +2589,18 @@ test('Plan 006: an aimed head hit does +1 damage versus an unaimed head hit', as
   }
 });
 
-test('Plan 006: aiming at a severed part rejects before any stamina is spent', async () => {
+test('Aim never blocks: aiming at a SEVERED part LANDS un-aimed (no rejection) and emits the clean-shot note', async () => {
   const db = await createMigratedDb();
-  const { handleAttackAction, applyBodyDamage, getUser, updatePresence } = await import('../worker/game.mjs');
+  const { handleAttackAction, applyBodyDamage, getUser, getBodyParts, updatePresence } = await import('../worker/game.mjs');
 
   try {
-    await seedLiveUser(db, 'duelist', { health: 30, maxHealth: 30, speed: 1, strength: 1, stamina: 100, maxStamina: 100 });
+    // Was "Plan 006: aiming at a severed part rejects before any stamina is spent": the
+    // old contract REJECTED a called shot at a gone part with "There is nothing left to
+    // aim at." (a blocking alert client-side). New contract: aiming is best-effort, so the
+    // attack STILL LANDS as a normal weighted-random hit and the player gets a flavor note.
+    // strength 1 keeps the blow small so a torso/limb hit can't kill the 30-HP target — we
+    // only need to prove the attack resolved (no throw) and struck somewhere.
+    await seedLiveUser(db, 'duelist', { health: 30, maxHealth: 30, speed: 5, strength: 1, stamina: 100, maxStamina: 100 });
     await seedLiveUser(db, 'stump', { health: 30, maxHealth: 30, speed: 1 });
 
     const calm = findCalmRoom(getWorldDay());
@@ -2605,16 +2611,28 @@ test('Plan 006: aiming at a severed part rejects before any stamina is spent', a
     await applyBodyDamage(db, await getUser(db, 'stump'), 4, {
       cause: 'a prior wound', row: calm.row, col: calm.col, random: () => 0.5
     });
-
+    const armBefore = (await getBodyParts(db, 'stump')).find(p => p.label === 'left arm');
+    assert.equal(armBefore.severed, 1, 'the left arm is severed going in');
+    const healthBefore = (await db.prepare("SELECT health FROM users WHERE username = 'stump'").first()).health;
     const staminaBefore = (await db.prepare("SELECT stamina FROM users WHERE username = 'duelist'").first()).stamina;
 
-    await assert.rejects(
-      () => handleAttackAction(db, 'duelist', calm.row, calm.col, 'go for the @stump left_arm'),
-      /There is nothing left to aim at\./
-    );
+    // Aim at the severed left arm via the toolbar field. The aim is dropped to a random
+    // hit; the attack resolves rather than throwing. RNG (handleAttack per target): speed
+    // contest (0.0 -> hit), crit gate (0.99 -> none), pickTargetPart (0.0 -> torso).
+    let result;
+    await withMockedRandom([0.0, 0.99, 0.0], async () => {
+      result = await handleAttackAction(db, 'duelist', calm.row, calm.col, '@stump', 'left_arm');
+    });
 
+    // No rejection: the attack landed and produced the clean-shot note (the arm is gone).
+    assert.match(result.updatedMessage, /can't get a clean shot at the left arm — strikes where they can\./);
+    assert.doesNotMatch(result.updatedMessage, /There is nothing left to aim at/);
+    const healthAfter = (await db.prepare("SELECT health FROM users WHERE username = 'stump'").first()).health;
+    assert.ok(healthAfter < healthBefore, 'the attack landed somewhere (the random fallback hit)');
+
+    // A landed action spends its stamina (the whole point — the attack is no longer blocked).
     const staminaAfter = (await db.prepare("SELECT stamina FROM users WHERE username = 'duelist'").first()).stamina;
-    assert.equal(staminaAfter, staminaBefore, 'validation failure spent no stamina');
+    assert.equal(staminaAfter, staminaBefore - 1, 'a landed attack spent its 1 stamina');
   } finally {
     await db.close();
   }

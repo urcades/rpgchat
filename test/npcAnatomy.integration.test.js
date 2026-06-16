@@ -178,6 +178,84 @@ test('Plan 021 fix: handleAttackAction (the /attack ROUTE gate) accepts a toolba
   }
 });
 
+test('Aim never blocks (route): aiming at a SEVERED part on a bodied NPC RESOLVES — the NPC takes damage somewhere AND the clean-shot note is emitted (no "nothing left to aim at")', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  try {
+    const room = findCalmRoom(getWorldDay());
+    // strength 1 keeps the fallback blow tiny so the high-HP lurker survives — we only need
+    // to prove the attack RESOLVED (no throw) and landed somewhere after the aim was dropped.
+    await db.prepare(
+      `INSERT INTO users (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level)
+       VALUES ('hunter', 'pw', 'Fighter', 30, 30, 100, 100, 5, 1, 5, 4)`
+    ).run();
+    await game.updatePresence(db, 'hunter', room.row, room.col);
+    await seedBodiedNpc(db, game, { username: 'lurker', displayName: 'Room Lurker', plan: 'brute', health: 100, room, strength: 4 });
+
+    // Sever the lurker's left arm up front (a brute's arm pool is ~12 HP; 20 damage severs
+    // it with no spill reaching a vital part on a 100-HP body). pick draw 0.5 is consumed
+    // then overridden by the called shot.
+    const armPool = (await game.getBodyParts(db, 'lurker')).find(p => p.label === 'left arm').maxHp;
+    const lurkerRow = await db.prepare('SELECT * FROM users WHERE username = ?').bind('lurker').first();
+    await withMockedRandom([0.5], () => game.applyBodyDamage(db, lurkerRow, armPool, {
+      cause: 'a prior wound', row: room.row, col: room.col, targetLabel: 'left arm', displayLabel: 'Room Lurker'
+    }));
+    const armBefore = (await game.getBodyParts(db, 'lurker')).find(p => p.label === 'left arm');
+    assert.equal(armBefore.severed, 1, 'the left arm is severed before the aimed attack');
+    const healthBefore = (await db.prepare("SELECT health FROM users WHERE username = 'lurker'").first()).health;
+
+    // Now aim at the GONE left arm via the route (toolbar 6th arg). The aim is best-effort:
+    // it drops to a weighted-random hit and resolves. RNG: speed (0.0 hit), crit (0.99 none),
+    // pickTargetPart (0.0 -> torso/body, the ordered-first live part), then a trailing >=0.1
+    // so awardGoldMaybe's draw doesn't branch into a second roll.
+    let result;
+    await withMockedRandom([0.0, 0.99, 0.0, 0.5], async () => {
+      result = await game.handleAttackAction(db, 'hunter', room.row, room.col, '@lurker', 'left_arm');
+    });
+
+    assert.match(result.updatedMessage, /can't get a clean shot at the left arm — strikes where they can\./, 'the clean-shot flavor note is emitted');
+    assert.doesNotMatch(result.updatedMessage, /There is nothing left to aim at/, 'the route did NOT reject the aim');
+    assert.ok(await db.prepare("SELECT username FROM users WHERE username = 'lurker'").first(), 'the lurker survived the tiny fallback blow');
+    const healthAfter = (await db.prepare("SELECT health FROM users WHERE username = 'lurker'").first()).health;
+    assert.ok(healthAfter < healthBefore, 'the NPC took damage somewhere (the random fallback landed)');
+    await assertNpcInvariant(db, 'lurker', 'after a route-level aim at a severed part');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Aim never blocks (route regression): aiming at a VALID part on a bodied NPC still lands on that EXACT part — no fallback, no note', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  try {
+    const room = findCalmRoom(getWorldDay());
+    await db.prepare(
+      `INSERT INTO users (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level)
+       VALUES ('hunter', 'pw', 'Fighter', 30, 30, 100, 100, 1, 8, 5, 4)`
+    ).run();
+    await game.updatePresence(db, 'hunter', room.row, room.col);
+    await seedBodiedNpc(db, game, { username: 'lurker', displayName: 'Room Lurker', plan: 'brute', health: 100, room, strength: 4 });
+
+    const armBefore = (await game.getBodyParts(db, 'lurker')).find(p => p.label === 'left arm');
+    assert.equal(armBefore.severed, 0, 'the left arm is intact going in');
+    // Aim at the intact left arm via the route. The aim STANDS (the part is live), so the
+    // blow lands on exactly that part and NO clean-shot note is emitted. RNG: speed (0.0 hit),
+    // crit (0.99 none), pickTargetPart (0.5, consumed then OVERRIDDEN by the called shot),
+    // trailing >=0.1 so awardGoldMaybe doesn't roll twice.
+    let result;
+    await withMockedRandom([0.0, 0.99, 0.5, 0.5], async () => {
+      result = await game.handleAttackAction(db, 'hunter', room.row, room.col, '@lurker', 'left_arm');
+    });
+
+    const armAfter = (await game.getBodyParts(db, 'lurker')).find(p => p.label === 'left arm');
+    assert.ok(armAfter.hp < armBefore.hp, 'the called shot landed on the EXACT aimed part (left arm)');
+    assert.doesNotMatch(result.updatedMessage, /can't get a clean shot/, 'a valid aim emits NO fallback note');
+    await assertNpcInvariant(db, 'lurker', 'after a valid route-level called shot');
+  } finally {
+    await db.close();
+  }
+});
+
 test('Plan 021 (2): the health == Σ hp invariant holds for a bodied NPC across several attacks', async () => {
   const db = await createMigratedDb();
   const game = await import('../worker/game.mjs');

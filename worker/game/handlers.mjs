@@ -353,47 +353,19 @@ export async function handleChatAction(db, username, row, col, message) {
   });
 }
 
-// Called-shot pre-flight: if the attacker named a part, at least one player
-// target must have that part non-severed, else the aim is rejected BEFORE any
-// stamina is spent. NPC targets have no parts and never satisfy the aim. This
-// runs inside handleAttackAction's `validate`, so the throw happens before
-// spendStamina in runPlayerAction.
-async function validateCalledShot(db, message, targets, targetPart = null) {
-  // Plan 024: an explicit aimed part (from the toolbar) is validated the same way
-  // a prose-named one is — it just wins when both are present.
-  const calledShot = (targetPart ? parseCalledShot(targetPart) : null) || parseCalledShot(message);
-  if (!calledShot) {
-    return;
-  }
-  let aimable = false;
-  for (const target of targets) {
-    const full = await getUser(db, target.username, 'Target');
-    // Plan 021 fix: bodied NPCs (creatureBodyPlan set) are aimable like players — we no
-    // longer skip NPCs here (that was the pre-021 "NPCs are scalar" assumption, and it
-    // made EVERY called shot at an NPC throw "nothing left to aim at" on the /attack route).
-    // ensureBody returns null for a scalar NPC (no plan) → empty parts → correctly not
-    // aimable; it also instantiates rows for a never-hit target, so a fresh intact limb
-    // (player OR bodied NPC) is aimable, and a downed NPC's still-attached part is too.
-    const parts = (await ensureBody(db, full)) || [];
-    const part = parts.find(p => p.label === calledShot);
-    if (part && !part.severed) {
-      aimable = true;
-      break;
-    }
-  }
-  assertAction(aimable, 'There is nothing left to aim at.');
-}
-
+// Plan (aim never blocks): a called shot is now ALWAYS best-effort and is resolved
+// per-target inside handleAttack — if the aimed part is missing or severed the blow
+// lands as a normal weighted-random hit (with a flavor note), never a rejection. There
+// is therefore no pre-flight aim gate: the only thing /attack validates is that a
+// target is present, so an attack always proceeds and spends its stamina/advances the
+// tick like any landed action. (The former validateCalledShot, which threw "There is
+// nothing left to aim at." here, is gone.)
 export async function handleAttackAction(db, username, row, col, message, targetPart = null) {
   await assertActable(db, username); // Plan 023b: the downed cannot strike.
   return runPlayerAction(db, {
     username,
     staminaCost: 1,
-    validate: async () => {
-      const targets = await validateAttackTargets(db, message, row, col, username);
-      await validateCalledShot(db, message, targets, targetPart);
-      return targets;
-    },
+    validate: async () => validateAttackTargets(db, message, row, col, username),
     perform: async () => {
       const deferredSystemMessages = [];
       const updatedMessage = await handleAttack(db, username, message, row, col, { deferredSystemMessages, targetPart });
