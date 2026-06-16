@@ -52,7 +52,7 @@ import {
 import { verifyStripeWebhook } from './stripe.mjs';
 import { canonicalLocalRequestUrl } from './localHost.mjs';
 import { wantsHtmlResponse, wantsJsonResponse } from './http.mjs';
-import { elapsedMs, logEvent, measureAsync, nowMs } from './observability.mjs';
+import { elapsedMs, errorFields, guard, logEvent, measureAsync, nowMs } from './observability.mjs';
 
 const app = new Hono();
 const DEFAULT_RESURRECTION_PAYMENT_LINK_URL = 'https://buy.stripe.com/8x23codZs9Tj8dgertbV600';
@@ -160,10 +160,14 @@ function runAfterResponse(c, payload, callback) {
         durationMs: elapsedMs(start)
       });
     } catch (err) {
-      console.error({
+      // Boundary: a background task throw is caught + logged (with a timestamp via
+      // logEvent and a stack via errorFields) and never propagates — runAfterResponse
+      // is fire-and-forget, so an unlogged throw here would vanish silently.
+      logEvent({
         ...payload,
         event: 'background.error',
-        error: err instanceof Error ? err.message : String(err)
+        durationMs: elapsedMs(start),
+        ...errorFields(err)
       });
     }
   })();
@@ -231,22 +235,33 @@ async function npcReactInRoom(env, row, col) {
 }
 
 async function wakeActiveRooms(env, pulse) {
-  await Promise.all((pulse.activeRooms || []).map(async room => {
-    try {
-      const stub = env.ROOMS.getByName(roomName(room.row, room.col));
-      await stub.fetch(new Request(`https://room.local/world-pulse/${room.row}/${room.col}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          type: 'world-pulse',
-          tick: pulse.tick,
-          environmental: pulse.environmental
-        })
-      }));
-    } catch (err) {
-      console.error(`Unable to wake room ${room.row}:${room.col}`, err);
-    }
-  }));
+  const rooms = pulse.activeRooms || [];
+  // Boundary: each room wake is independently guarded so one failure never aborts the
+  // others. guard() resolves the action's value (true) on success and the fallback
+  // (false) on a caught+logged throw, so the booleans below tally cleanly.
+  const outcomes = await Promise.all(rooms.map(room => guard('world-pulse.wake-room.error', async () => {
+    const stub = env.ROOMS.getByName(roomName(room.row, room.col));
+    await stub.fetch(new Request(`https://room.local/world-pulse/${room.row}/${room.col}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'world-pulse',
+        tick: pulse.tick,
+        environmental: pulse.environmental
+      })
+    }));
+    return true;
+  }, { fields: { roomRow: room.row, roomCol: room.col }, fallback: false })));
+
+  // Aggregate summary so a systemic failure (e.g. every room failing) is visible at a
+  // glance instead of drowning in per-room error lines.
+  const succeeded = outcomes.filter(Boolean).length;
+  logEvent({
+    event: 'world-pulse.wake-rooms.summary',
+    attempted: rooms.length,
+    succeeded,
+    failed: rooms.length - succeeded
+  });
 }
 
 async function runScheduledWorldPulseAndWakeRooms(env) {
@@ -1100,26 +1115,46 @@ export class RoomObject extends DurableObject {
     // Plan 013f: one loop drives both combat and ambient life. If the room is in combat,
     // run the hostile action (5s cadence). Otherwise a present-but-peaceful social room
     // gets a throttled NPC murmur (slower cadence; runNpcAmbient owns the real throttle).
+    const fields = { roomRow: room.row, roomCol: room.col };
     let peaceful = true;
     if (await roomHasActiveHostiles(this.env.DB, room.row, room.col)) {
+      // peaceful is fixed BEFORE the guarded action so a throwing hostile turn still
+      // re-arms on the fast (5s) combat cadence below, not the slow peaceful one.
       peaceful = false;
-      const result = await runHostileRoomAction(this.env.DB, room.row, room.col);
-      await this.broadcast({ type: 'hostile', room, result });
+      // Boundary: previously UNGUARDED. A throw here escaped alarm() entirely, so the
+      // re-arm tail never ran and the room's combat loop died silently. guard() catches +
+      // logs + continues so the loop survives one bad turn (matching the ambient branch).
+      await guard('alarm.hostile.error', async () => {
+        const result = await runHostileRoomAction(this.env.DB, room.row, room.col);
+        await this.broadcast({ type: 'hostile', room, result });
+      }, { fields });
     } else {
-      try {
+      await guard('alarm.ambient.error', async () => {
         const ambient = await runNpcAmbient(this.env.DB, this.env.AI, room.row, room.col);
         if (ambient.spoke) {
           await this.broadcast({ type: 'message', room, username: ambient.npc });
         }
-      } catch (err) {
-        console.error('npc-ambient failed', err);
-      }
+      }, { fields });
     }
 
-    if (await roomNeedsLoop(this.env.DB, room.row, room.col)) {
-      await this.ctx.storage.setAlarm(Date.now() + (peaceful ? 12000 : 5000));
-    } else {
-      await this.ctx.storage.delete('hostileRoom');
+    // Re-arm tail: this MUST run even after a caught action error above so the loop
+    // proceeds. It is itself guarded so a transient DB hiccup while deciding whether to
+    // continue still re-arms a retry instead of wedging the alarm permanently.
+    const rearmed = await guard('alarm.rearm.error', async () => {
+      if (await roomNeedsLoop(this.env.DB, room.row, room.col)) {
+        await this.ctx.storage.setAlarm(Date.now() + (peaceful ? 12000 : 5000));
+      } else {
+        await this.ctx.storage.delete('hostileRoom');
+      }
+      return true;
+    }, { fields, fallback: false });
+
+    if (!rearmed) {
+      // Deciding whether to continue threw; retry on the next cadence rather than
+      // leaving the loop dead. The follow-up alarm will re-evaluate roomNeedsLoop.
+      await guard('alarm.rearm.retry-failed', async () => {
+        await this.ctx.storage.setAlarm(Date.now() + (peaceful ? 12000 : 5000));
+      }, { fields });
     }
   }
 }
@@ -1129,7 +1164,14 @@ export default {
     return app.fetch(request, env, ctx);
   },
   async scheduled(_event, env, ctx) {
-    const pulse = runScheduledWorldPulseAndWakeRooms(env);
+    // Boundary: the cron tick is unobserved, so a throw inside the world pulse would be
+    // lost silently (and, under waitUntil, surface only as an unhandled rejection). guard()
+    // catches + logs the failure structurally; the (now non-rejecting) tick still settles.
+    const start = nowMs();
+    const pulse = guard('scheduled.error', async () => {
+      await runScheduledWorldPulseAndWakeRooms(env);
+      logEvent({ event: 'scheduled.complete', durationMs: elapsedMs(start) });
+    });
     if (ctx && typeof ctx.waitUntil === 'function') {
       ctx.waitUntil(pulse);
       return;
