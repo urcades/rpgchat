@@ -19,13 +19,26 @@ const EXECUTION = {
   default: ["drives a {w} into {tgt}'s {pn} as they writhe", "strikes the prone {tgt} without mercy", "stamps {tgt} back into the dirt"]
 };
 const WEAPON_NOUN = { blade: 'blade', pierce: 'point', blunt: 'heel', fist: 'heel' };
+const SELF_VERBS = {
+  blade:  ['drags the edge across their own', 'opens their own', 'carves into their own', 'lays open their own'],
+  pierce: ['drives the point into their own', 'sinks the blade into their own', 'works the blade into their own'],
+  blunt:  ['hammers their own', 'cracks their own', 'batters their own'],
+  fist:   ['pounds at their own', 'claws at their own', 'beats their own']
+};
+const SELF_NO_PART = ['turns the blow on themselves', 'lashes out at themselves', 'savages themselves'];
+const SELF_DOWNED = ['stops struggling and lets the last blow fall', 'gives up and finishes the job'];
 function pick(arr, random) { return arr[Math.floor(random() * arr.length)] || arr[0]; }
 function tierOf(damage, isCritical) { if (isCritical || damage >= 6) return 'brutal'; if (damage >= 3) return 'solid'; return 'light'; }
-function describeAttack({ attacker, target, weaponClass = 'fist', part = null, damage = 0, isCritical = false, targetDowned = false } = {}, random = Math.random) {
+function describeAttack({ attacker, target, weaponClass = 'fist', part = null, damage = 0, isCritical = false, targetDowned = false, self = false } = {}, random = Math.random) {
   const klass = VERBS[weaponClass] ? weaponClass : 'fist';
   const nouns = part && PART_NOUNS[part];
   const pn = nouns ? pick(nouns, random) : null;
   const dmg = `(${damage})`;
+  if (self) {
+    if (targetDowned) return `${attacker} ${pick(SELF_DOWNED, random)} ${dmg}`;
+    if (pn) return `${attacker} ${pick(SELF_VERBS[klass], random)} ${pn} ${dmg}`;
+    return `${attacker} ${pick(SELF_NO_PART, random)} ${dmg}`;
+  }
   if (targetDowned) {
     const set = EXECUTION[part] || EXECUTION.default;
     const line = pick(set, random).split('{tgt}').join(target).split('{pn}').join(pn || 'body').split('{w}').join(WEAPON_NOUN[klass]);

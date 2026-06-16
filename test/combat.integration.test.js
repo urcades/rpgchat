@@ -148,6 +148,90 @@ test('Plan 024: an explicit aimed part (targeting toolbar) routes the hit to tha
   }
 });
 
+test('self-directed: attacking yourself reads reflexively ("their own"/"themselves"), never "name\'s name"', async () => {
+  const db = await createMigratedDb();
+  const { handleAttack, getUserState, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    // Equal speeds -> base hit chance 0.70. RNG order per target inside handleAttack:
+    //   1) speed contest (0.5 < 0.70 -> hit), 2) crit gate (0.99 -> no crit),
+    //   3) pickTargetPart (0.5 -> a real limb). The flavor verb/noun is drawn from
+    //   describeAttack's OWN seeded stream (flavorRandom), not Math.random, so we match
+    //   the reflexive wording loosely rather than pinning the exact verb.
+    await seedLiveUser(db, 'mog', { health: 30, maxHealth: 30, speed: 1, strength: 1 });
+
+    const calm = findCalmRoom(getWorldDay());
+    await updatePresence(db, 'mog', calm.row, calm.col);
+    await getUserState(db, 'mog'); // instantiate mog's body parts
+
+    const line = await withMockedRandom([0.5, 0.99, 0.5], () =>
+      handleAttack(db, 'mog', 'I turn the blade on @self', calm.row, calm.col));
+
+    assert.match(line, /their own|themselves/, 'a self-attack reads reflexively');
+    assert.doesNotMatch(line, /mog's mog/, "never the broken possessive 'mog's mog'");
+    assert.doesNotMatch(line, /mog dodged mog/, 'mog does not dodge their own landed blow');
+  } finally {
+    await db.close();
+  }
+});
+
+test('self-directed: casting Power Strike / Dose on yourself reads reflexively; casting on another is unchanged', async () => {
+  const db = await createMigratedDb();
+  const { handleSkillAction, getCurrentTickValue, getMessages, getUserState, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    const calm = findCalmRoom(getWorldDay());
+    // Fighter -> Power Strike; Chemist -> Dose. A fresh DB sits at tick 0 (Day phase), so
+    // Dose takes its heal/patch branch. High speed on the self-caster so the harmful
+    // self-cast's lone speed contest lands at roll 0.5 (base 0.70).
+    await seedLiveUser(db, 'fighter', { job: 'Fighter', health: 30, maxHealth: 30, speed: 20, strength: 4 });
+    await seedLiveUser(db, 'chemist', { job: 'Chemist', health: 30, maxHealth: 30, speed: 20, intelligence: 4 });
+    await seedLiveUser(db, 'victim', { job: 'Novice', health: 30, maxHealth: 30, speed: 1 });
+    for (const name of ['fighter', 'chemist', 'victim']) {
+      await updatePresence(db, name, calm.row, calm.col);
+      await getUserState(db, name);
+    }
+    const tick = await getCurrentTickValue(db); // 0 -> Day
+
+    // Power Strike on SELF (target === username) -> reflexive HIT line.
+    await withMockedRandom([0.5], () =>
+      handleSkillAction(db, 'fighter', calm.row, calm.col, 'power_strike', 'fighter', tick));
+    const selfStrike = await db.prepare(
+      "SELECT message FROM messages WHERE message LIKE 'fighter drives Power Strike%' ORDER BY id DESC LIMIT 1"
+    ).first();
+    assert.ok(selfStrike, 'a self Power Strike posts a reflexive line');
+    assert.match(selfStrike.message, /fighter drives Power Strike into themselves for \d+ damage\./, 'self Power Strike is reflexive');
+
+    // Power Strike on ANOTHER -> original wording, untouched. fighter speed 20 vs victim 1
+    // gives the max 0.95 chance; roll 0.5 lands the hit.
+    await withMockedRandom([0.5], () =>
+      handleSkillAction(db, 'fighter', calm.row, calm.col, 'power_strike', 'victim', tick));
+    const otherStrike = await getMessages(db, calm.row, calm.col);
+    assert.match(otherStrike.at(-1).message, /fighter power strikes victim for \d+ damage\./, 'a cast on another keeps the original wording');
+    assert.doesNotMatch(otherStrike.at(-1).message, /themselves|their own/, 'no reflexive wording on a cast at another');
+
+    // Dose on SELF in the Day phase = the heal/patch branch -> "patches their own wounds".
+    await withMockedRandom([0.99], () =>
+      handleSkillAction(db, 'chemist', calm.row, calm.col, 'dose', 'chemist', tick));
+    const selfPatch = await db.prepare(
+      "SELECT message FROM messages WHERE message LIKE 'chemist patches%' ORDER BY id DESC LIMIT 1"
+    ).first();
+    assert.ok(selfPatch, 'a self Dose (Day) posts a patch line');
+    assert.match(selfPatch.message, /chemist patches their own wounds for \d+ health\./, 'self heal is reflexive');
+
+    // Dose on ANOTHER in the Day phase -> original "patches up <name>" wording.
+    await withMockedRandom([0.99], () =>
+      handleSkillAction(db, 'chemist', calm.row, calm.col, 'dose', 'victim', tick));
+    const otherPatch = await db.prepare(
+      "SELECT message FROM messages WHERE message LIKE 'chemist patches up victim%' ORDER BY id DESC LIMIT 1"
+    ).first();
+    assert.ok(otherPatch, 'a Dose on another keeps the original patch wording');
+    assert.doesNotMatch(otherPatch.message, /their own|themselves/, 'no reflexive wording on a heal at another');
+  } finally {
+    await db.close();
+  }
+});
+
 test('Plan 006: /stance round-trips through the handler into the getUserState payload', async () => {
   const db = await createMigratedDb();
   const { handleChatAction, getUserState, updatePresence } = await import('../worker/game.mjs');

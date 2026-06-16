@@ -132,3 +132,84 @@ test('the EXECUTION/VERBS/PART_NOUNS tables are exported for callers and tests',
   assert.ok(EXECUTION.head && EXECUTION.neck && EXECUTION.default, 'execution sets present');
   assert.deepEqual(Object.keys(VERBS).sort(), ['blade', 'blunt', 'fist', 'pierce']);
 });
+
+// ---------------------------------------------------------------------------
+// Self-directed (reflexive) flavor — a player who targets themselves. The grammar
+// flips to "their own <part>" / "themselves" so a self-attack never reads
+// "mog carves across mog's throat". Draw order in the self branch mirrors the rest:
+//   - the part-noun pick (only when a known `part` is given) is ALWAYS first;
+//   - then the SELF_VERBS / SELF_NO_PART / SELF_DOWNED pick.
+
+test('self + a known part names a reflexive verb and "their own <part>" — never "name\'s name"', () => {
+  // part 'neck' -> noun pick is draw 1 (0.0 -> 'throat'); SELF_VERBS.blade pick is draw 2.
+  // verb 0.0 -> SELF_VERBS.blade[0] = 'drags the edge across their own'.
+  const line = describeAttack(
+    { attacker: 'mog', target: 'mog', weaponClass: 'blade', part: 'neck', damage: 3, self: true },
+    seq([0.0, 0.0])
+  );
+  assert.equal(line, 'mog drags the edge across their own throat (3)');
+  assert.match(line, /their own/, 'reads as self-directed');
+  assert.doesNotMatch(line, /mog's mog/, "never the broken possessive 'name's name'");
+});
+
+test('self + a known part, second verb in the set (draw 1 advances the SELF_VERBS pick)', () => {
+  // part 'torso' -> noun draw 1 (0.0 -> 'ribs'); SELF_VERBS.blade pick draw 2 at 0.3 -> index 1.
+  // 0.3 * 4 = 1.2 -> floor 1 -> SELF_VERBS.blade[1] = 'opens their own'.
+  const line = describeAttack(
+    { attacker: 'mog', target: 'mog', weaponClass: 'blade', part: 'torso', damage: 5, self: true },
+    seq([0.0, 0.3])
+  );
+  assert.equal(line, 'mog opens their own ribs (5)');
+});
+
+test('self with no part falls to the SELF_NO_PART set', () => {
+  // No part -> no noun draw; SELF_NO_PART pick is the sole draw. 0.0 -> 'turns the blow on themselves'.
+  const line = describeAttack(
+    { attacker: 'mog', target: 'mog', weaponClass: 'fist', part: null, damage: 2, self: true },
+    seq([0.0])
+  );
+  assert.equal(line, 'mog turns the blow on themselves (2)');
+  assert.doesNotMatch(line, /'s /, 'no possessive when no part is named');
+});
+
+test('self + targetDowned yields a SELF_DOWNED line (the grim finish)', () => {
+  // No part -> no noun draw; the self branch's targetDowned check returns first.
+  // SELF_DOWNED pick is the sole draw. 0.0 -> 'stops struggling and lets the last blow fall'.
+  const line = describeAttack(
+    { attacker: 'mog', target: 'mog', weaponClass: 'blade', part: null, damage: 4, self: true, targetDowned: true },
+    seq([0.0])
+  );
+  assert.equal(line, 'mog stops struggling and lets the last blow fall (4)');
+  assert.match(line, /last blow fall/, 'a downed self-attack reads as giving up');
+});
+
+test('self respects the weapon class for the reflexive verb set (blunt vs fist)', () => {
+  // part 'head' -> noun draw 1 (0.0 -> 'skull'); SELF_VERBS.blunt pick draw 2 (0.0 -> 'hammers their own').
+  const blunt = describeAttack(
+    { attacker: 'mog', target: 'mog', weaponClass: 'blunt', part: 'head', damage: 3, self: true },
+    seq([0.0, 0.0])
+  );
+  assert.equal(blunt, 'mog hammers their own skull (3)');
+  // fist set, with a part -> SELF_VERBS.fist[0] = 'pounds at their own'.
+  const fist = describeAttack(
+    { attacker: 'mog', target: 'mog', weaponClass: 'fist', part: 'head', damage: 1, self: true },
+    seq([0.0, 0.0])
+  );
+  assert.equal(fist, 'mog pounds at their own skull (1)', 'SELF_VERBS.fist[0]');
+});
+
+test('regression: self=false (and the default) leaves the non-self path byte-identical', () => {
+  // The exact assertion from the blade-hit test above, now pinned to prove the self
+  // flag defaults off and does not perturb the original verb/part wording or draw order.
+  const explicit = describeAttack(
+    { attacker: 'Mara', target: 'Bandit', weaponClass: 'blade', part: 'torso', damage: 4, self: false },
+    seq([0.0, 0.0])
+  );
+  const defaulted = describeAttack(
+    { attacker: 'Mara', target: 'Bandit', weaponClass: 'blade', part: 'torso', damage: 4 },
+    seq([0.0, 0.0])
+  );
+  assert.equal(explicit, "Mara hacks into Bandit's ribs (4)", 'self:false is the original line');
+  assert.equal(defaulted, explicit, 'omitting self matches self:false exactly');
+  assert.doesNotMatch(explicit, /their own|themselves/, 'no reflexive wording leaks into a normal hit');
+});

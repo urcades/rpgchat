@@ -783,7 +783,8 @@ export async function handleAttack(db, username, message, row, col, options = {}
       part: calledShot || damageResult.struckLabel,
       damage,
       isCritical: isCriticalAttack,
-      targetDowned: Boolean(target.incapacitated)
+      targetDowned: Boolean(target.incapacitated),
+      self: user.username === username
     }, flavorRandom([username, user.username, createdTick, damage, isCriticalAttack ? 'c' : '']));
 
     attackMessages.push(attackMessage);
@@ -888,7 +889,9 @@ async function tryHarmfulSkillHit(db, { effectiveActor, target, skillLabel, row,
     return true;
   }
 
-  const message = `${target} dodged ${effectiveActor.username}'s ${skillLabel}.`;
+  const message = isSelf(effectiveActor.username, target)
+    ? `${effectiveActor.username} swings ${skillLabel} at themselves and misses.`
+    : `${target} dodged ${effectiveActor.username}'s ${skillLabel}.`;
   await insertSystemMessage(db, row, col, message, 'combat');
   return false;
 }
@@ -911,6 +914,12 @@ export const RITE_COOLDOWN_EFFECT_PREFIX = 'rite:';
 async function stampRiteCooldown(db, username, abilityId, currentTick) {
   await upsertCooldown(db, username, 0, 0, RITE_COOLDOWN_EFFECT_PREFIX + abilityId, currentTick, getWorldDay());
 }
+
+// Plan 013e (tail): a cast lands on the SELF when the resolved target IS the actor
+// (you named @self / @me, or the toolbar aimed you). Only the human-readable message
+// flips to reflexive prose on this branch — formulas, status writes, kinds, and return
+// shapes are byte-identical to a cast on someone else.
+const isSelf = (a, t) => !!t && t === a;
 
 // The ability resolver: behavior keyed by ability id, callable by any invoker (a
 // player class skill today; an equipped item or an NPC tomorrow — plans 018c/021).
@@ -936,7 +945,9 @@ export async function runAbility(db, abilityId, { username, effectiveActor, targ
         row,
         col
       });
-      const message = `${username} wards ${target} for 5 ticks.`;
+      const message = isSelf(username, target)
+        ? `${username} wraps a ward around themselves for 5 ticks.`
+        : `${username} wards ${target} for 5 ticks.`;
       await insertSystemMessage(db, row, col, message, 'support');
       return { message };
     }
@@ -949,7 +960,12 @@ export async function runAbility(db, abilityId, { username, effectiveActor, targ
         col
       });
       if (!hit) {
-        return { message: `${target} dodged ${username}'s Power Strike.`, missed: true };
+        return {
+          message: isSelf(username, target)
+            ? `${username} swings Power Strike at themselves and misses.`
+            : `${target} dodged ${username}'s Power Strike.`,
+          missed: true
+        };
       }
 
       const marked = await dbFirst(
@@ -974,7 +990,9 @@ export async function runAbility(db, abilityId, { username, effectiveActor, targ
       const result = damage > 0
         ? await damageUser(db, target, damage, `power strike by ${username}`, row, col)
         : { killed: false, remainingHealth: null };
-      const message = `${username} power strikes ${target} for ${damage} damage.`;
+      const message = isSelf(username, target)
+        ? `${username} drives Power Strike into themselves for ${damage} damage.`
+        : `${username} power strikes ${target} for ${damage} damage.`;
       await insertSystemMessage(db, row, col, message, 'skill');
       return { message, damage, ...result };
     }
@@ -988,7 +1006,12 @@ export async function runAbility(db, abilityId, { username, effectiveActor, targ
           col
         });
         if (!hit) {
-          return { message: `${target} dodged ${username}'s Dose.`, missed: true };
+          return {
+            message: isSelf(username, target)
+              ? `${username} fumbles Dose against themselves.`
+              : `${target} dodged ${username}'s Dose.`,
+            missed: true
+          };
         }
 
         await addStatusEffect(db, {
@@ -1001,14 +1024,18 @@ export async function runAbility(db, abilityId, { username, effectiveActor, targ
           row,
           col
         });
-        const message = `${username} doses ${target} with something bitter.`;
+        const message = isSelf(username, target)
+          ? `${username} doses themselves with something bitter.`
+          : `${username} doses ${target} with something bitter.`;
         await insertSystemMessage(db, row, col, message, 'skill');
         return { message };
       }
 
       const amount = 2 + Math.floor(effectiveActor.intelligence / 4);
       await healUser(db, target, amount, row, col);
-      const message = `${username} patches up ${target} for ${amount} health.`;
+      const message = isSelf(username, target)
+        ? `${username} patches their own wounds for ${amount} health.`
+        : `${username} patches up ${target} for ${amount} health.`;
       await insertSystemMessage(db, row, col, message, 'support');
       return { message };
     }
@@ -1038,7 +1065,12 @@ export async function runAbility(db, abilityId, { username, effectiveActor, targ
         col
       });
       if (!hit) {
-        return { message: `${target} dodged ${username}'s Arcane Pin.`, missed: true };
+        return {
+          message: isSelf(username, target)
+            ? `${username} fumbles Arcane Pin against themselves.`
+            : `${target} dodged ${username}'s Arcane Pin.`,
+          missed: true
+        };
       }
 
       await addStatusEffect(db, {
@@ -1051,7 +1083,9 @@ export async function runAbility(db, abilityId, { username, effectiveActor, targ
         row,
         col
       });
-      const message = `${username} pins ${target} with a humming spell.`;
+      const message = isSelf(username, target)
+        ? `${username} pins themselves with a humming spell.`
+        : `${username} pins ${target} with a humming spell.`;
       await insertSystemMessage(db, row, col, message, 'skill');
       return { message };
     }
@@ -1064,7 +1098,12 @@ export async function runAbility(db, abilityId, { username, effectiveActor, targ
         col
       });
       if (!hit) {
-        return { message: `${target} dodged ${username}'s Mark.`, missed: true };
+        return {
+          message: isSelf(username, target)
+            ? `${username} can't quite mark themselves.`
+            : `${target} dodged ${username}'s Mark.`,
+          missed: true
+        };
       }
 
       await addStatusEffect(db, {
@@ -1077,7 +1116,9 @@ export async function runAbility(db, abilityId, { username, effectiveActor, targ
         row,
         col
       });
-      const message = `${username} marks ${target}.`;
+      const message = isSelf(username, target)
+        ? `${username} marks themselves.`
+        : `${username} marks ${target}.`;
       await insertSystemMessage(db, row, col, message, 'skill');
       return { message };
     }
@@ -1093,9 +1134,13 @@ export async function runAbility(db, abilityId, { username, effectiveActor, targ
         row,
         col
       });
-      const message = cleared
-        ? `${username} blesses ${target} and clears a harmful effect.`
-        : `${username} blesses ${target}.`;
+      const message = isSelf(username, target)
+        ? (cleared
+            ? `${username} blesses themselves and shrugs off a harmful effect.`
+            : `${username} blesses themselves.`)
+        : (cleared
+            ? `${username} blesses ${target} and clears a harmful effect.`
+            : `${username} blesses ${target}.`);
       await insertSystemMessage(db, row, col, message, 'support');
       return { message };
     }
