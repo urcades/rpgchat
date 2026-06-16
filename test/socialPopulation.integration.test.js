@@ -4,45 +4,9 @@
 // CommonJS + node:test, in-memory sqlite3 D1 shim.
 
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const test = require('node:test');
-const sqlite3 = require('sqlite3').verbose();
+const { createSqliteD1, createMigratedDb } = require('./.helpers/d1');
 const { getWorldDay } = require('../utils/roomEcology');
-
-function createSqliteD1() {
-  const raw = new sqlite3.Database(':memory:');
-  return {
-    raw,
-    exec(sql) { return new Promise((resolve, reject) => raw.exec(sql, err => (err ? reject(err) : resolve()))); },
-    close() { return new Promise((resolve, reject) => raw.close(err => (err ? reject(err) : resolve()))); },
-    prepare(sql) {
-      return {
-        params: [],
-        bind(...params) { this.params = params; return this; },
-        first() { return new Promise((resolve, reject) => raw.get(sql, this.params, (err, row) => (err ? reject(err) : resolve(row || null)))); },
-        all() { return new Promise((resolve, reject) => raw.all(sql, this.params, (err, rows) => (err ? reject(err) : resolve({ results: rows })))); },
-        run() {
-          return new Promise((resolve, reject) => {
-            raw.run(sql, this.params, function onRun(err) {
-              if (err) { reject(err); return; }
-              resolve({ meta: { changes: this.changes, last_row_id: this.lastID } });
-            });
-          });
-        }
-      };
-    }
-  };
-}
-
-async function createMigratedDb() {
-  const db = createSqliteD1();
-  const dir = path.join(__dirname, '../migrations');
-  for (const file of fs.readdirSync(dir).filter(f => f.endsWith('.sql')).sort()) {
-    await db.exec(fs.readFileSync(path.join(dir, file), 'utf8'));
-  }
-  return db;
-}
 
 async function findTavernAndCalmRooms(game) {
   const worldDay = getWorldDay();
