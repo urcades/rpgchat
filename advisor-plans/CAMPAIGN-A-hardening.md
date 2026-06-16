@@ -1,5 +1,10 @@
 # Campaign A — Totalizing Hardening Pass
 
+> ✅ **COMPLETE — 2026-06-16.** All of group A (adv-002, 001B, 003, 004, 005) shipped, pushed, and live on
+> `main` @ `872590d`. Test suite **263 → 319**; `game.mjs` **4,937 → a 156-line facade + 10 seams** (117 exports
+> preserved, zero test edits); smoke 10/10 + combat-smoke 9/9 at every wave gate. The Phase 0 deep audit found no
+> new critical (security clean); its non-critical findings are the backlog in `README.md`.
+>
 > **Orchestrator:** Claude (Opus 4.8, main loop). **Authored:** 2026-06-15, against
 > `HEAD = 05efdf4`. **Mandate (owner, this session):** embark on the *totality* of
 > group A (the `advisor-plans/` hardening backlog) as a "totalizing /improve pass on

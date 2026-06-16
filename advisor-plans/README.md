@@ -52,10 +52,11 @@ STOP conditions; update the row when done.
 | Plan | Finding | Title | Priority | Effort | Risk | Depends on | Status |
 |------|---------|-------|----------|--------|------|------------|--------|
 | [001](001-resurrection-idempotency-and-webhook-tests.md) | R1+R2 | Idempotent resurrection fulfillment + Stripe path tests | P1 | M | MED | — | DONE (2026-06-14, `worker/resurrection.mjs` claim-first + 5 tests incl. concurrency; Part A only — Part B signature-verifier extraction deferred) |
-| [002](002-extract-test-d1-shim.md) | T2 | Extract shared test D1 shim | P2 | S | LOW | — | TODO |
-| [003](003-action-path-test-coverage.md) | R4 | Tests for job-change / leveling / inn handlers | P2 | S | 002 (soft) | TODO |
-| [004](004-async-error-boundaries.md) | R3 | Error boundaries + structured logging on async paths | P2 | M | — | TODO |
-| [005](005-split-game-module.md) | T1 | Split `game.mjs` behind a stable facade | P3 | L | MED | do last | TODO |
+| [002](002-extract-test-d1-shim.md) | T2 | Extract shared test D1 shim | P2 | S | LOW | — | ✅ DONE & LIVE (2026-06-16, Campaign A; `test/.helpers/d1.js`, 28 files deduped, count held) |
+| 001B | R2 | Extract + unit-test the Stripe signature verifier (was 001 Part B) | P2 | S | LOW | — | ✅ DONE & LIVE (2026-06-16, Campaign A; `worker/stripe.mjs` + 13 sig tests, + resurrection-INSERT dedup) |
+| [003](003-action-path-test-coverage.md) | R4 | Tests for job-change / leveling / inn handlers (+ auth-crypto, signup, coords) | P2 | S | 002 | ✅ DONE & LIVE (2026-06-16, Campaign A; +29 tests) |
+| [004](004-async-error-boundaries.md) | R3 | Error boundaries + structured logging on async paths | P2 | M | — | ✅ DONE & LIVE (2026-06-16, Campaign A; `guard()` on alarm/scheduled/runAfterResponse/wakeActiveRooms, +13 tests) |
+| [005](005-split-game-module.md) | T1 | Split `game.mjs` behind a stable facade | P3 | L | MED | do last | ✅ DONE & LIVE (2026-06-16, Campaign A; 156-line facade + 10 seams, 117 exports, 319 tests, zero test edits) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (reason) | REJECTED (reason)
 
@@ -69,20 +70,23 @@ plan yet; say the word and it becomes 006. The other direction items (D2 plan-00
 sequencing, D3 movement/revival, D4 item trade/storage) are roadmap calls for `plans/`,
 not improvement plans.
 
-## Campaign A — totalizing hardening pass (in progress, 2026-06-15)
+## Campaign A — totalizing hardening pass (✅ COMPLETE 2026-06-16)
 
-Executing the **totality** of this backlog under `CAMPAIGN-A-hardening.md` (full push autonomy, audit-first).
-Status: `001` ✅ (Part A); **`001B`** (Stripe signature-verifier extraction + tests) + **`002`/`003`/`004`/`005`**
-in flight as Waves 1–3. A fresh `/improve deep` audit (HEAD `05efdf4`, 7 Explore agents) ran first; findings
+Executed the **totality** of this backlog under `CAMPAIGN-A-hardening.md` (full push autonomy, audit-first).
+**All shipped & live on `main` @ `872590d`:** `001`(Part A) + `001B` + `002`/`003`/`004`/`005`, in three waves
+(1: 002∥001B · 2: 003∥004 · 3: 005 solo). A fresh `/improve deep` audit (7 Explore agents) ran first; findings
 vetted against source. Enrichments folded into `003` (auth-crypto + login/signup + coord tests), `004` (cron +
 hostile-alarm boundaries + stack/timestamp logging), `005` (the `game.mjs` seam map), `001B` (resurrection-INSERT dedup).
 Security audit: **zero findings**. CORRECTNESS-001 (NPC-kill null-deref) vetted and **rejected** — false positive
-(the re-read precedes the delete).
+(the re-read precedes the delete). Final state: **suite 263 → 319**, `game.mjs` 4,937 → a 156-line facade + 10 seams
+(117 exports, zero test edits), smoke 10/10 + combat-smoke 9/9.
 
 ### Deferred findings from the 2026-06-15 deep audit (real, NOT critical — backlog, not executed this run)
 
 | Finding | Cat | Effort | Note |
 |---|---|---|---|
+| Worker testability seam: `index.mjs`'s `import 'cloudflare:workers'` blocks importing the Hono app / route closures / DO under bare `node --test` — both adv-003 and adv-004 had to stub it (delegated-logic tests / `module.registerHooks`). Split routes + DO from the import for true end-to-end route tests | tech-debt/tests | M | surfaced by Campaign A; relates to index.mjs layering above |
+| `auth.mjs` crypto primitives (`sign`/`verifyCookieValue`/`constantTimeEqual`/`parseCookie`) are module-private — export them to allow direct unit tests (adv-003 covered them only through the public session API) | tests | S | surfaced by Campaign A |
 | Combat/loop query N+1 cluster (per-target getAttackElement/consumeStatusModifier; doubled roomNeedsLoop+roomHasActiveHostiles per alarm; `SELECT u.*` over-fetch; getRoomEcology recomputed by reply+ambient) | perf | M | single-target unaffected; bites multi-target + many rooms |
 | Hot-path index additions: `bodyParts(username,slotType,severed)`, `items(corpseOf,roomRow,roomCol)` | perf/migration | S | additive migration |
 | wrangler 4.95→4.100, hono 4.12.23→4.12.25 | deps | S | hygiene |
