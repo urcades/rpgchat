@@ -18,6 +18,8 @@ import {
   SPEED_HIT_STEP,
   STANCES,
   assertAction,
+  baseCreatureName,
+  buildAffixRoll,
   clampNumber,
   escapeRegExp,
   getAbility,
@@ -105,7 +107,9 @@ const CREATURE_AFFINITY = {
   'Ice Gnawer': { fire: 0.5, cold: -0.5 }
 };
 function getCreatureAffinity(displayName, element) {
-  const map = CREATURE_AFFINITY[displayName] || {};
+  // Plan 021: resolve by BASE name so an elite ("Vicious Frost Wyrm") keeps the base
+  // creature's intrinsic affinity (fire-weak/cold-resistant), not neutral.
+  const map = CREATURE_AFFINITY[baseCreatureName(displayName)] || CREATURE_AFFINITY[displayName] || {};
   return Number(map[element]) || 0;
 }
 
@@ -117,6 +121,30 @@ const CREATURE_ABILITIES = {
   'Frost Wyrm': ['arcane_pin', 'power_strike'],
   'Restless Brute': ['power_strike']
 };
+
+// Parse a stored affixes JSON column to a string[] of affix names (defensive; [] on junk).
+function parseAffixNames(raw) {
+  if (!raw) {
+    return [];
+  }
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return Array.isArray(parsed) ? parsed.filter(name => typeof name === 'string') : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+// The element a creature's basic bite lands. Plan 021: a base-name lookup (so an elite
+// keeps its kind's element), OVERRIDDEN by a Rending affix's intrinsic element if rolled.
+// Null → a plain physical bite (no status), exactly as before for an unmapped creature.
+function creatureElementFor(npc) {
+  const affixElement = buildAffixRoll(parseAffixNames(npc.affixes)).element;
+  if (affixElement) {
+    return affixElement;
+  }
+  return CREATURE_ELEMENT[baseCreatureName(npc.displayName)] || CREATURE_ELEMENT[npc.displayName] || null;
+}
 
 // The element of a player's equipped weapon (first equipped item carrying one).
 export async function getAttackElement(db, username) {
@@ -220,7 +248,9 @@ export function isHostileUsable(ability) {
 // active ability the job grants, filtered to the hostile-usable set. A jobless / unkitted
 // NPC yields [] → the caller falls to basic attacks.
 export function getHostileKit(npc) {
-  const creatureKit = CREATURE_ABILITIES[npc.displayName];
+  // Plan 021: an elite's displayName is prefixed ("Vicious Frost Wyrm"); resolve the kit
+  // by BASE name so it keeps the base creature's CREATURE_ABILITIES.
+  const creatureKit = CREATURE_ABILITIES[baseCreatureName(npc.displayName)] || CREATURE_ABILITIES[npc.displayName];
   if (creatureKit && creatureKit.length) {
     return creatureKit;
   }
@@ -376,8 +406,9 @@ export async function runHostileRoomAction(db, row, col) {
   await insertSystemMessage(db, row, col, `${npc.displayName || npc.username} ${hitText} ${player.username} for ${damage} damage.`, 'combat');
 
   // Plan 021b: a creature's elemental bite lands its element's status on the player.
+  // Plan 021 (BOLD): resolve by base name + Rending affix, so an elite still bites cold.
   if (!damageResult.died) {
-    const element = CREATURE_ELEMENT[npc.displayName];
+    const element = creatureElementFor(npc);
     if (element) {
       await applyElementOnHit(db, {
         attacker: npc.displayName || npc.username,
@@ -632,7 +663,12 @@ export async function handleAttack(db, username, message, row, col, options = {}
   for (const user of targets) {
     const target = await getUser(db, user.username, 'Target');
     const targetMods = target.isNpc ? null : await getConditionAndGearModifiers(db, target.username);
-    const calledShot = target.isNpc ? null : (aimedPart || parseCalledShot(message));
+    // Plan 021 (BOLD): called shots now land on a BODIED NPC (creatureBodyPlan set) too —
+    // the engine, not a name, decides: a player always has a body; an NPC has one only
+    // when it carries a plan; a scalar NPC (null plan) still ignores aim (no parts to hit).
+    // Players are byte-identical (the else branch is the original expression).
+    const targetIsBodied = target.isNpc ? Boolean(target.creatureBodyPlan) : true;
+    const calledShot = targetIsBodied ? (aimedPart || parseCalledShot(message)) : null;
     const targetStance = target.isNpc ? STANCES[DEFAULT_STANCE] : STANCES[normalizeStance(target.stance)];
 
     // Contest deltas: attacker stance hitBonus and (when aiming) the called-shot
@@ -662,7 +698,11 @@ export async function handleAttack(db, username, message, row, col, options = {}
       cause: `attack by ${username}`,
       row,
       col,
-      targetLabel: calledShot
+      targetLabel: calledShot,
+      // Plan 021: a bodied NPC's wound/sever lines read by its display name
+      // ("Frost Wyrm's left wing is destroyed"). Players have no displayName, so this
+      // is null and applyBodyDamage falls back to the username — byte-identical.
+      displayLabel: target.displayName || null
     });
 
     const attackedUser = await dbFirst(db, 'SELECT * FROM users WHERE username = ?', [user.username]);

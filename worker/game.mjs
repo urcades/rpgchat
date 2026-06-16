@@ -17,7 +17,14 @@ export {
   getEffectiveUser,
   normalizeJob,
   validateRoomCoordinates,
-  validateStartingAllocation
+  validateStartingAllocation,
+  // Plan 021 (BOLD): NPC anatomy + elite growth — surfaced for the parity tests.
+  buildAffixRoll,
+  eliteDisplayName,
+  getBodyPlan,
+  resolveCreatureBodyPlanId,
+  rollAffixes,
+  scaleNpcStats
 } from './game/shared.mjs';
 
 export {

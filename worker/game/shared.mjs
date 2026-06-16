@@ -16,6 +16,7 @@ import itemsModule from '../../utils/items.js';
 import abilitiesModule from '../../utils/abilities.js';
 import progressionModule from '../../utils/progressionGrid.js';
 import recipesModule from '../../utils/recipes.js';
+import npcGrowthModule from '../../utils/npcGrowth.js';
 
 const {
   JOBS,
@@ -45,6 +46,14 @@ const {
 } = progressionModule;
 
 const { findRecipeByOutputName } = recipesModule;
+
+const {
+  scaleNpcStats,
+  rollAffixes,
+  buildAffixRoll,
+  eliteDisplayName,
+  baseCreatureName
+} = npcGrowthModule;
 
 const {
   GRID_SIZE,
@@ -80,6 +89,13 @@ const {
 
 const {
   HUMANOID_PLAN,
+  WYRM_PLAN,
+  QUADRUPED_PLAN,
+  BRUTE_PLAN,
+  CREATURE_BODY_PLANS,
+  CREATURE_BODY_PLAN_BY_NAME,
+  getBodyPlan,
+  resolveCreatureBodyPlanId,
   MODIFIER_KEYS,
   distributeAcrossPlan,
   partCondition,
@@ -90,6 +106,7 @@ const {
   DEFAULT_STANCE,
   normalizeStance,
   parseCalledShot,
+  CALLED_SHOT_LABELS,
   CALLED_SHOT_HIT_PENALTY,
   CALLED_SHOT_HEAD_BONUS
 } = bodyModule;
@@ -115,6 +132,12 @@ export {
   getGridEntryNodeIds,
   // recipes
   findRecipeByOutputName,
+  // npc growth (plan 021)
+  scaleNpcStats,
+  rollAffixes,
+  buildAffixRoll,
+  eliteDisplayName,
+  baseCreatureName,
   // room ecology
   GRID_SIZE,
   getWorldDay,
@@ -146,6 +169,13 @@ export {
   rollTrophyDrop,
   // body
   HUMANOID_PLAN,
+  WYRM_PLAN,
+  QUADRUPED_PLAN,
+  BRUTE_PLAN,
+  CREATURE_BODY_PLANS,
+  CREATURE_BODY_PLAN_BY_NAME,
+  getBodyPlan,
+  resolveCreatureBodyPlanId,
   MODIFIER_KEYS,
   distributeAcrossPlan,
   partCondition,
@@ -156,6 +186,7 @@ export {
   DEFAULT_STANCE,
   normalizeStance,
   parseCalledShot,
+  CALLED_SHOT_LABELS,
   CALLED_SHOT_HIT_PENALTY,
   CALLED_SHOT_HEAD_BONUS
 };

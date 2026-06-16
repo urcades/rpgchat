@@ -10,7 +10,9 @@ import {
   HUMANOID_PLAN,
   MODIFIER_KEYS,
   bodyPenaltyModifiers,
+  buildAffixRoll,
   distributeAcrossPlan,
+  getBodyPlan,
   getEffectiveUser,
   partCondition,
   pickTargetPart
@@ -23,8 +25,28 @@ import { getProgressionModifiers } from './progression.mjs';
 import { getCurrentTickValue, getUser } from './world.mjs';
 
 
-function isBodylessUser(user) {
-  return Boolean(user && (user.isNpc || user.username === 'System'));
+// Plan 021 (BOLD): the body gate, generalized. A user's body plan decides whether it
+// routes through per-part anatomy (a non-null plan) or scalar HP (null):
+//   - System: null (never has a body).
+//   - NPCs: getBodyPlan(user.creatureBodyPlan). A NULL column → null → scalar HP,
+//     EXACTLY today's behavior (lazy/no-backfill: in-flight scalar NPCs finish
+//     scalar; only fresh spawns carry a plan). A non-null plan id → that creature
+//     plan, so the NPC falls through the IDENTICAL per-part routing players use.
+//   - players: HUMANOID_PLAN (unchanged).
+// Exported so the death seam can zero a bodied NPC's parts through the incap/gib
+// band (preserving the users.health == Σ bodyParts.hp invariant for NPCs too).
+export function bodyPlanFor(user) {
+  if (!user || user.username === 'System') {
+    return null;
+  }
+  if (user.isNpc) {
+    return getBodyPlan(user.creatureBodyPlan);
+  }
+  return HUMANOID_PLAN;
+}
+
+export function isBodylessUser(user) {
+  return bodyPlanFor(user) === null;
 }
 
 export async function getBodyParts(db, username) {
@@ -39,7 +61,8 @@ export async function getBodyParts(db, username) {
 }
 
 export async function ensureBody(db, user) {
-  if (isBodylessUser(user)) {
+  const plan = bodyPlanFor(user);
+  if (plan === null) {
     return null;
   }
   const existing = await getBodyParts(db, user.username);
@@ -48,15 +71,17 @@ export async function ensureBody(db, user) {
   }
 
   // Part pools mirror the STORED pool so the invariant is exact; job bonuses
-  // live in the effective layer only.
+  // live in the effective layer only. Plan 021: `plan` is the user's body plan
+  // (HUMANOID_PLAN for players, a creature plan for bodied NPCs) — the player path
+  // is byte-identical (plan === HUMANOID_PLAN).
   const storedMax = Math.max(0, Math.floor(user.maxHealth || 0));
   const storedHealth = Math.max(0, Math.min(Math.floor(user.health || 0), storedMax));
-  const maxDistribution = distributeAcrossPlan(storedMax, HUMANOID_PLAN);
+  const maxDistribution = distributeAcrossPlan(storedMax, plan);
 
   // Distribute current hp, clamped per-part to its maxHp; push any clamp
   // overflow to parts with headroom, torso first.
-  const hpDistribution = distributeAcrossPlan(storedHealth, HUMANOID_PLAN);
-  const parts = HUMANOID_PLAN.map((template, index) => ({
+  const hpDistribution = distributeAcrossPlan(storedHealth, plan);
+  const parts = plan.map((template, index) => ({
     ...template,
     maxHp: maxDistribution[index].amount,
     hp: Math.min(hpDistribution[index].amount, maxDistribution[index].amount)
@@ -93,7 +118,76 @@ export async function ensureBody(db, user) {
     );
   }
 
+  // Plan 021 (BOLD): an elite NPC's affixes shape the body AS IT MATERIALIZES (whether
+  // lazily on first hit or at spawn) — so the affix mods are part of the body from birth,
+  // never a separate code path that could drift the invariant. Players carry no affixes
+  // column, so this is a no-op for them.
+  await applyAffixBodyEffects(db, user);
+
   return getBodyParts(db, user.username);
+}
+
+// Parse a bodied NPC's stored `affixes` JSON and fold the spawn-time body effects in:
+//   - Hulking → append the extra-part rows (distinct labels; absolute maxHp; full hp).
+//   - Armored → fortify EVERY part's maxHp via applyPartMaxHpDelta (which also mirrors
+//     users.maxHealth and never destroys hp on a positive delta), exactly as plan 015's
+//     structural armor does — so the fortified HP is real headroom the creature fills by
+//     healing, and the users.health == Σ bodyParts.hp invariant stays exact.
+// No affixes (or a player) → nothing happens. Idempotent in practice: the extra parts use
+// INSERT OR IGNORE on the UNIQUE(username,label), and this only runs at body creation.
+async function applyAffixBodyEffects(db, user) {
+  const names = parseAffixNames(user && user.affixes);
+  if (names.length === 0) {
+    return;
+  }
+  const roll = buildAffixRoll(names);
+  // Hulking appends EXTRA parts. Each carries its own HP pool, so users.health AND
+  // users.maxHealth must grow by exactly the HP we add — otherwise Σ bodyParts.hp would
+  // exceed users.health and the invariant breaks. We sum the HP actually inserted (the
+  // UNIQUE(username,label) means a duplicate INSERT OR IGNORE adds nothing, so we only
+  // count rows that did not already exist).
+  let addedHp = 0;
+  for (const extra of roll.extraParts) {
+    const before = await dbFirst(db, 'SELECT id FROM bodyParts WHERE username = ? AND label = ?', [user.username, extra.label]);
+    if (before) {
+      continue; // already present — don't double-count on a re-entrant ensureBody
+    }
+    await dbRun(
+      db,
+      `INSERT OR IGNORE INTO bodyParts
+        (username, partType, label, slotType, vital, hp, maxHp, baseMaxHp, severed)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+      [user.username, extra.partType, extra.label, extra.slotType ?? null, extra.vital ? 1 : 0, extra.maxHp, extra.maxHp, extra.maxHp]
+    );
+    addedHp += Math.max(0, Math.floor(extra.maxHp || 0));
+  }
+  if (addedHp > 0) {
+    await dbRun(
+      db,
+      'UPDATE users SET health = health + ?, maxHealth = maxHealth + ? WHERE username = ?',
+      [addedHp, addedHp, user.username]
+    );
+  }
+  if (roll.partMaxHpDelta) {
+    const allParts = await getBodyParts(db, user.username);
+    for (const part of allParts) {
+      await applyPartMaxHpDelta(db, user.username, part.id, roll.partMaxHpDelta);
+    }
+  }
+}
+
+// Defensive parse of a stored affixes column into a string[] of affix names. Accepts the
+// JSON array shape this seam writes (["Vicious","Armored"]); anything else → [].
+function parseAffixNames(raw) {
+  if (!raw) {
+    return [];
+  }
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return Array.isArray(parsed) ? parsed.filter(name => typeof name === 'string') : [];
+  } catch (error) {
+    return [];
+  }
 }
 
 export async function getBodyConditionModifiers(db, username) {
@@ -186,7 +280,7 @@ export async function getConditionAndGearModifiers(db, username) {
   return combined;
 }
 
-async function emitConditionTransitions(db, username, beforeParts, afterParts, row, col) {
+async function emitConditionTransitions(db, username, beforeParts, afterParts, row, col, displayLabel = username) {
   if (row === undefined || row === null || col === undefined || col === null) {
     return;
   }
@@ -205,15 +299,20 @@ async function emitConditionTransitions(db, username, beforeParts, afterParts, r
       // Severance gets its own "destroyed" line from the caller; skip here.
       continue;
     }
+    // Plan 021: read by displayLabel (a bodied NPC's display name); for players it
+    // defaults to username, so player condition lines are byte-identical.
     const phrase = afterCondition === 'healthy'
-      ? `${username}'s ${after.label} looks healthy again.`
-      : `${username}'s ${after.label} is ${afterCondition}.`;
+      ? `${displayLabel}'s ${after.label} looks healthy again.`
+      : `${displayLabel}'s ${after.label} is ${afterCondition}.`;
     await insertSystemMessage(db, row, col, phrase);
   }
 }
 
 export async function applyBodyDamage(db, user, amount, options = {}) {
   const { cause, row, col, random = Math.random, targetLabel = null } = options;
+  // Plan 021: the name a bodied NPC's wound/sever lines read by ("Frost Wyrm's left
+  // wing is destroyed"). Defaults to username, so player messaging is byte-identical.
+  const displayLabel = options.displayLabel || user.username;
   const damage = Math.max(0, Math.floor(amount || 0));
 
   if (isBodylessUser(user)) {
@@ -305,12 +404,14 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
   }
 
   // Loud states: condition-transition messages (non-severance), then severance.
-  await emitConditionTransitions(db, user.username, partsBefore, working, row, col);
+  await emitConditionTransitions(db, user.username, partsBefore, working, row, col, displayLabel);
   if (row !== undefined && row !== null && col !== undefined && col !== null) {
     for (const part of severedParts) {
-      await insertSystemMessage(db, row, col, `${user.username}'s ${part.label} is destroyed.`, 'combat');
+      await insertSystemMessage(db, row, col, `${displayLabel}'s ${part.label} is destroyed.`, 'combat');
       // Sever knock-off: whatever was equipped on this part clatters to the
       // floor for anyone to /take (plan 005). Fetch the name BEFORE the UPDATE.
+      // (Creature parts carry slotType null and NPCs never wear gear, so this
+      // resolves to nothing for a bodied NPC — no spurious floor item.)
       const equipped = await dbFirst(
         db,
         'SELECT id, name FROM items WHERE equippedPartId = ?',
@@ -327,7 +428,7 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
           db,
           row,
           col,
-          `${equipped.name} falls to the floor with ${user.username}'s ${part.label}.`
+          `${equipped.name} falls to the floor with ${displayLabel}'s ${part.label}.`
         );
       }
     }
@@ -341,6 +442,7 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
 
 export async function applyBodyHeal(db, user, amount, options = {}) {
   const { row, col } = options;
+  const displayLabel = options.displayLabel || user.username;
   const heal = Math.max(0, Math.floor(amount || 0));
 
   if (isBodylessUser(user)) {
@@ -393,7 +495,7 @@ export async function applyBodyHeal(db, user, amount, options = {}) {
 
   const healthAfter = Math.max(0, (user.health || 0) + totalHealed);
   await dbRun(db, 'UPDATE users SET health = ? WHERE username = ?', [healthAfter, user.username]);
-  await emitConditionTransitions(db, user.username, partsBefore, working, row, col);
+  await emitConditionTransitions(db, user.username, partsBefore, working, row, col, displayLabel);
   // Plan 023b: a heal that lifts a downed player back above 0 stands them up.
   if (healthAfter > 0 && row !== undefined && row !== null && col !== undefined && col !== null) {
     const downed = await dbFirst(db, 'SELECT incapacitated FROM users WHERE username = ?', [user.username]);

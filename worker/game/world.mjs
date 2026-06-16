@@ -17,8 +17,10 @@ import {
   applyPassiveEffectToUser,
   applyPhaseToFeatures,
   assertAction,
+  buildAffixRoll,
   calculateInnFee,
   composeRoomDescription,
+  eliteDisplayName,
   generateDailyWorldEvents,
   generateRoomFeatures,
   getAbility,
@@ -30,7 +32,10 @@ import {
   getRoomEffectPayload,
   getWorldDay,
   partCondition,
+  resolveCreatureBodyPlanId,
   resolveGamblingRound,
+  rollAffixes,
+  scaleNpcStats,
   shouldApplyEffect,
   summarizeTraces
 } from './shared.mjs';
@@ -343,6 +348,36 @@ function npcUsername(eventId, suffix) {
   return `${eventId}_${suffix}`.replace(/[^A-Za-z0-9_-]/g, '_');
 }
 
+// Plan 021 (BOLD): turn a base hostile template into a spawn-ready one. Three layers,
+// all derived from the BASE displayName (so the body plan + the combat trait maps keyed
+// by base name still resolve — the affix prefix is applied to displayName LAST):
+//   1) creatureBodyPlan — resolveCreatureBodyPlanId gives EVERY hostile a body (known
+//      creatures get a tailored plan; unmapped hostiles default to 'brute').
+//   2) scaled stats — scaleNpcStats inflates stored health/strength by level.
+//   3) affixes — rollAffixes (deterministic via `random`) picks an elite's 1–2 affixes;
+//      their stat/element deltas fold into the template, their names become a stored JSON
+//      column + a displayName prefix ("Vicious Frost Wyrm"), and their spawn-time body
+//      riders (extra parts, part-maxHp fortification) ride the stored affixes column —
+//      ensureBody reads it back and shapes the body to match.
+// `random` is injectable so spawn tests can pin the affix roll (the 004 RNG convention).
+function decorateNpcTemplate(template, random = Math.random) {
+  const baseName = template.displayName;
+  const creatureBodyPlan = resolveCreatureBodyPlanId(baseName);
+  const scaled = scaleNpcStats(template, template.level);
+  const roll = rollAffixes(scaled.level, random);
+  const withAffixes = roll.applyTemplate(scaled);
+  const displayName = eliteDisplayName(baseName, roll.prefix);
+  return {
+    ...withAffixes,
+    displayName,
+    creatureBodyPlan,
+    // Stored as a JSON array of affix names; null when not an elite (no column noise). The
+    // intrinsic element a Rending affix grants is NOT stored separately — the combat seam
+    // re-derives it from this affixes column (creatureElementFor), keeping one source.
+    affixes: roll.affixes.length ? JSON.stringify(roll.affixes) : null
+  };
+}
+
 function npcTemplateFor(event, suffix) {
   if (event.eventType === 'raid' && suffix === 'boss') {
     return {
@@ -420,16 +455,20 @@ function npcTemplatesForEvent(event) {
 }
 
 export async function createNpcForEvent(db, npc) {
+  // Plan 021 (BOLD): persist the body plan + affixes. A caller that passes neither (e.g.
+  // a direct-construction test, or any legacy path) writes NULL/NULL — the lazy/no-backfill
+  // contract: such an NPC stays scalar (NULL plan) and the body gate skips it, EXACTLY
+  // today's behavior. maxHealth mirrors the (possibly level-scaled) health at birth.
   await dbRun(
     db,
     `INSERT OR IGNORE INTO users
       (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold,
-       experience, isNpc, displayName, npcKind, worldEventId, disposition)
-     VALUES (?, 'npc', 'Novice', ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 1, ?, ?, ?, 'hostile')`,
+       experience, isNpc, displayName, npcKind, worldEventId, disposition, creatureBodyPlan, affixes)
+     VALUES (?, 'npc', 'Novice', ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 1, ?, ?, ?, 'hostile', ?, ?)`,
     [
       npc.username,
       npc.health,
-      npc.health,
+      npc.maxHealth ?? npc.health,
       npc.stamina ?? 100,
       npc.stamina ?? 100,
       npc.speed,
@@ -438,7 +477,9 @@ export async function createNpcForEvent(db, npc) {
       npc.level ?? 0,
       npc.displayName,
       npc.npcKind,
-      npc.worldEventId
+      npc.worldEventId,
+      npc.creatureBodyPlan ?? null,
+      npc.affixes ?? null
     ]
   );
   await dbRun(
@@ -602,8 +643,12 @@ async function canSpawnEventNpc(db, npc, currentTick) {
 async function spawnEventNpcs(db, event, currentTick) {
   const templates = npcTemplatesForEvent(event);
   for (const template of templates) {
+    // Plan 021 (BOLD): decorate every spawned hostile — a body plan, level-scaled stats,
+    // and (for elites) affixes — BEFORE persisting. canSpawnEventNpc keys on the stable
+    // username (untouched by decoration), so respawn gating is unchanged.
+    const decorated = decorateNpcTemplate(template);
     const npc = {
-      ...template,
+      ...decorated,
       worldEventId: event.id,
       worldDay: event.worldDay,
       row: event.roomRow,

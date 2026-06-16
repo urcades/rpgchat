@@ -17,7 +17,7 @@ import {
   rollTrophyDrop
 } from './shared.mjs';
 import { dbAll, dbFirst, dbRun } from '../db.mjs';
-import { getBodyParts } from './body.mjs';
+import { getBodyParts, isBodylessUser } from './body.mjs';
 import { dropItemOnFloor, dropPlayerItemsOnDeath } from './inventory.mjs';
 import { createTrace, emitSystemMessage, insertSystemMessage } from './messages.mjs';
 import { CREATURE_DEATH_RATTLES, NPC_DEATH_BEGS, emitDeathReaction } from './npc.mjs';
@@ -90,7 +90,17 @@ async function incapacitate(db, user, cause, row, col, { currentTick = null, def
     [cause, user.username]
   );
   await dbRun(db, 'DELETE FROM statusEffects WHERE username = ?', [user.username]); // falling clears chill/burn/etc.
+  // Plan 021/023b: zero the body for ANY bodied combatant — a player OR a bodied NPC
+  // (creatureBodyPlan != null). users.health was just set to 0, so the parts MUST go to
+  // 0 too or the users.health == Σ bodyParts.hp invariant breaks for the downed NPC
+  // (the exact band 013g/023 assumed could never happen, because every NPC used to be
+  // bodyless). A scalar NPC has no rows, so this no-ops for it.
+  if (!isBodylessUser(user)) {
+    await dbRun(db, 'UPDATE bodyParts SET hp = 0 WHERE username = ?', [user.username]);
+  }
   if (user.isNpc) {
+    // NPCs don't scatter player gear — they gasp a plea (social) or a broken rattle
+    // (beast) and fall. Loot drops on true death (defeatNpc), not here.
     if (user.npcKind === 'social') {
       const beg = NPC_DEATH_BEGS[Math.floor(Math.random() * NPC_DEATH_BEGS.length)];
       await emitSystemMessage(db, row, col, `${name} falls, gasping: "${garbleSpeech(beg)}"`, deferredSystemMessages, 'death');
@@ -99,7 +109,6 @@ async function incapacitate(db, user, cause, row, col, { currentTick = null, def
       await emitSystemMessage(db, row, col, `${name} ${rattle}, barely clinging on.`, deferredSystemMessages, 'death');
     }
   } else {
-    await dbRun(db, 'UPDATE bodyParts SET hp = 0 WHERE username = ?', [user.username]);
     // Items spill NOW, while they still draw breath — the vulnerability is the point.
     const dropped = await dropPlayerItemsOnDeath(db, user.username, row, col);
     if (dropped > 0) {
@@ -115,8 +124,22 @@ async function incapacitate(db, user, cause, row, col, { currentTick = null, def
 async function finishOff(db, user, { cause, row, col, currentTick = null, gib = false, deferredSystemMessages = null } = {}) {
   if (user.isNpc) {
     const killer = getKillerFromCause(cause) || 'their wounds';
+    const name = user.displayName || user.username;
     if (gib) {
-      await emitSystemMessage(db, row, col, `${user.displayName || user.username} is torn apart.`, deferredSystemMessages, 'death');
+      // Plan 021 (Fork 5 = yes): a plan-bearing creature gib flings its own limbs as
+      // severed_part floor items (the SAME body path the player gib uses) BEFORE
+      // defeatNpc removes it and drops its remains/trophy. A scalar NPC
+      // (creatureBodyPlan == null) has no parts, so it keeps today's behavior — a
+      // single "torn apart" line and the monster_remains that defeatNpc drops.
+      if (user.creatureBodyPlan) {
+        const parts = await getBodyParts(db, user.username);
+        const flying = parts.filter(part => !part.severed && part.partType !== 'torso').slice(0, 2);
+        for (const part of flying) {
+          await emitSystemMessage(db, row, col, `${name}'s ${part.label} bursts free in a spray of gore.`, deferredSystemMessages, 'death');
+          await dropItemOnFloor(db, 'severed_part', row, col, { name: `${name}'s severed ${part.label}` });
+        }
+      }
+      await emitSystemMessage(db, row, col, `${name} is torn apart.`, deferredSystemMessages, 'death');
       await createTrace(db, { row, col, traceType: 'body', intensity: 3, attacker: killer, target: user.username, createdTick: currentTick ?? 0, expiryTick: null, worldDay: getWorldDay() });
     }
     await defeatNpc(db, user, { killer, row, col, currentTick, deferredSystemMessages });
@@ -394,6 +417,11 @@ export async function defeatNpc(db, npc, { killer, row, col, currentTick, deferr
   await dbRun(db, 'DELETE FROM users WHERE username = ? AND isNpc = 1', [npc.username]);
   await dbRun(db, 'DELETE FROM roomPresence WHERE username = ?', [npc.username]);
   await dbRun(db, 'DELETE FROM statusEffects WHERE username = ?', [npc.username]);
+  // Plan 021 (BOLD): a bodied NPC owns bodyParts rows now (lazy-instantiated on first
+  // hit). Mirror moveUserToCemetery and delete them on true death, or part rows leak on
+  // every kill (and could collide with a respawn that reuses the deterministic username).
+  // A scalar NPC has no rows, so this is a harmless no-op for it.
+  await dbRun(db, 'DELETE FROM bodyParts WHERE username = ?', [npc.username]);
   await dbRun(db, 'UPDATE worldEventEntities SET lastDefeatedTick = ? WHERE username = ?', [currentTick, npc.username]);
   // Plan 013f: a slain SOCIAL NPC stays slain for the day — mark its slot so the social
   // populator won't resurrect it on the next presence heartbeat.
