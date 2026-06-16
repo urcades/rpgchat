@@ -97,6 +97,7 @@ const REGROW_EFFECT_TYPE = 'regrow';
 const HARMFUL_EFFECTS = new Set(['poison', 'arcane_pin', 'marked']);
 const AMBIENT_HOSTILE_RESPAWN_INTERVAL = 6;
 const NPC_VOICE_INTERVAL = 1; // Plan 013e: near-immediate replies — NPCs answer almost every line
+const NPC_AMBIENT_INTERVAL = 6; // Plan 013f: ticks between proactive ambient murmurs per room
 const NPC_HEAL_AMOUNT = 12; // Plan 013d: HP a friendly NPC cleric restores when tending a wounded asker
 // Plan 023b: the incapacitated negative-HP band. At 0 HP a player falls
 // incapacitated (deathClock 0); further blows and the passive pulse drive the
@@ -672,11 +673,20 @@ export async function ensureSocialPopulation(db, row, col) {
   if (!presence.some(p => !p.isNpc)) return { spawned: 0, archetype };
 
   const present = new Set(presence.filter(p => p.isNpc && p.npcKind === 'social').map(p => p.username));
+  // Plan 013f: a slot whose NPC was killed today stays dead until the daily reset — don't
+  // resurrect it on the next presence heartbeat (the bug where slain NPCs popped back).
+  const deadRows = await dbAll(
+    db,
+    "SELECT username FROM roomEffectCooldowns WHERE effectType = 'npc_dead' AND roomRow = ? AND roomCol = ? AND worldDay = ?",
+    [row, col, worldDay]
+  );
+  const dead = new Set(deadRows.map(r => r.username));
+
   let spawned = 0;
   for (let i = 0; i < roster.length; i += 1) {
     const entry = roster[i];
     const username = `soc:${worldDay}:${row}:${col}:${entry.role}:${i}`;
-    if (present.has(username)) continue;
+    if (present.has(username) || dead.has(username)) continue;
     await createSocialNpc(db, {
       username,
       displayName: socialNpcName(entry.role, row, col, i),
@@ -1171,6 +1181,40 @@ const HOSTILE_BARKS = [
   "Wrong tavern to try that in."
 ];
 
+// Plan 013f: NPCs die like players — a last broken plea (people beg) or a beast's rattle.
+const NPC_DEATH_BEGS = ['no — please, mercy', 'i yield, i yield', 'spare me, i beg you', 'wait — no —', 'tell my kin i tried'];
+const CREATURE_DEATH_RATTLES = ['lets out a final shriek', 'collapses with a wet snarl', 'shudders and goes still', 'crumples with a gurgling hiss'];
+// How the surviving room reacts when someone dies.
+const NPC_HORROR = ['Gods — they killed {who}!', 'Murder! Murder, here!', 'Someone help — {who} is dead!', 'No… no, not like this.'];
+const NPC_GLOAT = ['Justice, at last.', 'The cur had it coming.', 'One less troublemaker in here.', 'Let that be a lesson.'];
+
+// A dying NPC's last gasp — begging + gurgling for people, a death-rattle for beasts.
+async function emitNpcDeathThroes(db, npc, row, col, deferred = null) {
+  const name = npc.displayName || npc.username;
+  if (npc.npcKind === 'social') {
+    const beg = NPC_DEATH_BEGS[Math.floor(Math.random() * NPC_DEATH_BEGS.length)];
+    await emitSystemMessage(db, row, col, `${name} chokes out: "${garbleSpeech(beg)}"`, deferred, 'death');
+  } else {
+    const rattle = CREATURE_DEATH_RATTLES[Math.floor(Math.random() * CREATURE_DEATH_RATTLES.length)];
+    await emitSystemMessage(db, row, col, `${name} ${rattle}.`, deferred, 'death');
+  }
+}
+
+// The surviving social NPCs react to a death: horror over an ally or an innocent; grim
+// gloating when the room had already turned hostile on the deceased (a "criminal").
+async function emitDeathReaction(db, { row, col, deadName, deadWasNpc, deferred = null }) {
+  const presence = await getRoomPresence(db, row, col, getWorldDay());
+  const survivors = presence.filter(p => p.isNpc && p.npcKind === 'social');
+  if (survivors.length === 0) {
+    return;
+  }
+  const speaker = survivors[Math.floor(Math.random() * survivors.length)];
+  const roomTurnedOnThem = !deadWasNpc && survivors.some(p => p.disposition === 'hostile');
+  const pool = roomTurnedOnThem ? NPC_GLOAT : NPC_HORROR;
+  const line = pool[Math.floor(Math.random() * pool.length)].replace('{who}', deadName);
+  await emitSystemMessage(db, row, col, `${speaker.displayName || speaker.username}: "${line}"`, deferred, 'npc');
+}
+
 // Plan 013d: the model-absent floor for a plea. The model also flags request:'heal' for
 // subtler asks; this catches the overt ones (and survives a downed player's garbled cry).
 const HELP_REQUEST = /\b(help|heal|save|revive|raise me|mercy|don'?t let me die|please)\b/i;
@@ -1332,6 +1376,53 @@ export async function runNpcReply(db, ai, row, col) {
   return { spoke: true, npc: speaker.username, speech: response.speech, intent: response.intent, request: response.request, source: response.source, provoked, helped };
 }
 
+// Plan 013f: a proactive ambient murmur — NPCs talking among themselves so a room feels
+// inhabited even when the player is just watching. Runs from the room DO loop, ONLY with a
+// human present ("alive only when observed") and throttled to one line per room every
+// NPC_AMBIENT_INTERVAL ticks, so cost stays bounded. Fallback-first like every NPC line.
+export async function runNpcAmbient(db, ai, row, col) {
+  const worldDay = getWorldDay();
+  const currentTick = await getCurrentTickValue(db);
+  const presence = await getRoomPresence(db, row, col, worldDay);
+  const humans = presence.filter(p => !p.isNpc);
+  const npcs = presence.filter(p => p.isNpc && p.npcKind === 'social' && p.disposition !== 'hostile');
+  if (humans.length === 0 || npcs.length === 0) {
+    return { spoke: false };
+  }
+
+  const cooldown = await dbFirst(
+    db,
+    `SELECT lastAppliedTick FROM roomEffectCooldowns
+     WHERE username = '__npc_ambient' AND roomRow = ? AND roomCol = ? AND effectType = 'npc_ambient' AND worldDay = ?`,
+    [row, col, worldDay]
+  );
+  if (!shouldApplyEffect({ currentTick, lastAppliedTick: cooldown ? cooldown.lastAppliedTick : null, interval: NPC_AMBIENT_INTERVAL })) {
+    return { spoke: false };
+  }
+
+  const speaker = npcs[Math.floor(Math.random() * npcs.length)];
+  const recent = await getMessages(db, row, col, currentTick);
+  const ecology = await getRoomEcology(db, speaker.username, row, col, worldDay, currentTick);
+  const response = await generateNpcResponse(ai, {
+    npc: {
+      displayName: speaker.displayName || speaker.username,
+      npcKind: speaker.npcKind,
+      role: speaker.role || speaker.npcKind,
+      disposition: speaker.disposition
+    },
+    roomDescription: ecology.description,
+    recentMessages: recent.slice(-6),
+    mode: 'ambient'
+  });
+  if (!response.speech) {
+    return { spoke: false };
+  }
+  await insertMessage(db, row, col, speaker.username, response.speech, 'npc');
+  await upsertCooldown(db, '__npc_ambient', row, col, 'npc_ambient', currentTick, worldDay);
+  logEvent({ event: 'npc.ambient', roomRow: row, roomCol: col, npc: speaker.username, source: response.source });
+  return { spoke: true, npc: speaker.username, speech: response.speech };
+}
+
 export async function assertEnoughStamina(db, username, cost = 1) {
   const user = await dbFirst(db, 'SELECT stamina FROM users WHERE username = ?', [username]);
   if (!user || user.stamina < cost) {
@@ -1455,6 +1546,9 @@ export async function moveUserToCemetery(db, username, cause, row, col, options 
   );
   await emitSystemMessage(db, row, col, `${username}'s corpse lies here.`, options.deferredSystemMessages, 'death');
   await emitSystemMessage(db, row, col, `${username} has died from ${cause}.`, options.deferredSystemMessages, 'death');
+  // Plan 013f: the room reacts — grim gloating if they'd turned on this player (a
+  // "criminal" who provoked them), horror otherwise.
+  await emitDeathReaction(db, { row, col, deadName: username, deadWasNpc: false, deferredSystemMessages: options.deferredSystemMessages });
   return true;
 }
 
@@ -1967,11 +2061,21 @@ export async function defeatNpc(db, npc, { killer, row, col, currentTick, deferr
     currentTick
   });
 
+  // Plan 013f: NPCs die like players now — a last gasp before they fall.
+  await emitNpcDeathThroes(db, npc, row, col, deferredSystemMessages);
+
   await dbRun(db, 'DELETE FROM users WHERE username = ? AND isNpc = 1', [npc.username]);
   await dbRun(db, 'DELETE FROM roomPresence WHERE username = ?', [npc.username]);
   await dbRun(db, 'DELETE FROM statusEffects WHERE username = ?', [npc.username]);
   await dbRun(db, 'UPDATE worldEventEntities SET lastDefeatedTick = ? WHERE username = ?', [currentTick, npc.username]);
+  // Plan 013f: a slain SOCIAL NPC stays slain for the day — mark its slot so the social
+  // populator won't resurrect it on the next presence heartbeat.
+  if (npc.npcKind === 'social') {
+    await upsertCooldown(db, npc.username, row, col, 'npc_dead', currentTick ?? 0, getWorldDay());
+  }
   await emitSystemMessage(db, row, col, `${npc.displayName || npc.username} is defeated by ${killer}.`, deferredSystemMessages, 'combat');
+  // Plan 013f: the surviving room reacts to the kill.
+  await emitDeathReaction(db, { row, col, deadName: npc.displayName || npc.username, deadWasNpc: true, deferredSystemMessages });
 
   const drop = rollNpcDrop(npc.npcKind);
   if (drop) {
@@ -3206,6 +3310,34 @@ export async function roomHasActiveHostiles(db, row, col) {
     [row, col, worldDay, `-${PRESENCE_MAX_AGE_SECONDS} seconds`]
   );
   return Boolean(hostiles && players);
+}
+
+// Plan 013f: the room's background loop should run when there's combat OR when a present
+// human shares the room with social NPCs (so they chatter proactively). Drives the DO alarm.
+export async function roomNeedsLoop(db, row, col) {
+  if (await roomHasActiveHostiles(db, row, col)) {
+    return true;
+  }
+  const worldDay = getWorldDay();
+  const human = await dbFirst(
+    db,
+    `SELECT 1 FROM users u JOIN roomPresence rp ON rp.username = u.username
+     WHERE u.isNpc = 0 AND (u.health > 0 OR u.incapacitated = 1)
+       AND rp.roomRow = ? AND rp.roomCol = ? AND rp.worldDay = ?
+       AND rp.lastSeenAt >= datetime('now', ?) LIMIT 1`,
+    [row, col, worldDay, `-${PRESENCE_MAX_AGE_SECONDS} seconds`]
+  );
+  if (!human) {
+    return false;
+  }
+  const social = await dbFirst(
+    db,
+    `SELECT 1 FROM users u JOIN roomPresence rp ON rp.username = u.username
+     WHERE u.isNpc = 1 AND u.npcKind = 'social'
+       AND rp.roomRow = ? AND rp.roomCol = ? AND rp.worldDay = ? LIMIT 1`,
+    [row, col, worldDay]
+  );
+  return Boolean(social);
 }
 
 export async function runHostileRoomAction(db, row, col) {

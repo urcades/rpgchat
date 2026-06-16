@@ -44,6 +44,22 @@ const ROLE_DEMEANOR = {
   healer: 'a soft-spoken cleric — kind, grave, quick to aid the hurt'
 };
 
+// Plan 013f: per-role voice so NPCs stay in character (a guard watches the door, he does
+// NOT order "another round"). Folded into the system prompt as a hard role constraint.
+const ROLE_VOICE = {
+  bartender: 'You work the bar: talk shop, coin, the regulars. You serve drinks — you never order them.',
+  barmaid: 'You wait tables: tease, carry trays, mind the crowd. You work here; you do not order drinks.',
+  patron: 'You are a customer: gossip, grumble, nurse a drink, trade rumors.',
+  guard: 'You are on duty: watch for trouble, warn troublemakers, keep order. You do not drink or order rounds.',
+  clerk: 'You mind the guild desk: postings, dues, records, terse business.',
+  healer: 'You tend the hurt: blessings, wounds, the light, offers of aid.',
+  traveler: 'You are passing through: the road, far places, what you have seen.',
+  raid_boss: 'Menace and cold grandeur; you hold the players in contempt.',
+  raid_add: 'Feral and barely verbal.',
+  lesser_hostile: 'Territorial threats.',
+  ambient_hostile: 'Cryptic, unsettling menace.'
+};
+
 export function fallbackFor(role) {
   const lines = FALLBACK_LINES[role] || FALLBACK_LINES.patron;
   // Deterministic-friendly: callers that need variety pass a random; default first line.
@@ -60,12 +76,14 @@ export function pickFallback(role, random = Math.random) {
 export function buildNpcPrompt({ npc, roomDescription, recentMessages, addressedBy, mode = 'reply' }) {
   const role = npc.role || npc.npcKind || 'patron';
   const demeanor = ROLE_DEMEANOR[role] || ROLE_DEMEANOR.patron;
+  const voice = ROLE_VOICE[role] || ROLE_VOICE.patron;
   const disposition = npc.disposition || (FALLBACK_LINES[role] && /hostile|raid|ambient|lesser/.test(role) ? 'hostile' : 'neutral');
   const system = [
     'You voice a single character in a grim, terse multiplayer text RPG.',
     `Character: "${npc.displayName}", ${demeanor}. Current disposition toward the players: ${disposition}.`,
+    `Stay STRICTLY in role. ${voice}`,
     mode === 'ambient'
-      ? 'Say ONE short in-character line of idle talk (max 16 words).'
+      ? 'Say ONE short in-character line of idle talk that fits your role — to the room or another regular (max 16 words).'
       : 'Reply with ONE short in-character line (max 16 words) to what was just said or done to you.',
     'Respond ONLY as compact JSON: {"speech": string, "intent": "friendly"|"wary"|"hostile", "request": "heal"|"none"}.',
     '"intent" is how YOU now feel about the players given what they just said/did (hostile if they threatened, attacked, or were crude).',

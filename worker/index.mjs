@@ -35,7 +35,9 @@ import {
   requireRoomUse,
   ensureSocialPopulation,
   roomHasActiveHostiles,
+  roomNeedsLoop,
   runHostileRoomAction,
+  runNpcAmbient,
   runNpcReply,
   runScheduledWorldPulse,
   updatePresence,
@@ -270,7 +272,9 @@ async function broadcastRoom(env, row, col, payload) {
 }
 
 async function startHostileLoopIfNeeded(env, row, col) {
-  if (!await roomHasActiveHostiles(env.DB, row, col)) {
+  // Plan 013f: the room loop now also drives proactive NPC chatter, so wake it whenever a
+  // room "needs" a loop (combat OR a present human + social NPCs), not just for hostiles.
+  if (!await roomNeedsLoop(env.DB, row, col)) {
     return;
   }
   const stub = env.ROOMS.getByName(roomName(row, col));
@@ -1144,11 +1148,27 @@ export class RoomObject extends DurableObject {
       return;
     }
 
-    const result = await runHostileRoomAction(this.env.DB, room.row, room.col);
-    await this.broadcast({ type: 'hostile', room, result });
-
+    // Plan 013f: one loop drives both combat and ambient life. If the room is in combat,
+    // run the hostile action (5s cadence). Otherwise a present-but-peaceful social room
+    // gets a throttled NPC murmur (slower cadence; runNpcAmbient owns the real throttle).
+    let peaceful = true;
     if (await roomHasActiveHostiles(this.env.DB, room.row, room.col)) {
-      await this.ctx.storage.setAlarm(Date.now() + 5000);
+      peaceful = false;
+      const result = await runHostileRoomAction(this.env.DB, room.row, room.col);
+      await this.broadcast({ type: 'hostile', room, result });
+    } else {
+      try {
+        const ambient = await runNpcAmbient(this.env.DB, this.env.AI, room.row, room.col);
+        if (ambient.spoke) {
+          await this.broadcast({ type: 'message', room, username: ambient.npc });
+        }
+      } catch (err) {
+        console.error('npc-ambient failed', err);
+      }
+    }
+
+    if (await roomNeedsLoop(this.env.DB, room.row, room.col)) {
+      await this.ctx.storage.setAlarm(Date.now() + (peaceful ? 12000 : 5000));
     } else {
       await this.ctx.storage.delete('hostileRoom');
     }

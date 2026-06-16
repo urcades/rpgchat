@@ -97,6 +97,17 @@ test('Plan 013a: player chat is confined to the USER message; the system prompt 
   assert.match(system, /Sil/, 'system names the character');
 });
 
+test('Plan 013f: the prompt pins per-role voice so NPCs stay in character', async () => {
+  const m = await import('../worker/npcVoice.mjs');
+  const guard = m.buildNpcPrompt({ npc: { displayName: 'Bren', role: 'guard', disposition: 'neutral' }, roomDescription: 'a tavern', mode: 'ambient' });
+  assert.match(guard.system, /Stay STRICTLY in role/);
+  assert.match(guard.system, /watch for trouble|do not drink|keep order/i, 'a guard is told to act like a guard');
+  assert.match(guard.system, /idle talk that fits your role/i, 'ambient mode asks for role-fitting idle talk');
+
+  const bartender = m.buildNpcPrompt({ npc: { displayName: 'Hask', role: 'bartender' }, roomDescription: 'a tavern', mode: 'reply' });
+  assert.match(bartender.system, /serve drinks — you never order them/i, 'the bartender serves, never orders');
+});
+
 test('Plan 013a: long player lines are truncated in the prompt', async () => {
   const m = await import('../worker/npcVoice.mjs');
   const { user } = m.buildNpcPrompt({

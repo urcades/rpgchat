@@ -73,6 +73,15 @@ async function seedNpc(db, username, displayName, row, col) {
   await updatePresence(db, username, row, col);
 }
 
+async function seedSocialNpc(db, username, displayName, row, col) {
+  const { updatePresence } = await import('../worker/game.mjs');
+  await db.prepare(
+    `INSERT INTO users (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, isNpc, displayName, npcKind, disposition, role, npcWorldDay)
+     VALUES (?, 'npc', 'Novice', 20, 20, 100, 100, 4, 5, 1, 1, 1, ?, 'social', 'friendly', 'patron', ?)`
+  ).bind(username, displayName, getWorldDay()).run();
+  await updatePresence(db, username, row, col);
+}
+
 async function humanSays(db, username, row, col, message) {
   await db.prepare('INSERT INTO messages (roomRow, roomCol, username, message, kind) VALUES (?, ?, ?, ?, ?)').bind(row, col, username, message, 'chat').run();
 }
@@ -129,6 +138,32 @@ test('Plan 013a: the per-room cooldown prevents an immediate second reply', asyn
     // The NPC's own line is now last, and the cooldown is set — a second call is silent.
     const second = await runNpcReply(db, STUB_AI, room.row, room.col);
     assert.equal(second.spoke, false);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 013f: proactive ambient chatter — a present human gets murmurs, an empty room gets silence', async () => {
+  const db = await createMigratedDb();
+  const { runNpcAmbient, getMessages } = await import('../worker/game.mjs');
+  try {
+    const room = findCalmRoom(getWorldDay());
+    await seedSocialNpc(db, 'soc_amb_1', 'Sil', room.row, room.col);
+
+    // No human present -> no ambient spend ("alive only when observed").
+    const silent = await runNpcAmbient(db, STUB_AI, room.row, room.col);
+    assert.equal(silent.spoke, false);
+
+    await seedHuman(db, 'onlooker', room.row, room.col);
+    const spoke = await runNpcAmbient(db, STUB_AI, room.row, room.col);
+    assert.equal(spoke.spoke, true, 'with a human watching, an NPC murmurs unprompted');
+    const last = (await getMessages(db, room.row, room.col)).slice(-1)[0];
+    assert.equal(last.username, 'soc_amb_1');
+    assert.equal(last.kind, 'npc');
+
+    // Throttled: an immediate second tick stays quiet.
+    const second = await runNpcAmbient(db, STUB_AI, room.row, room.col);
+    assert.equal(second.spoke, false, 'ambient chatter is throttled per room');
   } finally {
     await db.close();
   }

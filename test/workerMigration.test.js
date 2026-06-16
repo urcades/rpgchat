@@ -578,15 +578,19 @@ test('Killing attack messages are shown before defeat and death system messages'
     await withMockedRandom([0.1, 0.99], () => handleAttackAction(db, 'fighter', calm.row, calm.col, '@npc_scout'));
 
     const messages = await getMessages(db, calm.row, calm.col);
-    // Plan 022a: a defeated NPC now also leaves remains, so the defeat line is the
-    // second-to-last; the attack line precedes it.
-    const finalMessages = messages.slice(-3);
-
-    assert.equal(finalMessages[0].username, 'fighter');
-    assert.match(finalMessages[0].message, /fighter attacked Ash Scout for \d+ damage/);
-    assert.equal(finalMessages[1].username, 'System');
-    assert.equal(finalMessages[1].message, 'Ash Scout is defeated by fighter.');
-    assert.match(finalMessages[2].message, /Ash Scout leaves behind remains\./);
+    // Plan 013f: a death-throes line now precedes the defeat line, and remains drop after,
+    // so assert the ORDER (attack -> throes -> defeated) rather than fixed slice positions.
+    const lines = messages.map(m => m.message);
+    const atkIdx = lines.findIndex(m => /fighter attacked Ash Scout for \d+ damage/.test(m));
+    const defeatIdx = lines.findIndex(m => m === 'Ash Scout is defeated by fighter.');
+    assert.ok(atkIdx >= 0, 'attack line present');
+    assert.ok(defeatIdx >= 0, 'defeat line present');
+    assert.ok(atkIdx < defeatIdx, 'attack precedes defeat');
+    assert.ok(lines.some(m => /Ash Scout leaves behind remains\./.test(m)), 'remains dropped');
+    assert.ok(
+      lines.some((m, i) => i < defeatIdx && /Ash Scout (lets out|collapses|shudders|crumples)/.test(m)),
+      'a death-throes line precedes the defeat'
+    );
 
     await withMockedRandom([0.1, 0.99], () => handleAttackAction(db, 'fighter', calm.row, calm.col, '@rival'));
 
