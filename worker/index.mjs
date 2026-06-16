@@ -1088,7 +1088,11 @@ export class RoomObject extends DurableObject {
       const row = Number.parseInt(hostileMatch[1], 10);
       const col = Number.parseInt(hostileMatch[2], 10);
       await this.ctx.storage.put('hostileRoom', { row, col });
-      await this.ctx.storage.setAlarm(Date.now() + 5000);
+      // Plan 013f: only arm if no alarm is pending — frequent presence heartbeats must NOT
+      // keep resetting (and thus starving) the loop. The alarm handler owns re-arming.
+      if (await this.ctx.storage.getAlarm() === null) {
+        await this.ctx.storage.setAlarm(Date.now() + 5000);
+      }
       return new Response('ok');
     }
 
