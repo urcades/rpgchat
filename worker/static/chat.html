@@ -152,23 +152,24 @@
 
     function appendPlayerMessageText(parent, message) {
       const text = String(message || '');
-      const actionResultPattern = /\([^)]*(?:(?:attacked|landed a critical hit on)[^)]* for \d+ damage!?|dodged[^)]*)[^)]*\)/gi;
-      let index = 0;
-      let match = actionResultPattern.exec(text);
+      // The combat resolver appends its outcome to the player's own line as a trailing
+      // "(...)" block — brutal flavor hits ending in "(N)"/"(N)!", dodges, or status
+      // notes. Color that block (crimson for a landed blow, purple when it's only a
+      // dodge), allowing one level of nested parens for the "(N)" damage tokens. It is
+      // anchored to the end of the line and gated on a combat signature, so an ordinary
+      // chat parenthetical is left untouched. (The old regex keyed on "attacked … for N
+      // damage" wording, which the richer flavor no longer uses.)
       setText(parent, ': ');
-
-      while (match) {
-        if (match.index > index) {
-          setText(parent, text.slice(index, match.index));
+      const block = /\((?:[^()]|\([^()]*\))*\)\s*$/.exec(text);
+      const isCombatResult = block && /\(\d+\)|\bdodged\b|\bsuffers\b|clean shot/i.test(block[0]);
+      if (isCombatResult) {
+        if (block.index > 0) {
+          setText(parent, text.slice(0, block.index));
         }
-        const resultClass = /\bdodged\b/i.test(match[0]) ? 'speed-result' : 'attack-result';
-        setText(parent, match[0], resultClass);
-        index = match.index + match[0].length;
-        match = actionResultPattern.exec(text);
-      }
-
-      if (index < text.length) {
-        setText(parent, text.slice(index));
+        const onlyDodge = /\bdodged\b/i.test(block[0]) && !/\(\d+\)/.test(block[0]);
+        setText(parent, block[0], onlyDodge ? 'speed-result' : 'attack-result');
+      } else {
+        setText(parent, text);
       }
     }
 
