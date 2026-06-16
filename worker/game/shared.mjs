@@ -71,7 +71,8 @@ const {
   getItemCategory,
   getMateriaEffect,
   getItemSockets,
-  rollNpcDrop
+  rollNpcDrop,
+  rollTrophyDrop
 } = itemsModule;
 
 const {
@@ -136,6 +137,7 @@ export {
   getMateriaEffect,
   getItemSockets,
   rollNpcDrop,
+  rollTrophyDrop,
   // body
   HUMANOID_PLAN,
   MODIFIER_KEYS,
@@ -178,6 +180,14 @@ export const DEATH_FLOOR = -30;
 export const INCAP_BLEED_PER_TICK = 1; // Plan 013e: bleed one point per world tick, smoothly — not batched
 export const GIB_OVERKILL = 15;
 export const INCAP_BLOW_MIN = 5;
+// Plan 022 (tail): corpse decay clock, measured in world ticks since the item's
+// decayTick. Remains pass through two stages before culling: 0..FRESH is fresh,
+// FRESH..(FRESH+ROTTEN) is rotten, beyond that is bones; CULL removes a monster's
+// bones once they reach CORPSE_CULL_TICKS. PLAYER corpses use the same ages to
+// RENAME only — they are never culled and always keep their resurrection anchor.
+export const CORPSE_FRESH_TICKS = 30;
+export const CORPSE_ROTTEN_TICKS = 30;
+export const CORPSE_CULL_TICKS = CORPSE_FRESH_TICKS + CORPSE_ROTTEN_TICKS + 30; // ~90
 export const REVIVE_HEAL_AMOUNT = 12; // Plan 023d: HP a Cleric's revive restores when lifting a downed ally
 export const PASSIVE_EFFECT_TYPES = new Set([
   'pub',

@@ -32,11 +32,13 @@ import {
 } from './combat.mjs';
 import { assertActable, garbleSpeech, isIncapacitated } from './death.mjs';
 import {
+  handleBrewCommand,
   handleBuyCommand,
   handleCookCommand,
   handleDropCommand,
   handleEatCommand,
   handleEquipCommand,
+  handleForgeCommand,
   handleSocketCommand,
   handleTakeCommand,
   handleUnequipCommand,
@@ -260,6 +262,24 @@ export async function handleChatAction(db, username, row, col, message) {
       username,
       staminaCost: 1,
       perform: async () => handleCookCommand(db, username, row, col, message),
+      advanceTick: () => advanceGlobalTick(db)
+    });
+  }
+
+  if (message.trim().toLowerCase().startsWith('/brew')) {
+    return runPlayerAction(db, {
+      username,
+      staminaCost: 1,
+      perform: async () => handleBrewCommand(db, username, row, col, message),
+      advanceTick: () => advanceGlobalTick(db)
+    });
+  }
+
+  if (message.trim().toLowerCase().startsWith('/forge')) {
+    return runPlayerAction(db, {
+      username,
+      staminaCost: 1,
+      perform: async () => handleForgeCommand(db, username, row, col, message),
       advanceTick: () => advanceGlobalTick(db)
     });
   }

@@ -88,6 +88,32 @@ const ITEM_TEMPLATES = [
   { templateId: 'monster_remains', name: 'Monster Remains', slotType: 'part', category: 'part', rarity: 'common', modifiers: {}, dropWeight: 0 },
   { templateId: 'cooked_remains', name: 'Cooked Remains', slotType: 'consumable', category: 'consumable', rarity: 'common', modifiers: {}, onUse: [{ kind: 'heal', amount: 10 }], dropWeight: 0 },
 
+  // Plan 022 (tail): the corpse-decay transition templates for MONSTER remains. A
+  // dropped `monster_remains` is rewritten in place at each decay stage (fresh →
+  // rotten → bones) by processCorpseDecay, then culled. `rotten_remains` is still
+  // category 'part' (edible — a raw /eat applies poison); `bones` is inert. dropWeight
+  // 0 — these are reached only via decay, never dropped or crafted directly.
+  { templateId: 'rotten_remains', name: 'Rotten Remains', slotType: 'part', category: 'part', rarity: 'common', modifiers: {}, dropWeight: 0 },
+  { templateId: 'bones', name: 'Bones', slotType: 'part', category: 'part', rarity: 'common', modifiers: {}, dropWeight: 0 },
+
+  // Plan 022 (tail): Brew — scrap_metal is the smith's raw input (a 'part'; cheap
+  // shop stock, dropWeight 0 so it never falls from monsters). The Brew outputs are
+  // consumables that reuse the shared onUse effects (heal / clear_status). Buff
+  // potions are deferred — no positive-status vocab yet.
+  { templateId: 'scrap_metal', name: 'Scrap Metal', slotType: 'part', category: 'part', rarity: 'shop', modifiers: {}, dropWeight: 0 },
+  { templateId: 'crimson_tonic', name: 'Crimson Tonic', slotType: 'consumable', category: 'consumable', rarity: 'common', modifiers: {}, onUse: [{ kind: 'heal', amount: 14 }], dropWeight: 0 },
+  { templateId: 'field_antidote', name: 'Field Antidote', slotType: 'consumable', category: 'consumable', rarity: 'common', modifiers: {}, onUse: [{ kind: 'clear_status' }], dropWeight: 0 },
+
+  // Plan 022 (tail): trophies — a named trinket-slot gear with a small modifier,
+  // dropped at a low chance ALONGSIDE monster_remains in defeatNpc (bosses guarantee
+  // one). The per-instance name carries the victim ("<victim>'s <trophy>") via
+  // dropItemOnFloor's name override. Trophies equip via the existing gear path AND
+  // are accepted as Forge inputs (dual-use). dropWeight 0 — they drop via the trophy
+  // roll, not the rarity pool. category 'gear' (default) so getItemSockets/equip work.
+  { templateId: 'goblin_skull', name: 'Goblin Skull', slotType: 'trinket', rarity: 'common', modifiers: { strength: 1 }, dropWeight: 0 },
+  { templateId: 'wolf_fang_charm', name: 'Wolf Fang Charm', slotType: 'trinket', rarity: 'common', modifiers: { speed: 1 }, dropWeight: 0 },
+  { templateId: 'wyrm_scale', name: 'Wyrm Scale', slotType: 'trinket', rarity: 'rare', modifiers: { strength: 1, maxStamina: 5 }, dropWeight: 0 },
+
   // Plan 022c: a player corpse — the resurrection anchor. The per-instance name is
   // "<player>'s Corpse" and `corpseOf` tags whose it is; category 'corpse' makes it
   // edible (and destroying it severs that player's resurrection forever).
@@ -116,6 +142,17 @@ const NPC_DROP_TABLE = {
   raid_add: { chance: 0.25, pool: 'common' },
   lesser_hostile: { chance: 0.35, pool: 'common' },
   ambient_hostile: { chance: 0.15, pool: 'common' }
+};
+
+// Plan 022 (tail): trophies — a LOW-chance named gear drop ALONGSIDE the remains.
+// Each entry is a flat chance gate (bosses are guaranteed) and a pool of trophy
+// templateIds the drop is picked from. dropWeight on these templates is 0 (they
+// never fall from the rarity pool); the pick here is an equal-weight choice.
+const TROPHY_DROP_TABLE = {
+  raid_boss: { chance: 1.0, pool: ['wyrm_scale'] },
+  raid_add: { chance: 0.15, pool: ['goblin_skull', 'wolf_fang_charm'] },
+  lesser_hostile: { chance: 0.12, pool: ['goblin_skull', 'wolf_fang_charm'] },
+  ambient_hostile: { chance: 0.1, pool: ['goblin_skull', 'wolf_fang_charm'] }
 };
 
 function getTemplate(templateId) {
@@ -190,14 +227,33 @@ function rollNpcDrop(npcKind, random = Math.random) {
   return pool[pool.length - 1];
 }
 
+// Plan 022 (tail): roll a trophy for a defeated NPC, ALONGSIDE rollNpcDrop. Consumes
+// EXACTLY two random() values when an entry exists (chance gate, then equal-weight
+// pick) — mirroring rollNpcDrop's contract so a test can seed a deterministic
+// sequence. Returns the chosen trophy TEMPLATE, or null when there is no entry for
+// the kind or the chance gate fails (random() >= chance).
+function rollTrophyDrop(npcKind, random = Math.random) {
+  const entry = TROPHY_DROP_TABLE[npcKind];
+  if (!entry || !entry.pool || entry.pool.length === 0) {
+    return null;
+  }
+  if (random() >= entry.chance) {
+    return null;
+  }
+  const index = Math.min(entry.pool.length - 1, Math.floor(random() * entry.pool.length));
+  return getTemplate(entry.pool[index]);
+}
+
 module.exports = {
   ITEM_TEMPLATES,
   SIGNATURE_ITEMS_BY_JOB,
   NPC_DROP_TABLE,
+  TROPHY_DROP_TABLE,
   getTemplate,
   getItemCategory,
   materiaLevelFromAp,
   getMateriaEffect,
   getItemSockets,
-  rollNpcDrop
+  rollNpcDrop,
+  rollTrophyDrop
 };

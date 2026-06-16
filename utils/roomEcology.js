@@ -137,7 +137,9 @@ const SHOP_ITEM_CATALOG = [
   { templateId: 'wax_seal', name: 'Wax Seal', basePrice: 5 },
   { templateId: 'old_map_scrap', name: 'Old Map Scrap', basePrice: 4 },
   { templateId: 'bone_charm', name: 'Bone Charm', basePrice: 6 },
-  { templateId: 'copper_bell', name: 'Copper Bell', basePrice: 3 }
+  { templateId: 'copper_bell', name: 'Copper Bell', basePrice: 3 },
+  // Plan 022 (tail): the smith's raw input — cheap, common Forge stock.
+  { templateId: 'scrap_metal', name: 'Scrap Metal', basePrice: 2 }
 ];
 
 const PASSIVE_EFFECT_INTERVAL = 5;

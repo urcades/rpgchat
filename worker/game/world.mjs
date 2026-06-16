@@ -8,6 +8,9 @@
 import {
   AMBIENT_HOSTILE_RESPAWN_INTERVAL,
   ActionError,
+  CORPSE_CULL_TICKS,
+  CORPSE_FRESH_TICKS,
+  CORPSE_ROTTEN_TICKS,
   INN_ACCESS_TYPE,
   PASSIVE_EFFECT_TYPES,
   PRESENCE_MAX_AGE_SECONDS,
@@ -1162,6 +1165,64 @@ export async function resolveExpiredGamblingRounds(db, currentTick) {
   }
 }
 
+// Plan 022 (tail): age corpses and remains by their decayTick each world pulse.
+// Two populations share the decayTick clock but decay VERY differently:
+//
+//   MONSTER remains (monster_remains → rotten_remains → bones): rewritten in place
+//   (templateId + name) at each stage, then CULLED (DELETE) at the bones-age cap so
+//   floors don't fill with bones. The rotten stage stays edible — a raw /eat poisons.
+//
+//   PLAYER corpses (player_corpse): COSMETIC ONLY (owner decision). Renamed to
+//   "<player>'s Skeletal Remains" once aged, but NEVER deleted and corpseOf is ALWAYS
+//   kept — the resurrection anchor must persist indefinitely. Decay must NOT
+//   permadeath; only a deliberate /eat or destroy (unchanged) severs the tether.
+export async function processCorpseDecay(db, tickValue = null) {
+  const tick = tickValue === null ? await getCurrentTickValue(db) : tickValue;
+  const decaying = await dbAll(
+    db,
+    `SELECT id, templateId, name, corpseOf, decayTick
+     FROM items
+     WHERE decayTick IS NOT NULL
+       AND templateId IN ('monster_remains', 'rotten_remains', 'bones', 'player_corpse')`
+  );
+
+  for (const item of decaying) {
+    const age = tick - item.decayTick;
+    if (age < CORPSE_FRESH_TICKS) {
+      continue; // still fresh — nothing to do
+    }
+
+    if (item.templateId === 'player_corpse') {
+      // Cosmetic-only: once aged, rename to skeletal remains. NEVER delete; NEVER
+      // touch corpseOf or templateId — the resurrection anchor is sacrosanct. Only
+      // rename once (idempotent) so we don't rewrite every pulse.
+      if (item.corpseOf) {
+        const skeletalName = `${item.corpseOf}'s Skeletal Remains`;
+        if (item.name !== skeletalName) {
+          await dbRun(db, 'UPDATE items SET name = ? WHERE id = ?', [skeletalName, item.id]);
+        }
+      }
+      continue;
+    }
+
+    // Monster remains: cull at the bones-age cap, else advance the stage in place.
+    if (age >= CORPSE_CULL_TICKS) {
+      await dbRun(db, 'DELETE FROM items WHERE id = ?', [item.id]);
+      continue;
+    }
+    if (age >= CORPSE_FRESH_TICKS + CORPSE_ROTTEN_TICKS) {
+      if (item.templateId !== 'bones') {
+        await dbRun(db, "UPDATE items SET templateId = 'bones', name = 'Bones' WHERE id = ?", [item.id]);
+      }
+      continue;
+    }
+    // FRESH..(FRESH+ROTTEN): rotten.
+    if (item.templateId !== 'rotten_remains') {
+      await dbRun(db, "UPDATE items SET templateId = 'rotten_remains', name = 'Rotten Remains' WHERE id = ?", [item.id]);
+    }
+  }
+}
+
 export async function advanceGlobalTick(db) {
   await dbRun(db, 'UPDATE tick SET value = value + 1 WHERE id = 1');
   const tickValue = await getCurrentTickValue(db);
@@ -1172,6 +1233,7 @@ export async function advanceGlobalTick(db) {
 
   await processRoomEffects(db, tickValue);
   await processIncapacitationBleed(db, tickValue);
+  await processCorpseDecay(db, tickValue);
   await processStatusEffects(db, tickValue);
   await resolveExpiredGamblingRounds(db, tickValue);
 

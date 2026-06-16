@@ -13,7 +13,8 @@ import {
   INCAP_BLOW_MIN,
   PRESENCE_MAX_AGE_SECONDS,
   getWorldDay,
-  rollNpcDrop
+  rollNpcDrop,
+  rollTrophyDrop
 } from './shared.mjs';
 import { dbAll, dbFirst, dbRun } from '../db.mjs';
 import { getBodyParts } from './body.mjs';
@@ -21,6 +22,7 @@ import { dropItemOnFloor, dropPlayerItemsOnDeath } from './inventory.mjs';
 import { createTrace, emitSystemMessage, insertSystemMessage } from './messages.mjs';
 import { CREATURE_DEATH_RATTLES, NPC_DEATH_BEGS, emitDeathReaction } from './npc.mjs';
 import { awardExperience, upsertCooldown } from './progression.mjs';
+import { getCurrentTickValue } from './world.mjs';
 
 
 export async function moveUserToCemetery(db, username, cause, row, col, options = {}) {
@@ -47,11 +49,15 @@ export async function moveUserToCemetery(db, username, cause, row, col, options 
   // Plan 022c: the body drops as a corpse — the anchor of resurrection. While it
   // exists (on a floor or in someone's bag) the player can be revived (paid or
   // free); eat or destroy it and the tether snaps — true, permanent death.
+  // Plan 022 (tail): stamp the decay clock so processCorpseDecay can RENAME the
+  // corpse cosmetically as it ages — but a player corpse is NEVER culled and ALWAYS
+  // keeps corpseOf, so decay can never cause permadeath.
+  const corpseDecayTick = await getCurrentTickValue(db);
   await dbRun(
     db,
-    `INSERT INTO items (templateId, name, slotType, rarity, modifiers, roomRow, roomCol, corpseOf)
-     VALUES ('player_corpse', ?, 'corpse', 'common', '{}', ?, ?, ?)`,
-    [`${username}'s Corpse`, row, col, username]
+    `INSERT INTO items (templateId, name, slotType, rarity, modifiers, roomRow, roomCol, corpseOf, decayTick)
+     VALUES ('player_corpse', ?, 'corpse', 'common', '{}', ?, ?, ?, ?)`,
+    [`${username}'s Corpse`, row, col, username, corpseDecayTick]
   );
   await emitSystemMessage(db, row, col, `${username}'s corpse lies here.`, options.deferredSystemMessages, 'death');
   await emitSystemMessage(db, row, col, `${username} has died from ${cause}.`, options.deferredSystemMessages, 'death');
@@ -404,9 +410,22 @@ export async function defeatNpc(db, npc, { killer, row, col, currentTick, deferr
     await emitSystemMessage(db, row, col, `${npc.displayName || npc.username} drops ${drop.name}.`, deferredSystemMessages);
   }
 
+  // Plan 022 (tail): a LOW-chance named trophy drops ALONGSIDE the remains (bosses
+  // are guaranteed one). The per-instance name carries the victim ("<victim>'s
+  // <trophy>"); the trophy equips via the normal gear path and doubles as a Forge
+  // input. Bones decay never touches it — only remains carry a decayTick.
+  const trophy = rollTrophyDrop(npc.npcKind);
+  if (trophy) {
+    const trophyName = `${npc.displayName || npc.username}'s ${trophy.name}`;
+    await dropItemOnFloor(db, trophy.templateId, row, col, { name: trophyName });
+    await emitSystemMessage(db, row, col, `${npc.displayName || npc.username} drops ${trophyName}.`, deferredSystemMessages);
+  }
+
   // Plan 022a: every defeated creature leaves remains — the corpse substrate that
-  // feeds crafting, far more common than finished gear.
-  await dropItemOnFloor(db, 'monster_remains', row, col);
+  // feeds crafting, far more common than finished gear. Plan 022 (tail): stamp the
+  // decay clock so processCorpseDecay can age them fresh → rotten → bones → cull.
+  const decayTick = currentTick ?? await getCurrentTickValue(db);
+  await dropItemOnFloor(db, 'monster_remains', row, col, { decayTick });
   await emitSystemMessage(db, row, col, `${npc.displayName || npc.username} leaves behind remains.`, deferredSystemMessages);
 
   if (event && ['raid', 'lesser'].includes(event.eventType) && npc.npcKind === 'raid_boss') {

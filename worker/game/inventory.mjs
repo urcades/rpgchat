@@ -266,11 +266,14 @@ export async function dropItemOnFloor(db, templateId, row, col, options = {}) {
   // Plan 023b: an optional name override lets a gib drop a victim-named severed
   // part ("X's severed left arm") from a generic template.
   const name = options.name || template.name;
+  // Plan 022 (tail): an optional decayTick starts this item's decay clock (set on
+  // remains so processCorpseDecay can age them). NULL for ordinary loot.
+  const decayTick = Number.isFinite(options.decayTick) ? options.decayTick : null;
   await dbRun(
     db,
-    `INSERT INTO items (templateId, name, slotType, rarity, modifiers, ownerUsername, roomRow, roomCol)
-     VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
-    [template.templateId, name, template.slotType, template.rarity, JSON.stringify(template.modifiers || {}), row, col]
+    `INSERT INTO items (templateId, name, slotType, rarity, modifiers, ownerUsername, roomRow, roomCol, decayTick)
+     VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
+    [template.templateId, name, template.slotType, template.rarity, JSON.stringify(template.modifiers || {}), row, col, decayTick]
   );
 }
 
@@ -507,6 +510,31 @@ export async function handleCookCommand(db, username, row, col, message) {
   return result;
 }
 
+// Plan 022 (tail): Brew mirrors /cook exactly — craftRecipe is verb-agnostic, so this
+// just passes 'brew'. UNGATED (any job). The dispatch in handlers.mjs charges 1 stamina
+// and advances a tick, identical to /cook.
+export async function handleBrewCommand(db, username, row, col, message) {
+  const rest = commandRest(message, '/brew');
+  if (!rest) {
+    throw new ActionError('Use /brew <recipe>, e.g. /brew Crimson Tonic.');
+  }
+  const result = await craftRecipe(db, username, 'brew', rest);
+  await insertSystemMessage(db, row, col, `${username} brews ${result.crafted}.`, 'support');
+  return result;
+}
+
+// Plan 022 (tail): Forge mirrors /cook exactly — reforges scrap (and dual-use trophies)
+// into existing gear templates. UNGATED.
+export async function handleForgeCommand(db, username, row, col, message) {
+  const rest = commandRest(message, '/forge');
+  if (!rest) {
+    throw new ActionError('Use /forge <recipe>, e.g. /forge Rusty Knife.');
+  }
+  const result = await craftRecipe(db, username, 'forge', rest);
+  await insertSystemMessage(db, row, col, `${username} forges ${result.crafted}.`, 'support');
+  return result;
+}
+
 // --- Plan 022b/c: eating remains and corpses ---------------------------------
 const EAT_HEAL_AMOUNT = 5;
 
@@ -536,6 +564,22 @@ export async function eatItem(db, username, itemName, row, col) {
     // Plan 022c: devouring a corpse severs that player's resurrection — for good.
     await insertSystemMessage(db, row, col, `${username} devours ${item.name}. ${item.corpseOf} can never return.`, 'death');
     return { ate: item.name, severed: item.corpseOf };
+  }
+  // Plan 022 (tail): eating rotten remains raw poisons you — the decay made it foul.
+  if (item.templateId === 'rotten_remains') {
+    const currentTick = await getCurrentTickValue(db);
+    await addStatusEffect(db, {
+      username,
+      source: username,
+      effectType: 'poison',
+      magnitude: 1,
+      currentTick,
+      duration: 5,
+      row,
+      col
+    });
+    await insertSystemMessage(db, row, col, `${username} chokes down ${item.name} — it is rancid.`, 'combat');
+    return { ate: item.name, poisoned: true };
   }
   await insertSystemMessage(db, row, col, `${username} eats ${item.name}.`, 'support');
   return { ate: item.name };

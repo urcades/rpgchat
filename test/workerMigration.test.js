@@ -2313,8 +2313,10 @@ test('Plan 005: defeating an NPC drops loot onto the room floor', async () => {
     //   2) crit gate in calculateAttackDamage (0.99 -> no crit)
     //   3) rollNpcDrop chance gate (0.1 < 0.15 -> drops)
     //   4) rollNpcDrop weighted pick (0.0 -> first common = Rusty Knife)
+    //   5) rollTrophyDrop chance gate (plan 022 tail; 0.9 >= 0.1 -> NO trophy,
+    //      so this test still expects only the gear drop + remains).
     // applyBodyDamage takes the bodyless NPC branch and consumes no random.
-    await withMockedRandom([0.1, 0.99, 0.1, 0.0], () =>
+    await withMockedRandom([0.1, 0.99, 0.1, 0.0, 0.9], () =>
       handleAttack(db, 'looter', '@ambient_beast', calm.row, calm.col));
 
     const floorItems = await db.prepare(
