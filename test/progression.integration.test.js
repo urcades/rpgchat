@@ -76,6 +76,55 @@ test('Plan 019b: the daily board is deterministic per day, connected, and varies
   assert.ok(a.nodes.every(n => n.id.startsWith(`${WD}:`)), 'ids namespaced by worldDay');
 });
 
+// Plan 019 (tail): every node carries a `region` (its class territory) so the
+// client can tint the eight class zones. Eight classes, deterministic per day.
+const CLASSES = ['Fighter', 'Paladin', 'Cleric', 'Mage', 'Assassin', 'Dungeoneer', 'Chemist', 'Novice'];
+
+test('Plan 019: every node carries a region that is one of the 8 classes; entry roots own their class', () => {
+  const board = grid.getDailyBoard(WD);
+  const classSet = new Set(CLASSES);
+
+  for (const n of board.nodes) {
+    assert.ok(classSet.has(n.region), `${n.id} region "${n.region}" is one of the 8 classes`);
+    if (n.entryFor) {
+      assert.equal(n.region, n.entryFor, 'an entry root reports its own class as its region');
+    }
+  }
+
+  // Each of the 8 classes owns at least one node (every territory is represented).
+  const owned = new Set(board.nodes.map(n => n.region));
+  for (const job of CLASSES) {
+    assert.ok(owned.has(job), `${job} owns at least one node`);
+  }
+});
+
+test('Plan 019: region assignment is deterministic per worldDay (same day → same regions)', () => {
+  const a = grid.getDailyBoard(WD);
+  const aAgain = grid.getDailyBoard(WD);
+  const regionsA = a.nodes.map(n => `${n.id}=${n.region}`).join(',');
+  const regionsAgain = aAgain.nodes.map(n => `${n.id}=${n.region}`).join(',');
+  assert.equal(regionsA, regionsAgain, 'the same day yields an identical region map');
+});
+
+test('Plan 019: getProgressionGrid surfaces each node region (one of the 8 classes)', async () => {
+  const db = await createMigratedDb();
+  const { getProgressionGrid } = await import('../worker/game.mjs');
+  try {
+    await seedPlayer(db, 'fighter', 'Fighter', { level: 5 });
+    const board = await getProgressionGrid(db, 'fighter');
+    const classSet = new Set(CLASSES);
+    assert.ok(board.nodes.length > 0, 'the grid has nodes');
+    for (const n of board.nodes) {
+      assert.ok(classSet.has(n.region), `${n.id} region "${n.region}" is one of the 8 classes`);
+      if (n.entryFor) {
+        assert.equal(n.region, n.entryFor, 'an entry root reports its own class as its region');
+      }
+    }
+  } finally {
+    await db.close();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Daily-build flow (live DB)
 

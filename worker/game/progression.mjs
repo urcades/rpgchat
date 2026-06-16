@@ -229,6 +229,7 @@ export async function getProgressionGrid(db, username) {
       cost,
       effect: node.effect,
       entryFor: node.entryFor || null,
+      region: node.region,
       neighbors: node.neighbors,
       state: isUnlocked ? 'unlocked' : (onFrontier && available >= cost ? 'unlockable' : 'locked')
     };

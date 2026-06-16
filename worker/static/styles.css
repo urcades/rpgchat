@@ -441,16 +441,60 @@ a, button, input, select {
   gap: 1rem;
 }
 
+/* The board fills its column now (pan/zoom replaces the old fixed window); it is
+   the positioning context for the floating zoom controls and clips the panned SVG. */
 #grid-board {
   border: 1px solid #d9d9d9;
   margin: .5rem 0;
-  max-width: 640px;
+  position: relative;
+  overflow: hidden;
 }
 
 .grid-svg {
   display: block;
   width: 100%;
   height: auto;
+  cursor: grab;
+  touch-action: none; /* we drive pan/zoom ourselves; stop the browser scrolling */
+}
+
+.grid-svg.grid-grabbing {
+  cursor: grabbing;
+}
+
+/* Floating pan/zoom controls, anchored over the board. */
+.grid-zoom-controls {
+  position: absolute;
+  top: .5rem;
+  right: .5rem;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: .25rem;
+}
+
+.grid-zoom-button {
+  appearance: none;
+  width: 2rem;
+  height: 2rem;
+  line-height: 1;
+  padding: 0;
+  border: 1px solid #c4c4c4;
+  border-radius: 3px;
+  background: #fff;
+  color: #333333;
+  cursor: pointer;
+  font-size: 1rem;
+}
+
+.grid-zoom-button:last-child {
+  width: auto;
+  padding: 0 .4rem;
+  font-size: .7rem;
+}
+
+.grid-zoom-button:hover {
+  background: #f0f4ff;
 }
 
 .grid-edge {
@@ -469,9 +513,22 @@ a, button, input, select {
   fill: #f4f4f4;
 }
 
+/* Labels declutter when zoomed out: hidden by default, entry roots always shown,
+   everything shown once the svg gains .grid-zoomed-in (past the label threshold). */
 .grid-node-label {
   fill: #333333;
   font-size: 12px;
+  display: none;
+  pointer-events: none;
+}
+
+.grid-node-label-entry {
+  display: block;
+  font-weight: bold;
+}
+
+.grid-zoomed-in .grid-node-label {
+  display: block;
 }
 
 .grid-node-unlocked circle {

@@ -18,9 +18,18 @@
       shape each reset, shared by everyone. Your daily budget is your level; spend it
       on nodes next to ones you've unlocked. Your class starts at its own root
       (thick ring); larger nodes with a white centre are skill knots. Highlighted
-      nodes are unlockable — click one to spend. Unlocks clear at the daily reset.
+      nodes are unlockable — click one to spend. Faint background tints mark the eight
+      class territories. Scroll or pinch to zoom toward the cursor, drag the empty
+      board to pan, and use the +, −, and home buttons to reset the view. Unlocks
+      clear at the daily reset.
     </p>
-    <div id="grid-board"></div>
+    <div id="grid-board">
+      <div id="grid-zoom-controls" class="grid-zoom-controls" aria-hidden="true">
+        <button type="button" id="grid-zoom-in" class="grid-zoom-button" title="Zoom in">+</button>
+        <button type="button" id="grid-zoom-out" class="grid-zoom-button" title="Zoom out">&minus;</button>
+        <button type="button" id="grid-zoom-home" class="grid-zoom-button" title="Reset view to your class root">home</button>
+      </div>
+    </div>
     <div class="grid-legend">
       <span><span class="grid-swatch grid-swatch-unlocked"></span> Unlocked</span>
       <span><span class="grid-swatch grid-swatch-unlockable"></span> Unlockable</span>
@@ -51,7 +60,88 @@
 
     const STAT_R = 7, KNOT_R = 12, ENTRY_R = 15;
 
+    // Eight class territories → eight evenly-spaced, LOW-SATURATION hues so the
+    // tint reads as a faint parchment wash behind the board. Unlock state stays the
+    // loud signal (gold/green, in styles.css); region hue is only a backdrop for
+    // LOCKED nodes + edges. Order matches CLASS_BY_SECTOR in utils/progressionGrid.js.
+    const CLASS_ORDER = ['Fighter', 'Paladin', 'Cleric', 'Mage', 'Assassin', 'Dungeoneer', 'Chemist', 'Novice'];
+    const CLASS_HUE = {};
+    CLASS_ORDER.forEach((job, i) => { CLASS_HUE[job] = Math.round((i * 360) / CLASS_ORDER.length); });
+    function regionHue(region) { return CLASS_HUE[region] != null ? CLASS_HUE[region] : 0; }
+    // Faint fill for a locked node; a slightly deeper stroke so it stays legible.
+    function lockedFill(region) { return `hsl(${regionHue(region)}, 30%, 90%)`; }
+    function lockedStroke(region) { return `hsl(${regionHue(region)}, 28%, 72%)`; }
+    function lockedEdge(region) { return `hsl(${regionHue(region)}, 26%, 84%)`; }
+
+    // --- Camera: lives OUTSIDE render() so an unlock re-render keeps the view. ---
+    const SCALE_MIN = 0.5, SCALE_MAX = 4, MID_ZOOM = 1.6;
+    // Show per-node text labels only past this zoom (entry roots are always labeled).
+    const LABEL_SCALE = 1.5;
+    const DRAG_THRESHOLD = 4; // px of movement before a press counts as a pan, not a click
+    let camera = null;        // { scale, tx, ty } in viewBox units; null until first fit
+    let viewW = 1000, viewH = 760;
+    let lastData = null;
+
+    function clampScale(s) { return Math.max(SCALE_MIN, Math.min(SCALE_MAX, s)); }
+
+    // Center the camera on a viewBox point (px, py) at a given scale.
+    function centerOn(px, py, scale) {
+      const s = clampScale(scale);
+      return { scale: s, tx: viewW / 2 - px * s, ty: viewH / 2 - py * s };
+    }
+
+    function applyCamera() {
+      const g = document.getElementById('grid-camera');
+      if (!g || !camera) return;
+      g.setAttribute('transform', `translate(${camera.tx} ${camera.ty}) scale(${camera.scale})`);
+      // Labels declutter when zoomed out; entry roots stay labeled at any zoom.
+      const svg = document.getElementById('grid-svg');
+      if (svg) svg.classList.toggle('grid-zoomed-in', camera.scale >= LABEL_SCALE);
+    }
+
+    // Convert a pointer event to viewBox coordinates (the SVG renders at width:100%,
+    // so map client px → viewBox via the rendered box, independent of the transform).
+    function eventToViewBox(event) {
+      const svg = document.getElementById('grid-svg');
+      const rect = svg.getBoundingClientRect();
+      const x = ((event.clientX - rect.left) / rect.width) * viewW;
+      const y = ((event.clientY - rect.top) / rect.height) * viewH;
+      return { x, y };
+    }
+
+    function zoomAt(viewPoint, nextScale) {
+      const s = clampScale(nextScale);
+      const ratio = s / camera.scale;
+      // Keep viewPoint fixed under the cursor while scaling.
+      camera = {
+        scale: s,
+        tx: viewPoint.x - (viewPoint.x - camera.tx) * ratio,
+        ty: viewPoint.y - (viewPoint.y - camera.ty) * ratio
+      };
+      applyCamera();
+    }
+
+    function zoomByFactor(factor) {
+      // Buttons zoom toward the board's visual centre.
+      zoomAt({ x: viewW / 2, y: viewH / 2 }, camera.scale * factor);
+    }
+
+    function resetView() {
+      if (!lastData) return;
+      camera = homeCamera(lastData);
+      applyCamera();
+    }
+
+    // The "home" view: centered on the player's own class entry root at mid-zoom.
+    function homeCamera(data) {
+      const root = (data.nodes || []).find(n => n.entryFor && n.entryFor === data.job)
+        || (data.nodes || []).find(n => n.entryFor);
+      if (root) return centerOn(root.x, root.y, MID_ZOOM);
+      return centerOn(viewW / 2, viewH / 2, 1);
+    }
+
     function render(data) {
+      lastData = data;
       document.getElementById('skill-points').textContent =
         `Skill Points: ${data.available} / ${data.budget} today` + (data.spent ? ` (${data.spent} spent)` : '');
 
@@ -68,7 +158,14 @@
           const other = byId[otherId];
           if (!other) return;
           const active = node.state === 'unlocked' && other.state === 'unlocked';
-          edges.push(`<line x1="${node.x}" y1="${node.y}" x2="${other.x}" y2="${other.y}" class="grid-edge ${active ? 'grid-edge-active' : ''}"/>`);
+          // Active edges keep the loud treatment; otherwise tint faintly by region
+          // (use the lower endpoint's region so the wash stays stable per edge).
+          let extra = '';
+          if (!active) {
+            const region = node.id <= other.id ? node.region : other.region;
+            extra = ` stroke="${lockedEdge(region)}"`;
+          }
+          edges.push(`<line x1="${node.x}" y1="${node.y}" x2="${other.x}" y2="${other.y}" class="grid-edge ${active ? 'grid-edge-active' : ''}"${extra}/>`);
         });
       });
 
@@ -76,21 +173,123 @@
         const isEntry = Boolean(node.entryFor);
         const isKnot = !isEntry && (node.effect && (node.effect.kind === 'grant_ability' || node.effect.kind === 'passive'));
         const r = isEntry ? ENTRY_R : (isKnot ? KNOT_R : STAT_R);
-        const title = `${node.label}${effectText(node.effect) ? ' — ' + effectText(node.effect) : ''}\n${node.state}${node.cost ? ' · cost ' + node.cost : ' · free'}`;
+        const title = `${node.label}${effectText(node.effect) ? ' — ' + effectText(node.effect) : ''}\n${node.region} territory\n${node.state}${node.cost ? ' · cost ' + node.cost : ' · free'}`;
         const inner = isKnot ? `<circle cx="${node.x}" cy="${node.y}" r="${(r * 0.42).toFixed(1)}" fill="#fff"/>` : '';
+        // Region tint applies only to LOCKED nodes (unlockable/unlocked keep their
+        // strong state colours from styles.css). Entry roots keep their state fill.
+        let fillAttr = '';
+        if (node.state === 'locked' && !isEntry) {
+          fillAttr = ` fill="${lockedFill(node.region)}" stroke="${lockedStroke(node.region)}"`;
+        }
+        // Labels: entry roots always; everything else only when zoomed in (toggled
+        // by the .grid-zoomed-in class on the svg).
+        const labelClass = isEntry ? 'grid-node-label grid-node-label-entry' : 'grid-node-label';
+        const label = `<text x="${node.x}" y="${node.y - r - 4}" class="${labelClass}" text-anchor="middle">${escapeHtml(node.label)}</text>`;
         return `<g class="grid-node grid-node-${node.state}" data-node-id="${escapeHtml(node.id)}" data-state="${node.state}">`
           + `<title>${escapeHtml(title)}</title>`
-          + `<circle cx="${node.x}" cy="${node.y}" r="${r}"${isEntry ? ' stroke-width="4"' : ''}></circle>${inner}</g>`;
+          + `<circle cx="${node.x}" cy="${node.y}" r="${r}"${isEntry ? ' stroke-width="4"' : ''}${fillAttr}></circle>${inner}${label}</g>`;
       }).join('');
 
-      const w = (data.canvas && data.canvas.width) || 1000;
-      const h = (data.canvas && data.canvas.height) || 760;
-      document.getElementById('grid-board').innerHTML =
-        `<svg viewBox="0 0 ${w} ${h}" class="grid-svg" role="img" aria-label="Progression grid for world day ${data.worldDay}">${edges.join('')}${nodesSvg}</svg>`;
+      viewW = (data.canvas && data.canvas.width) || 1000;
+      viewH = (data.canvas && data.canvas.height) || 760;
+
+      // Build the SVG with one transform group wrapping every edge + node. The
+      // viewBox is fixed; the camera lives on #grid-camera's transform.
+      const board = document.getElementById('grid-board');
+      const controls = document.getElementById('grid-zoom-controls');
+      const svgMarkup =
+        `<svg id="grid-svg" viewBox="0 0 ${viewW} ${viewH}" class="grid-svg" role="img" aria-label="Progression grid for world day ${data.worldDay}">`
+        + `<g id="grid-camera">${edges.join('')}${nodesSvg}</g>`
+        + `</svg>`;
+      // Replace only the SVG, preserving the zoom-control buttons + their listeners.
+      const existing = document.getElementById('grid-svg');
+      if (existing) existing.remove();
+      controls.insertAdjacentHTML('afterend', svgMarkup);
+
+      // First render fits to the player's class root; later re-renders keep the view.
+      if (!camera) camera = homeCamera(data);
+      applyCamera();
+      bindBoardInteractions();
 
       document.querySelectorAll('#grid-board g[data-state="unlockable"]').forEach(group => {
         group.addEventListener('click', () => unlock(group.getAttribute('data-node-id')));
       });
+    }
+
+    // --- Pointer interactions (pan + zoom) on the SVG element. ---
+    let dragging = false, didDrag = false, dragStart = null, cameraStart = null;
+    let activePointers = new Map();
+    let pinchStartDist = 0, pinchStartScale = 1;
+
+    function bindBoardInteractions() {
+      const svg = document.getElementById('grid-svg');
+      if (!svg || svg.dataset.bound === '1') return;
+      svg.dataset.bound = '1';
+
+      svg.addEventListener('wheel', event => {
+        event.preventDefault();
+        const point = eventToViewBox(event);
+        // Trackpad pinch arrives as wheel+ctrlKey; both paths zoom toward cursor.
+        const factor = Math.exp(-event.deltaY * 0.0015);
+        zoomAt(point, camera.scale * factor);
+      }, { passive: false });
+
+      svg.addEventListener('pointerdown', event => {
+        svg.setPointerCapture(event.pointerId);
+        activePointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+        if (activePointers.size === 2) {
+          const pts = [...activePointers.values()];
+          pinchStartDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
+          pinchStartScale = camera.scale;
+          dragging = false;
+        } else {
+          dragging = true;
+          didDrag = false;
+          dragStart = { x: event.clientX, y: event.clientY };
+          cameraStart = { tx: camera.tx, ty: camera.ty };
+        }
+      });
+
+      svg.addEventListener('pointermove', event => {
+        if (activePointers.has(event.pointerId)) {
+          activePointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+        }
+        if (activePointers.size === 2) {
+          const pts = [...activePointers.values()];
+          const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
+          const mid = { clientX: (pts[0].x + pts[1].x) / 2, clientY: (pts[0].y + pts[1].y) / 2 };
+          zoomAt(eventToViewBox(mid), pinchStartScale * (dist / pinchStartDist));
+          return;
+        }
+        if (!dragging) return;
+        const rect = svg.getBoundingClientRect();
+        const dxClient = event.clientX - dragStart.x;
+        const dyClient = event.clientY - dragStart.y;
+        if (!didDrag && Math.hypot(dxClient, dyClient) > DRAG_THRESHOLD) didDrag = true;
+        if (!didDrag) return;
+        svg.classList.add('grid-grabbing');
+        // Pan in viewBox units (client px → viewBox px via the rendered box).
+        camera.tx = cameraStart.tx + (dxClient / rect.width) * viewW;
+        camera.ty = cameraStart.ty + (dyClient / rect.height) * viewH;
+        applyCamera();
+      });
+
+      const endPointer = event => {
+        activePointers.delete(event.pointerId);
+        if (svg.hasPointerCapture(event.pointerId)) svg.releasePointerCapture(event.pointerId);
+        if (activePointers.size < 2) { pinchStartDist = 0; }
+        if (activePointers.size === 0) {
+          dragging = false;
+          svg.classList.remove('grid-grabbing');
+        }
+      };
+      svg.addEventListener('pointerup', endPointer);
+      svg.addEventListener('pointercancel', endPointer);
+
+      // Suppress the click that follows a real drag so a pan never unlocks a node.
+      svg.addEventListener('click', event => {
+        if (didDrag) { event.stopPropagation(); event.preventDefault(); didDrag = false; }
+      }, true);
     }
 
     function post(path, body) {
@@ -107,6 +306,7 @@
     }
 
     function unlock(nodeId) {
+      if (didDrag) return; // a drag that ended over a node must not unlock it
       setMessage('');
       post('/grid/unlock', 'nodeId=' + encodeURIComponent(nodeId))
         .then(render)
@@ -131,6 +331,9 @@
     }
 
     document.getElementById('respec-button').addEventListener('click', respec);
+    document.getElementById('grid-zoom-in').addEventListener('click', () => zoomByFactor(1.25));
+    document.getElementById('grid-zoom-out').addEventListener('click', () => zoomByFactor(1 / 1.25));
+    document.getElementById('grid-zoom-home').addEventListener('click', resetView);
     load();
   </script>
 </body>

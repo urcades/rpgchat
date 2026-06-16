@@ -229,21 +229,22 @@ function buildDailyBoard(worldDay) {
     const job = regionJob.get(v);
     const neighbors = [...carved.get(v)].sort((a, b) => a - b).map(nodeId);
     if (entrySet.has(v)) {
-      return { id: nodeId(v), label: `${entryVid[v]} Root`, x: Math.round(px(v)), y: Math.round(py(v)), cost: 0, effect: { kind: 'none' }, entryFor: entryVid[v], neighbors };
+      // Entry roots report their OWN class as their region (they sit at the seed of it).
+      return { id: nodeId(v), label: `${entryVid[v]} Root`, x: Math.round(px(v)), y: Math.round(py(v)), cost: 0, effect: { kind: 'none' }, entryFor: entryVid[v], neighbors, region: entryVid[v] };
     }
     const degree = carved.get(v).size;
     if (degree >= KNOT_DEG) {
       const grantsAbility = effectRng() < 0.5;
       if (grantsAbility) {
         const abilityId = CLASS_ABILITY[job];
-        return { id: nodeId(v), label: abilityLabel(abilityId), x: Math.round(px(v)), y: Math.round(py(v)), cost: KNOT_COST, effect: { kind: 'grant_ability', abilityId }, entryFor: null, neighbors };
+        return { id: nodeId(v), label: abilityLabel(abilityId), x: Math.round(px(v)), y: Math.round(py(v)), cost: KNOT_COST, effect: { kind: 'grant_ability', abilityId }, entryFor: null, neighbors, region: job };
       }
       const passiveId = PASSIVE_BY_STAT[PRIMARY_STAT[job]];
-      return { id: nodeId(v), label: passiveLabel(passiveId), x: Math.round(px(v)), y: Math.round(py(v)), cost: KNOT_COST, effect: { kind: 'passive', abilityId: passiveId }, entryFor: null, neighbors };
+      return { id: nodeId(v), label: passiveLabel(passiveId), x: Math.round(px(v)), y: Math.round(py(v)), cost: KNOT_COST, effect: { kind: 'passive', abilityId: passiveId }, entryFor: null, neighbors, region: job };
     }
     const stat = PRIMARY_STAT[job];
     const amount = STAT_STEP[stat];
-    return { id: nodeId(v), label: statLabel(stat, amount), x: Math.round(px(v)), y: Math.round(py(v)), cost: STAT_COST, effect: { kind: 'stat', stat, amount }, entryFor: null, neighbors };
+    return { id: nodeId(v), label: statLabel(stat, amount), x: Math.round(px(v)), y: Math.round(py(v)), cost: STAT_COST, effect: { kind: 'stat', stat, amount }, entryFor: null, neighbors, region: job };
   });
 
   const byId = new Map(nodes.map(n => [n.id, n]));
