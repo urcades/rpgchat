@@ -343,10 +343,13 @@ test('chat renderer colors support, death, attack, and speed result messages', (
     timestamp: '2026-05-28 17:03:50',
     message: 'angel patches up angel for 3 health.'
   });
+  // Combat results now ride as a trailing "(<flavor> (N))" block (the weapon/part-aware
+  // brutal flavor), so the renderer colors the block by structure + damage token rather
+  // than the old "attacked … for N damage" wording.
   const attackMessage = page.context.renderMessage({
     username: 'angel',
     timestamp: '2026-05-28 17:04:10',
-    message: 'oops i mean stabbing myself now @angel (angel attacked angel for 2 damage)'
+    message: 'oops i mean stabbing myself now @angel (angel opens their own throat (2))'
   });
   const dodgeMessage = page.context.renderMessage({
     username: 'ed',
@@ -367,8 +370,8 @@ test('chat renderer colors support, death, attack, and speed result messages', (
 
   const attackResult = attackMessage.children.find(child => child.className === 'attack-result');
   assert.ok(attackResult);
-  assert.equal(attackResult.textContent, '(angel attacked angel for 2 damage)');
-  assert.equal(attackMessage.textContent, '2026-05-28 17:04:10 - angel: oops i mean stabbing myself now @angel (angel attacked angel for 2 damage)');
+  assert.equal(attackResult.textContent, '(angel opens their own throat (2))');
+  assert.equal(attackMessage.textContent, '2026-05-28 17:04:10 - angel: oops i mean stabbing myself now @angel (angel opens their own throat (2))');
 
   const speedResult = dodgeMessage.children.find(child => child.className === 'speed-result');
   assert.ok(speedResult);
