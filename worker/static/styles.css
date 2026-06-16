@@ -273,7 +273,8 @@ a, button, input, select {
 }
 
 .skill-slot,
-.stance-slot {
+.stance-slot,
+.part-slot {
   background: none;
   border: 1px solid #c5c5c5;
   border-radius: 4px;
@@ -284,11 +285,13 @@ a, button, input, select {
 }
 
 .skill-slot:hover,
-.stance-slot:hover {
+.stance-slot:hover,
+.part-slot:hover {
   background: #f0f4ff;
 }
 
-.stance-slot.stance-active {
+.stance-slot.stance-active,
+.part-slot.part-active {
   background: #16181d;
   border-color: #16181d;
   color: #fff;

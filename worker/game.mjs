@@ -3728,11 +3728,17 @@ export async function handleAttack(db, username, message, row, col, options = {}
   // targets; against NPCs it's ignored. standing/no-aim => deltas are all zero,
   // so every existing combat number is unchanged.
   const attackerStance = STANCES[normalizeStance(attacker.stance)];
+  // Plan 024: the targeting toolbar can name an aimed part out-of-band (options.targetPart)
+  // so the limb never has to ride in the chat prose. Normalized through the same
+  // parseCalledShot matcher so 'left_arm'/'Head' resolve to canonical labels; when
+  // absent we fall back to the part named in the message, so typed called shots and
+  // every existing combat test stay byte-identical.
+  const aimedPart = options.targetPart ? parseCalledShot(options.targetPart) : null;
 
   for (const user of targets) {
     const target = await getUser(db, user.username, 'Target');
     const targetMods = target.isNpc ? null : await getConditionAndGearModifiers(db, target.username);
-    const calledShot = target.isNpc ? null : parseCalledShot(message);
+    const calledShot = target.isNpc ? null : (aimedPart || parseCalledShot(message));
     const targetStance = target.isNpc ? STANCES[DEFAULT_STANCE] : STANCES[normalizeStance(target.stance)];
 
     // Contest deltas: attacker stance hitBonus and (when aiming) the called-shot
@@ -4818,8 +4824,10 @@ export async function handleChatAction(db, username, row, col, message) {
 // stamina is spent. NPC targets have no parts and never satisfy the aim. This
 // runs inside handleAttackAction's `validate`, so the throw happens before
 // spendStamina in runPlayerAction.
-async function validateCalledShot(db, message, targets) {
-  const calledShot = parseCalledShot(message);
+async function validateCalledShot(db, message, targets, targetPart = null) {
+  // Plan 024: an explicit aimed part (from the toolbar) is validated the same way
+  // a prose-named one is — it just wins when both are present.
+  const calledShot = (targetPart ? parseCalledShot(targetPart) : null) || parseCalledShot(message);
   if (!calledShot) {
     return;
   }
@@ -4841,19 +4849,19 @@ async function validateCalledShot(db, message, targets) {
   assertAction(aimable, 'There is nothing left to aim at.');
 }
 
-export async function handleAttackAction(db, username, row, col, message) {
+export async function handleAttackAction(db, username, row, col, message, targetPart = null) {
   await assertActable(db, username); // Plan 023b: the downed cannot strike.
   return runPlayerAction(db, {
     username,
     staminaCost: 1,
     validate: async () => {
       const targets = await validateAttackTargets(db, message, row, col, username);
-      await validateCalledShot(db, message, targets);
+      await validateCalledShot(db, message, targets, targetPart);
       return targets;
     },
     perform: async () => {
       const deferredSystemMessages = [];
-      const updatedMessage = await handleAttack(db, username, message, row, col, { deferredSystemMessages });
+      const updatedMessage = await handleAttack(db, username, message, row, col, { deferredSystemMessages, targetPart });
       await insertMessage(db, row, col, username, updatedMessage);
       for (const deferred of deferredSystemMessages) {
         await insertSystemMessage(db, row, col, deferred.message, deferred.kind);

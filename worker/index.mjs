@@ -918,7 +918,10 @@ app.post('/attack/:row/:col', async c => {
     const bodyResult = await measureAsync(() => parseForm(c));
     const body = bodyResult.value;
     const message = String(body.message || '');
-    const action = await measureAsync(() => handleAttackAction(c.env.DB, auth.user.username, row, col, message));
+    // Plan 024: the targeting toolbar aims at a body part out-of-band, so the limb
+    // stays out of the chat prose. Empty => no called shot (weighted-random hit).
+    const targetPart = body.targetPart ? String(body.targetPart) : null;
+    const action = await measureAsync(() => handleAttackAction(c.env.DB, auth.user.username, row, col, message, targetPart));
     const result = action.value;
     runAfterResponse(c, { action: 'attack', roomRow: row, roomCol: col }, async () => {
       const broadcast = await measureAsync(() => broadcastRoom(c.env, row, col, { type: 'attack', username: auth.user.username, result }));

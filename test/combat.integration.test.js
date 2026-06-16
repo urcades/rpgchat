@@ -175,6 +175,39 @@ test('Plan 006: a crouched defender dodges a hit a standing defender would take'
   }
 });
 
+test('Plan 024: an explicit aimed part (targeting toolbar) routes the hit to that limb, beats the prose, and never leaks into chat', async () => {
+  const db = await createMigratedDb();
+  const { handleAttack, getBodyParts, getUserState, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    await seedLiveUser(db, 'sniper', { health: 30, maxHealth: 30, speed: 1, strength: 1 });
+    await seedLiveUser(db, 'mark', { health: 30, maxHealth: 30, speed: 1 });
+
+    const calm = findCalmRoom(getWorldDay());
+    await updatePresence(db, 'sniper', calm.row, calm.col);
+    await updatePresence(db, 'mark', calm.row, calm.col);
+    await getUserState(db, 'mark'); // instantiate the defender's body part rows
+
+    // A head called shot costs CALLED_SHOT_HIT_PENALTY (0.15) accuracy: equal speeds
+    // give base 0.70, so the contest threshold is 0.55. Roll 0.5 still lands; crit
+    // 0.99 misses; the pick draw (0.5 -> would be left arm) is consumed but overridden
+    // by the explicit aim. The prose ALSO names 'left arm' — the toolbar part must win.
+    const landed = await withMockedRandom([0.5, 0.99, 0.5], () =>
+      handleAttack(db, 'sniper', 'I swing at @mark left arm', calm.row, calm.col, { targetPart: 'head' }));
+
+    assert.match(landed, /sniper attacked mark for 2 damage/, 'base 1 + aimed-head bonus 1 = 2 damage');
+    assert.doesNotMatch(landed, /\bhead\b/i, 'the aimed limb never appears in the chat prose');
+
+    const parts = await getBodyParts(db, 'mark');
+    const head = parts.find(p => p.label === 'head');
+    const leftArm = parts.find(p => p.label === 'left arm');
+    assert.equal(head.hp, head.maxHp - 2, 'the head took the 2 damage');
+    assert.equal(leftArm.hp, leftArm.maxHp, 'the prose-named left arm is untouched — the toolbar aim wins');
+  } finally {
+    await db.close();
+  }
+});
+
 test('Plan 006: /stance round-trips through the handler into the getUserState payload', async () => {
   const db = await createMigratedDb();
   const { handleChatAction, getUserState, updatePresence } = await import('../worker/game.mjs');

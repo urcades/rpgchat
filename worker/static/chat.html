@@ -42,6 +42,7 @@
     <div id="messages"></div>
   </div>
   <div class="hud chat-input-toolbar">
+    <div id="target-part-bar" class="action-bar" style="display: none;"></div>
     <div id="stance-bar" class="action-bar"></div>
     <div id="skill-bar" class="action-bar"></div>
     <form class="chat-form" id="chat-form">
@@ -63,6 +64,8 @@
     let currentJob = 'Novice';
     let selectedTarget = '';
     let selectedTargetLabel = ''; // Plan 013e: display name for the hint/echo (selectedTarget stays the key)
+    let selectedTargetIsNpc = false; // Plan 024: NPCs are bodyless — the called-shot bar stays hidden for them
+    let selectedTargetPart = '';     // Plan 024: '' = no aim (weighted-random hit, the default); else a body-part label
     let incapacitated = false; // Plan 023c: when down, only the chat input stays live
 
     const pathParts = window.location.pathname.split('/');
@@ -208,7 +211,7 @@
       username.type = 'button';
       username.className = 'message-username';
       username.textContent = msg.displayName || msg.username;
-      username.addEventListener('click', () => selectTarget(msg.username, msg.displayName || msg.username));
+      username.addEventListener('click', () => selectTarget(msg.username, msg.displayName || msg.username, msg.kind === 'npc'));
       messageElement.appendChild(username);
       if (msg.job) {
         setText(messageElement, ` [${String(msg.job).toLowerCase()}]`);
@@ -271,6 +274,7 @@
       // data.skill until then) and the stance toggle, replacing the old dropdown.
       renderSkillBar(data.skills || (currentSkill ? [currentSkill] : []));
       renderStanceBar(data.stance || 'standing');
+      renderTargetPartBar(); // Plan 024: re-sync the called-shot bar's disabled state
       // Plan 023c: the downed can't fight, skill, or shift stance — only speak.
       const attackButton = document.getElementById('attack-button');
       if (attackButton) {
@@ -344,7 +348,7 @@
         button.type = 'button';
         button.className = 'room-presence-target';
         button.textContent = player.displayName || player.username;
-        button.addEventListener('click', () => selectTarget(player.username, player.displayName || player.username));
+        button.addEventListener('click', () => selectTarget(player.username, player.displayName || player.username, Boolean(player.isNpc)));
         paragraph.appendChild(button);
         // Plan 023c: a fallen body is marked prone so the room can see who to help — or finish.
         if (player.incapacitated) {
@@ -552,22 +556,34 @@
     function updateTargetHint() {
       const messageInput = document.getElementById('message');
       const clearTargetButton = document.getElementById('clear-target');
-      messageInput.placeholder = selectedTarget ? `Currently targeting ${selectedTargetLabel || selectedTarget}` : 'Message';
+      if (selectedTarget) {
+        // Plan 024: surface the aimed limb alongside the target name.
+        const aim = selectedTargetPart ? ` — aiming for the ${selectedTargetPart}` : '';
+        messageInput.placeholder = `Currently targeting ${selectedTargetLabel || selectedTarget}${aim}`;
+      } else {
+        messageInput.placeholder = 'Message';
+      }
       clearTargetButton.style.display = selectedTarget ? 'inline-block' : 'none';
       clearTargetButton.textContent = 'Untarget';
     }
 
-    function selectTarget(username, label) {
+    function selectTarget(username, label, isNpc = false) {
       selectedTarget = username;
       selectedTargetLabel = label || username; // Plan 013e: show the name, not the soc:… id
+      selectedTargetIsNpc = Boolean(isNpc);
+      selectedTargetPart = ''; // Plan 024: a fresh target starts un-aimed
       updateTargetHint();
+      renderTargetPartBar();
       document.getElementById('message').focus();
     }
 
     function clearTarget() {
       selectedTarget = '';
       selectedTargetLabel = '';
+      selectedTargetIsNpc = false;
+      selectedTargetPart = '';
       updateTargetHint();
+      renderTargetPartBar();
       document.getElementById('message').focus();
     }
 
@@ -637,7 +653,14 @@
         return;
       }
       const endpoint = attack ? `/attack/${row}/${col}` : `/chat/${row}/${col}`;
-      postForm(endpoint, `message=${encodeURIComponent(actionMessage)}`, () => {
+      // Plan 024: the aimed limb rides as structured data, never in the prose, so the
+      // chat log stays clean. Player targets only — NPCs are bodyless (the bar is
+      // hidden for them, so selectedTargetPart is already clear, but guard anyway).
+      let body = `message=${encodeURIComponent(actionMessage)}`;
+      if (attack && selectedTargetPart && !selectedTargetIsNpc) {
+        body += `&targetPart=${encodeURIComponent(selectedTargetPart)}`;
+      }
+      postForm(endpoint, body, () => {
         messageInput.value = '';
         updateTargetHint();
       });
@@ -676,6 +699,57 @@
         button.addEventListener('click', () => setStance(name));
         bar.appendChild(button);
       });
+    }
+
+    // Plan 024: the called-shot toolbar — pick the limb the next Attack aims at.
+    // Labels mirror the humanoid body plan in utils/body.js; the server routes the
+    // hit to the named part (parseCalledShot/applyBodyDamage). 'Anywhere' clears the
+    // aim back to the default weighted-random hit. The aimed part rides as a separate
+    // field on /attack, so it never has to be typed into chat.
+    const TARGET_PART_OPTIONS = [
+      { label: 'head', text: 'Head' },
+      { label: 'torso', text: 'Torso' },
+      { label: 'neck', text: 'Neck' },
+      { label: 'left arm', text: 'Left arm' },
+      { label: 'right arm', text: 'Right arm' },
+      { label: 'left leg', text: 'Left leg' },
+      { label: 'right leg', text: 'Right leg' }
+    ];
+
+    // Shown only with an embodied target selected. NPCs are bodyless, so there is
+    // nothing to aim at and the bar stays hidden (a called shot against them would
+    // be rejected server-side anyway). Mirrors the stance bar's disabled-while-downed
+    // behavior so the whole toolbar stack reads consistently.
+    function renderTargetPartBar() {
+      const bar = document.getElementById('target-part-bar');
+      if (!bar) {
+        return;
+      }
+      const show = Boolean(selectedTarget) && !selectedTargetIsNpc;
+      bar.style.display = show ? 'flex' : 'none';
+      bar.innerHTML = '';
+      if (!show) {
+        return;
+      }
+      setText(bar, 'Aim: ');
+      const options = [{ label: '', text: 'Anywhere' }, ...TARGET_PART_OPTIONS];
+      options.forEach(part => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = part.label === selectedTargetPart ? 'part-slot part-active' : 'part-slot';
+        button.textContent = part.text;
+        button.disabled = incapacitated; // Plan 023c: the downed can't aim a strike
+        button.addEventListener('click', () => selectTargetPart(part.label));
+        bar.appendChild(button);
+      });
+    }
+
+    function selectTargetPart(label) {
+      // Re-clicking the active limb toggles the aim back off (to 'Anywhere').
+      selectedTargetPart = selectedTargetPart === label ? '' : label;
+      renderTargetPartBar();
+      updateTargetHint();
+      document.getElementById('message').focus();
     }
 
     function fireSkill(skillId) {
