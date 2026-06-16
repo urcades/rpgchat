@@ -21,28 +21,28 @@ findings you select. This index is the menu.
 
 | # | Finding | Cat | Impact | Effort | Risk | Conf | Evidence |
 |---|---------|-----|--------|--------|------|------|----------|
-| T1 | God module `worker/game.mjs` — 3148 lines, 69 exports | tech-debt | Every change touches one file; high cognitive load; latent circular-import risk with index.mjs | L | MED | HIGH | `worker/game.mjs`; seams: combat / inventory / body / room-ecology / npc-events / progression / commands |
+| T1 | God module `worker/game.mjs` — **now 4,937 lines** (3,148 at audit; grew with 013/020–023) | tech-debt | Every change touches one file; high cognitive load; latent circular-import risk with index.mjs | L | MED | HIGH | `worker/game.mjs`; seams: combat / inventory / body / room-ecology / npc-events / progression / commands |
 | T2 | Duplicated `createSqliteD1` D1 shim across 3 test files | tech-debt | A shim change must be made 3× and can drift | S | LOW | HIGH | `test/workerMigration.test.js`, `test/items.integration.test.js`, `test/combat.integration.test.js` |
 | P1 | N+1 queries per target in `handleAttack` | perf | ~4-5 queries/target inside the loop; only bites multi-target attacks (single-target is the norm) | M | LOW | HIGH | `worker/game.mjs:2507-2509` + per-target `consumeStatusModifier` |
 | P2 | Unbounded `SELECT`s in `getRoomEcology` / kills in `getUserState` | perf | Payload/scan grows with room age & player kill count; no LIMIT on traces/floor items, kills LIMIT 50 | S | LOW | MED | `worker/game.mjs:651-668`, `:734-751` |
 
 ## Direction (options for the maintainer — not ranked against bugs)
 
-- **D1 — Expose kills/level on the leaderboard & death page.** `killHistory` and `level`
-  are fully tracked but the leaderboard returns gold only, and the death page's
-  `grave-kills` is a hardcoded `0` stub. Smallest, highest-grounded win.
-  Evidence: `worker/index.mjs:504-506`, `:475`; `worker/static/leaderboard.html`, `death.html`. Effort S (coarse).
-- **D2 — Do roadmap plan 008 (structured realtime events) next.** It's the keystone:
-  plans 010 (whispers/parties), 012 (rites), 013 (LLM NPC voices) are all soft-blocked
-  on its message-`kind` column. One M-effort plan unblocks ~3 weeks of queued features.
-  Evidence: `plans/008`, `plans/010:24`, `plans/013:24`.
-- **D3 — Sequence plan 009 (movement) with 011 (revival) / a spawn grace lever.** Shipping
-  adjacency movement without free-placement-on-death/revival can strand new players from
-  daily raids (the maintainer already flagged this in `plans/009` notes). Coordination, not code.
-- **D4 — Item give/trade/storage.** Items can be carried/equipped/dropped/taken but there's
-  no transfer or vault; the asymmetry becomes visible once parties (plan 010) land and want
-  to pool loot. Schema is extensible (item state is row-based). Evidence: `migrations/0006_items.sql`,
-  `worker/game.mjs:1694-1720`. Effort M (coarse).
+- **D1 — Expose kills/level on the leaderboard & death page.** ⟶ **PARTIALLY DONE (2026-06-14,
+  plan 023a):** the death/cemetery pages now show real kill counts + slayer (`grave-kills` is wired
+  to `grave.kills`; `/death-data` + `/cemetery-data` surface killHistory). **Still open:** the
+  leaderboard itself still returns gold only — adding kills/level there is the remaining slice. Effort S.
+- **D2 — Do roadmap plan 008 (structured realtime events) next.** ⟶ **DONE (2026-06-14).** 008
+  shipped; the `whisper`/`rite`/`npc` message kinds it unblocked are in use (012 rites + 013 NPC
+  voices both shipped on top of it). No longer pending.
+- **D3 — Sequence plan 009 (movement) with 011 (revival) / a spawn grace lever.** ⟶ **DONE
+  (2026-06-14).** Both 009 (adjacency movement) and 011 (cleric revival) shipped; a revived player
+  with no presence row places freely on next entry, as planned. Resolved.
+- **D4 — Item give/trade/storage.** ⟶ **STILL OPEN — the only genuinely-missing core verb.** Items
+  can be carried/equipped/dropped/taken but there's no transfer or vault. (The original "visible once
+  parties land" rationale is moot — 010 is on ice — but a `/give` to a co-located player stands on its
+  own.) Schema is extensible (item state is row-based). Evidence: `migrations/0006_items.sql`,
+  `worker/game.mjs`. Effort M.
 
 ## Plans written — execution order & status
 
@@ -68,6 +68,29 @@ to avoid rebase churn.
 plan yet; say the word and it becomes 006. The other direction items (D2 plan-008
 sequencing, D3 movement/revival, D4 item trade/storage) are roadmap calls for `plans/`,
 not improvement plans.
+
+## Campaign A — totalizing hardening pass (in progress, 2026-06-15)
+
+Executing the **totality** of this backlog under `CAMPAIGN-A-hardening.md` (full push autonomy, audit-first).
+Status: `001` ✅ (Part A); **`001B`** (Stripe signature-verifier extraction + tests) + **`002`/`003`/`004`/`005`**
+in flight as Waves 1–3. A fresh `/improve deep` audit (HEAD `05efdf4`, 7 Explore agents) ran first; findings
+vetted against source. Enrichments folded into `003` (auth-crypto + login/signup + coord tests), `004` (cron +
+hostile-alarm boundaries + stack/timestamp logging), `005` (the `game.mjs` seam map), `001B` (resurrection-INSERT dedup).
+Security audit: **zero findings**. CORRECTNESS-001 (NPC-kill null-deref) vetted and **rejected** — false positive
+(the re-read precedes the delete).
+
+### Deferred findings from the 2026-06-15 deep audit (real, NOT critical — backlog, not executed this run)
+
+| Finding | Cat | Effort | Note |
+|---|---|---|---|
+| Combat/loop query N+1 cluster (per-target getAttackElement/consumeStatusModifier; doubled roomNeedsLoop+roomHasActiveHostiles per alarm; `SELECT u.*` over-fetch; getRoomEcology recomputed by reply+ambient) | perf | M | single-target unaffected; bites multi-target + many rooms |
+| Hot-path index additions: `bodyParts(username,slotType,severed)`, `items(corpseOf,roomRow,roomCol)` | perf/migration | S | additive migration |
+| wrangler 4.95→4.100, hono 4.12.23→4.12.25 | deps | S | hygiene |
+| npm audit: 14 HIGH, all dev-only (wrangler/sqlite3 build-time, not runtime) | deps/sec | M | accept + monitor (fix forces wrangler major downgrade) |
+| getUser query-helper / schema-contract consolidation (~18 inline `SELECT … FROM users`) | tech-debt | M | schema-drift risk |
+| index.mjs layering (1,198 lines: routes + helpers + DO) | tech-debt | M | sibling to adv-005 |
+| Command-handler boilerplate dedup (~10 `handle*Command`) | tech-debt | M | |
+| Repo `CLAUDE.md`; smoke.mjs explicit `exit(0)`; request-id correlation; troubleshooting/seed docs; doc-ref fixes | DX/docs | S–M | |
 
 ## Considered and rejected (so they aren't re-audited)
 
