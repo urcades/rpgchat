@@ -585,13 +585,17 @@ function socialNpcName(role, row, col, index) {
 }
 
 async function createSocialNpc(db, { username, displayName, role, job, disposition, level, row, col, worldDay, tick }) {
+  // Plan 021/social-bodies: social NPCs get a body plan too, so a provoked-into-hostility
+  // barmaid/guard/patron is aimable for called shots (matching the hostile spawn path).
+  // They are humanoid — resolveCreatureBodyPlanId on their human-ish names yields the
+  // default 'brute' (= the humanoid plan). affixes stays NULL (social NPCs aren't elites).
   await dbRun(
     db,
     `INSERT OR IGNORE INTO users
       (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold,
-       experience, isNpc, displayName, npcKind, disposition, role, npcWorldDay)
-     VALUES (?, 'npc', ?, 24, 24, 100, 100, 4, 5, 3, ?, 0, 0, 1, ?, 'social', ?, ?, ?)`,
-    [username, job, level, displayName, disposition, role, worldDay]
+       experience, isNpc, displayName, npcKind, disposition, role, npcWorldDay, creatureBodyPlan)
+     VALUES (?, 'npc', ?, 24, 24, 100, 100, 4, 5, 3, ?, 0, 0, 1, ?, 'social', ?, ?, ?, ?)`,
+    [username, job, level, displayName, disposition, role, worldDay, resolveCreatureBodyPlanId(displayName)]
   );
   await dbRun(
     db,

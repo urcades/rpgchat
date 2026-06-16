@@ -8,6 +8,14 @@ const test = require('node:test');
 const { createSqliteD1, createMigratedDb } = require('./.helpers/d1');
 const { getWorldDay } = require('../utils/roomEcology');
 
+// getRoomPresence lives on the world seam and is not re-exported through the game.mjs
+// facade; import it directly (world.mjs has no cloudflare:workers dependency, so it
+// loads cleanly under node:test + the sqlite3 D1 shim).
+async function importGetRoomPresence() {
+  const world = await import('../worker/game/world.mjs');
+  return world.getRoomPresence;
+}
+
 async function findTavernAndCalmRooms(game) {
   const worldDay = getWorldDay();
   let tavern = null;
@@ -113,6 +121,41 @@ test('Plan 013b: the daily reset culls yesterday\'s social cast', async () => {
 
     const left = await db.prepare("SELECT COUNT(*) AS n FROM users WHERE npcKind = 'social'").first();
     assert.equal(left.n, 0, 'yesterday\'s cast is gone');
+  } finally {
+    await db.close();
+  }
+});
+
+test('social-bodies: every spawned social NPC is bodied (brute) and aimable for called shots', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  const getRoomPresence = await importGetRoomPresence();
+  try {
+    const { tavern } = await findTavernAndCalmRooms(game);
+    assert.ok(tavern, 'expected at least one pub/inn room today');
+
+    await addHuman(db, game, 'aimer', tavern.row, tavern.col);
+    const spawn = await game.ensureSocialPopulation(db, tavern.row, tavern.col);
+    assert.ok(spawn.spawned >= 3, `spawned the roster (${spawn.spawned})`);
+
+    // Every spawned social NPC row carries a body plan (the humanoid 'brute'), never NULL —
+    // so a social NPC provoked into hostility can be targeted with a called shot.
+    const cast = await db.prepare(
+      "SELECT username, creatureBodyPlan FROM users WHERE isNpc = 1 AND npcKind = 'social'"
+    ).all();
+    assert.ok(cast.results.length >= 3);
+    for (const npc of cast.results) {
+      assert.equal(npc.creatureBodyPlan, 'brute', `${npc.username} is bodied (brute), not NULL`);
+    }
+
+    // getRoomPresence exposes the aimable humanoid part labels for a social NPC.
+    const presence = await getRoomPresence(db, tavern.row, tavern.col, getWorldDay());
+    const socialOccupant = presence.find(p => p.isNpc && p.npcKind === 'social');
+    assert.ok(socialOccupant, 'a social NPC is present in the room');
+    assert.ok(Array.isArray(socialOccupant.aimParts) && socialOccupant.aimParts.length > 0,
+      'a bodied social NPC has aimable parts');
+    assert.ok(socialOccupant.aimParts.includes('head') && socialOccupant.aimParts.includes('torso'),
+      'humanoid labels (head/torso) are present');
   } finally {
     await db.close();
   }
