@@ -26,6 +26,21 @@ async function hasCorpse(db, username) {
   return Boolean(row);
 }
 
+// Recreate a live `users` row from a grave's stored stats. The resurrected character
+// returns at baseline vitals (the grave only persists identity + progression: password,
+// job, level, gold), so health/stamina/attributes reset to starting values. Shared by
+// the free Cleric revival and the paid checkout fulfillment so the two paths can never
+// drift in what a resurrected body looks like.
+async function insertResurrectedUser(db, grave) {
+  await dbRun(
+    db,
+    `INSERT INTO users
+      (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold)
+     VALUES (?, ?, ?, 30, 30, 100, 100, 1, 1, 1, ?, ?)`,
+    [grave.username, grave.password || '', grave.job || 'Novice', grave.level || 0, grave.gold || 0]
+  );
+}
+
 // Plan 011: restore a dead player from their grave (a free, Cleric-driven revival).
 // Recreates the user, deletes the grave, consumes the corpse, clears the dead
 // session. No-op return when there's no grave. The caller (the Cleric ability) is
@@ -37,13 +52,7 @@ export async function revivePlayer(db, username, row, col) {
   }
   const liveUser = await dbFirst(db, 'SELECT username FROM users WHERE username = ?', [username]);
   if (!liveUser) {
-    await dbRun(
-      db,
-      `INSERT INTO users
-        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold)
-       VALUES (?, ?, ?, 30, 30, 100, 100, 1, 1, 1, ?, ?)`,
-      [grave.username, grave.password || '', grave.job || 'Novice', grave.level || 0, grave.gold || 0]
-    );
+    await insertResurrectedUser(db, grave);
   }
   await dbRun(db, 'DELETE FROM cemetery WHERE id = ?', [grave.id]);
   await dbRun(db, 'DELETE FROM items WHERE corpseOf = ?', [username]);
@@ -138,13 +147,7 @@ export async function fulfillResurrectionCheckout(db, token, stripeSessionId) {
 
   const liveUser = await dbFirst(db, 'SELECT username FROM users WHERE username = ?', [grave.username]);
   if (!liveUser) {
-    await dbRun(
-      db,
-      `INSERT INTO users
-        (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold)
-       VALUES (?, ?, ?, 30, 30, 100, 100, 1, 1, 1, ?, ?)`,
-      [grave.username, grave.password || '', grave.job || 'Novice', grave.level || 0, grave.gold || 0]
-    );
+    await insertResurrectedUser(db, grave);
   }
 
   await dbRun(db, 'DELETE FROM cemetery WHERE id = ?', [grave.id]);
