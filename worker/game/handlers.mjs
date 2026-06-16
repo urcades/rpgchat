@@ -368,11 +368,12 @@ async function validateCalledShot(db, message, targets, targetPart = null) {
   let aimable = false;
   for (const target of targets) {
     const full = await getUser(db, target.username, 'Target');
-    if (full.isNpc) {
-      continue;
-    }
-    // ensureBody instantiates the part rows if the target has never been read,
-    // so a fresh target's intact limb is aimable.
+    // Plan 021 fix: bodied NPCs (creatureBodyPlan set) are aimable like players — we no
+    // longer skip NPCs here (that was the pre-021 "NPCs are scalar" assumption, and it
+    // made EVERY called shot at an NPC throw "nothing left to aim at" on the /attack route).
+    // ensureBody returns null for a scalar NPC (no plan) → empty parts → correctly not
+    // aimable; it also instantiates rows for a never-hit target, so a fresh intact limb
+    // (player OR bodied NPC) is aimable, and a downed NPC's still-attached part is too.
     const parts = (await ensureBody(db, full)) || [];
     const part = parts.find(p => p.label === calledShot);
     if (part && !part.severed) {

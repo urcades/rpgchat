@@ -146,6 +146,38 @@ test('Plan 021 (1b): handleAttack honors a called shot vs a BODIED NPC end-to-en
   }
 });
 
+test('Plan 021 fix: handleAttackAction (the /attack ROUTE gate) accepts a toolbar called shot at a BODIED NPC — no "nothing left to aim at"', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  try {
+    const room = findCalmRoom(getWorldDay());
+    // Regression: validateCalledShot (only on handleAttackAction, the real /attack route — NOT
+    // the lower-level handleAttack the other 021 tests drive) used to `continue` past every NPC,
+    // so a toolbar called shot at ANY bodied NPC threw "There is nothing left to aim at." A brute
+    // Room Lurker with a roomy HP pool survives one head shot, so we can assert the hit LANDED.
+    await db.prepare(
+      `INSERT INTO users (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level)
+       VALUES ('hunter', 'pw', 'Fighter', 30, 30, 100, 100, 1, 8, 5, 4)`
+    ).run();
+    await game.updatePresence(db, 'hunter', room.row, room.col);
+    await seedBodiedNpc(db, game, { username: 'lurker', displayName: 'Room Lurker', plan: 'brute', health: 100, room, strength: 4 });
+
+    const headBefore = (await game.getBodyParts(db, 'lurker')).find(p => p.label === 'head');
+    // The toolbar passes the aimed limb as the 6th arg (targetPart) — the path the player hits.
+    // RNG (handleAttack per target): speed contest (0.0 hit), crit gate (0.99 none), pickTargetPart
+    // (0.5, consumed then overridden by the called shot).
+    await withMockedRandom([0.0, 0.99, 0.5, 0.5], () =>
+      game.handleAttackAction(db, 'hunter', room.row, room.col, '@lurker', 'head'));
+
+    const headAfter = (await game.getBodyParts(db, 'lurker')).find(p => p.label === 'head');
+    assert.ok(headAfter.hp < headBefore.hp, 'the route accepted the called shot and it landed on the head (no rejection)');
+    assert.ok(await db.prepare("SELECT username FROM users WHERE username = 'lurker'").first(), 'a modest head shot did not kill the high-HP lurker');
+    await assertNpcInvariant(db, 'lurker', 'after a route-level called shot on a bodied NPC');
+  } finally {
+    await db.close();
+  }
+});
+
 test('Plan 021 (2): the health == Σ hp invariant holds for a bodied NPC across several attacks', async () => {
   const db = await createMigratedDb();
   const game = await import('../worker/game.mjs');
