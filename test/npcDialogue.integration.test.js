@@ -161,9 +161,10 @@ test('Plan 013f: proactive ambient chatter — a present human gets murmurs, an 
     assert.equal(last.username, 'soc_amb_1');
     assert.equal(last.kind, 'npc');
 
-    // Throttled: an immediate second tick stays quiet.
+    // Pacing is the DO loop's job (wall-clock cadence), not this function's — so a
+    // direct second call emits again rather than being tick-throttled into silence.
     const second = await runNpcAmbient(db, STUB_AI, room.row, room.col);
-    assert.equal(second.spoke, false, 'ambient chatter is throttled per room');
+    assert.equal(second.spoke, true, 'the function itself emits each call; the loop paces it');
   } finally {
     await db.close();
   }

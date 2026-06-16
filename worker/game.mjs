@@ -97,7 +97,6 @@ const REGROW_EFFECT_TYPE = 'regrow';
 const HARMFUL_EFFECTS = new Set(['poison', 'arcane_pin', 'marked']);
 const AMBIENT_HOSTILE_RESPAWN_INTERVAL = 6;
 const NPC_VOICE_INTERVAL = 1; // Plan 013e: near-immediate replies — NPCs answer almost every line
-const NPC_AMBIENT_INTERVAL = 6; // Plan 013f: ticks between proactive ambient murmurs per room
 const NPC_HEAL_AMOUNT = 12; // Plan 013d: HP a friendly NPC cleric restores when tending a wounded asker
 // Plan 023b: the incapacitated negative-HP band. At 0 HP a player falls
 // incapacitated (deathClock 0); further blows and the passive pulse drive the
@@ -1378,8 +1377,8 @@ export async function runNpcReply(db, ai, row, col) {
 
 // Plan 013f: a proactive ambient murmur — NPCs talking among themselves so a room feels
 // inhabited even when the player is just watching. Runs from the room DO loop, ONLY with a
-// human present ("alive only when observed") and throttled to one line per room every
-// NPC_AMBIENT_INTERVAL ticks, so cost stays bounded. Fallback-first like every NPC line.
+// human present ("alive only when observed"); the loop's wall-clock cadence paces it so
+// cost stays bounded to occupied rooms. Fallback-first like every NPC line.
 export async function runNpcAmbient(db, ai, row, col) {
   const worldDay = getWorldDay();
   const currentTick = await getCurrentTickValue(db);
@@ -1390,16 +1389,9 @@ export async function runNpcAmbient(db, ai, row, col) {
     return { spoke: false };
   }
 
-  const cooldown = await dbFirst(
-    db,
-    `SELECT lastAppliedTick FROM roomEffectCooldowns
-     WHERE username = '__npc_ambient' AND roomRow = ? AND roomCol = ? AND effectType = 'npc_ambient' AND worldDay = ?`,
-    [row, col, worldDay]
-  );
-  if (!shouldApplyEffect({ currentTick, lastAppliedTick: cooldown ? cooldown.lastAppliedTick : null, interval: NPC_AMBIENT_INTERVAL })) {
-    return { spoke: false };
-  }
-
+  // Plan 013f: NO tick cooldown — ticks barely advance while a player idles, so a tick
+  // throttle would leave the room silent for minutes. The DO loop's wall-clock cadence is
+  // the throttle; this emits one murmur per call when observed.
   const speaker = npcs[Math.floor(Math.random() * npcs.length)];
   const recent = await getMessages(db, row, col, currentTick);
   const ecology = await getRoomEcology(db, speaker.username, row, col, worldDay, currentTick);
@@ -1418,7 +1410,6 @@ export async function runNpcAmbient(db, ai, row, col) {
     return { spoke: false };
   }
   await insertMessage(db, row, col, speaker.username, response.speech, 'npc');
-  await upsertCooldown(db, '__npc_ambient', row, col, 'npc_ambient', currentTick, worldDay);
   logEvent({ event: 'npc.ambient', roomRow: row, roomCol: col, npc: speaker.username, source: response.source });
   return { spoke: true, npc: speaker.username, speech: response.speech };
 }

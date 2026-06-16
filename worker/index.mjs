@@ -804,13 +804,14 @@ app.post('/room-presence/:row/:col', async c => {
     const presenceResult = await measureAsync(() => updatePresence(c.env.DB, auth.user.username, row, col));
     runAfterResponse(c, { action: 'presence', roomRow: row, roomCol: col }, async () => {
       const broadcast = await measureAsync(() => broadcastRoom(c.env, row, col, { type: 'presence', username: auth.user.username }));
-      const hostileLoop = await measureAsync(() => startHostileLoopIfNeeded(c.env, row, col));
-      // Plan 013b: a player entering a social room (pub/inn/guild) lazily summons its
-      // cast if it's under-staffed; re-broadcast so the newcomers appear immediately.
+      // Plan 013b/013f: populate the social cast FIRST, then wake the room loop — so
+      // roomNeedsLoop sees the freshly-spawned NPCs and starts proactive chatter on the
+      // very first entry (otherwise the loop check ran before anyone was in the room).
       const populated = await measureAsync(() => ensureSocialPopulation(c.env.DB, row, col));
       if (populated.value && populated.value.spawned > 0) {
         await broadcastRoom(c.env, row, col, { type: 'presence', username: auth.user.username });
       }
+      const hostileLoop = await measureAsync(() => startHostileLoopIfNeeded(c.env, row, col));
       logEvent({
         event: 'action.background',
         action: 'presence',
