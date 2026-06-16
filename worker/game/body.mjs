@@ -318,7 +318,7 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
   if (isBodylessUser(user)) {
     const nextHealth = Math.max(0, (user.health || 0) - damage);
     await dbRun(db, 'UPDATE users SET health = MAX(health - ?, 0) WHERE username = ?', [damage, user.username]);
-    return { died: nextHealth <= 0, npc: true, healthAfter: nextHealth, severedLabels: [], overkill: Math.max(0, damage - (user.health || 0)) };
+    return { died: nextHealth <= 0, npc: true, healthAfter: nextHealth, severedLabels: [], overkill: Math.max(0, damage - (user.health || 0)), struckLabel: null };
   }
 
   const partsBefore = await ensureBody(db, user);
@@ -437,7 +437,10 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
   const died = vitalDestroyed || healthAfter <= 0;
   // Plan 023b: `remaining` is damage that found no HP to land on — the overkill that
   // separates a barely-lethal blow (incapacitate) from an obliterating one (gib).
-  return { died, npc: false, healthAfter, severedLabels, overkill: Math.max(0, remaining) };
+  // `struckLabel` is the label of the part the blow actually landed on (the honored
+  // aimed part, or the weighted-random pickTargetPart choice) — purely informational,
+  // for flavor lines; null when there was no live part to hit.
+  return { died, npc: false, healthAfter, severedLabels, overkill: Math.max(0, remaining), struckLabel: target ? target.label : null };
 }
 
 export async function applyBodyHeal(db, user, amount, options = {}) {

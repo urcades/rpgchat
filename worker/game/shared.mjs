@@ -12,6 +12,7 @@ import ecologyModule from '../../utils/roomEcology.js';
 import levelingModule from '../../utils/leveling.js';
 import worldEventsModule from '../../utils/worldEvents.js';
 import bodyModule from '../../utils/body.js';
+import combatFlavorModule from '../../utils/combatFlavor.js';
 import itemsModule from '../../utils/items.js';
 import abilitiesModule from '../../utils/abilities.js';
 import progressionModule from '../../utils/progressionGrid.js';
@@ -111,6 +112,8 @@ const {
   CALLED_SHOT_HEAD_BONUS
 } = bodyModule;
 
+const { describeAttack } = combatFlavorModule;
+
 // Re-export the util destructures so every seam imports them from shared.
 export {
   // jobs
@@ -188,7 +191,9 @@ export {
   parseCalledShot,
   CALLED_SHOT_LABELS,
   CALLED_SHOT_HIT_PENALTY,
-  CALLED_SHOT_HEAD_BONUS
+  CALLED_SHOT_HEAD_BONUS,
+  // combat flavor (weapon- & part-aware attack lines)
+  describeAttack
 };
 
 export const PRESENCE_MAX_AGE_SECONDS = 45;

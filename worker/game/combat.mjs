@@ -21,6 +21,7 @@ import {
   baseCreatureName,
   buildAffixRoll,
   clampNumber,
+  describeAttack,
   escapeRegExp,
   getAbility,
   getActiveAbilitiesForJob,
@@ -64,6 +65,31 @@ import {
   roomHasEffect
 } from './world.mjs';
 
+
+// A deterministic, SELF-CONTAINED RNG for the cosmetic attack-flavor pick. It is
+// seeded from the blow's stable fields (attacker, target, tick, damage) so the verb/
+// part-noun choice varies attack-to-attack in production, yet is fully reproducible.
+// Crucially it draws from its OWN stream — NOT the global Math.random the combat
+// resolver uses — so injecting it into describeAttack consumes ZERO draws from the
+// mocked Math.random sequence every combat test seeds, leaving RNG order byte-stable.
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function flavorRandom(parts) {
+  const s = parts.join('|');
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < s.length; i += 1) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return mulberry32(h >>> 0);
+}
 
 export function calculateSpeedHitChance(attacker, target, attackerMods = null, targetMods = null, { hitDelta = 0, dodgeDelta = 0 } = {}) {
   const effectiveAttacker = getEffectiveUser(attacker, attackerMods);
@@ -155,6 +181,20 @@ export async function getAttackElement(db, username) {
     if (template && template.element) return template.element;
   }
   return null;
+}
+
+// The weapon class of a player's equipped HAND item (its template's weaponClass) —
+// drives the brutal flavor verb set in describeAttack. Mirrors getAttackElement but
+// scoped to the 'hand' slot (the weapon). Defaults to 'fist' when nothing is wielded.
+export async function getWeaponClass(db, username) {
+  const rows = await dbAll(db, 'SELECT templateId FROM items WHERE ownerUsername = ? AND equippedPartId IS NOT NULL', [username]);
+  for (const row of rows) {
+    const template = getTemplate(row.templateId);
+    if (template && template.slotType === 'hand' && template.weaponClass) {
+      return template.weaponClass;
+    }
+  }
+  return 'fist';
 }
 
 // Net affinity to `element` on the struck part: armor worn there (resist − / weak +)
@@ -403,8 +443,15 @@ export async function runHostileRoomAction(db, row, col) {
     row,
     col
   });
-  const hitText = isCriticalAttack ? 'critically hits' : 'attacks';
-  await insertSystemMessage(db, row, col, `${npc.displayName || npc.username} ${hitText} ${player.username} for ${damage} damage.`, 'combat');
+  await insertSystemMessage(db, row, col, describeAttack({
+    attacker: npc.displayName || npc.username,
+    target: player.username,
+    weaponClass: 'fist',
+    part: damageResult.struckLabel,
+    damage,
+    isCritical: isCriticalAttack,
+    targetDowned: Boolean(player.incapacitated)
+  }, flavorRandom([npc.username, player.username, tick.tick, damage, isCriticalAttack ? 'c' : ''])), 'combat');
 
   // Plan 021b: a creature's elemental bite lands its element's status on the player.
   // Plan 021 (BOLD): resolve by base name + Rending affix, so an elite still bites cold.
@@ -648,6 +695,10 @@ export async function handleAttack(db, username, message, row, col, options = {}
   const attackMessages = [];
 
   const attackerMods = attacker.isNpc ? null : await getConditionAndGearModifiers(db, username);
+  // Plan: the attacker's weapon class drives the brutal flavor verb set (blade/pierce/
+  // blunt/fist). Resolved ONCE before the targets loop, like the element is fetched.
+  // An unarmed attacker (or an NPC, who never wields a weaponClass item) → 'fist'.
+  const attackerWeaponClass = await getWeaponClass(db, username);
 
   // Stance and called shot are attacker-message-level (apply to every target in
   // this attack). NPCs have no parts, so a called shot only routes at player
@@ -725,9 +776,15 @@ export async function handleAttack(db, username, message, row, col, options = {}
     const attackedUser = await dbFirst(db, 'SELECT * FROM users WHERE username = ?', [user.username]);
     const remainingHealth = attackedUser ? attackedUser.health : 0;
     const wasKilled = damageResult.died;
-    const attackMessage = isCriticalAttack
-      ? `${username} landed a critical hit on ${targetName} for ${damage} damage!`
-      : `${username} attacked ${targetName} for ${damage} damage`;
+    const attackMessage = describeAttack({
+      attacker: username,
+      target: targetName,
+      weaponClass: attackerWeaponClass,
+      part: calledShot || damageResult.struckLabel,
+      damage,
+      isCritical: isCriticalAttack,
+      targetDowned: Boolean(target.incapacitated)
+    }, flavorRandom([username, user.username, createdTick, damage, isCriticalAttack ? 'c' : '']));
 
     attackMessages.push(attackMessage);
     // Best-effort aim: the named part was gone, so the blow landed where it could.

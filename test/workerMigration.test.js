@@ -513,7 +513,7 @@ test('Killing attack messages are shown before defeat and death system messages'
     // Plan 013f: a death-throes line now precedes the defeat line, and remains drop after,
     // so assert the ORDER (attack -> throes -> defeated) rather than fixed slice positions.
     const lines = messages.map(m => m.message);
-    const atkIdx = lines.findIndex(m => /fighter attacked Ash Scout for \d+ damage/.test(m));
+    const atkIdx = lines.findIndex(m => /fighter .*Ash Scout.*\(\d+\)/.test(m));
     const defeatIdx = lines.findIndex(m => m === 'Ash Scout is defeated by fighter.');
     assert.ok(atkIdx >= 0, 'attack line present');
     assert.ok(defeatIdx >= 0, 'defeat line present');
@@ -532,7 +532,7 @@ test('Killing attack messages are shown before defeat and death system messages'
     // lines. The ordering contract still holds: the attack line precedes the death line,
     // and the death line is last.
     const msgs = updatedMessages.map(m => m.message);
-    const attackIdx = msgs.findIndex(m => /fighter attacked rival for \d+ damage/.test(m));
+    const attackIdx = msgs.findIndex(m => /fighter .*\brival\b.*\(\d+\)/.test(m));
     const diedIdx = msgs.findIndex(m => m === 'rival has died from attack by fighter.');
     assert.ok(attackIdx >= 0, 'attack line present');
     assert.ok(diedIdx >= 0, 'death line present');
@@ -2512,7 +2512,7 @@ test('Plan 006: a called shot misses where an unaimed swing would land', async (
     // Unaimed at mark_b: chance 0.7, same roll 0.6 -> hit.
     const unaimed = await withMockedRandom([0.6, 0.99, 0.5], () =>
       handleAttack(db, 'sniper', 'I swing at @mark_b', calm.row, calm.col));
-    assert.match(unaimed, /sniper attacked mark_b/);
+    assert.match(unaimed, /sniper .*mark_b.*\(\d+\)/);
   } finally {
     await db.close();
   }
@@ -2716,7 +2716,7 @@ test('Plan 006: an aggressive attacker hits harder and lands where standing woul
     // hit (0.72 < 0.75), no crit (0.99), pick 0.5 -> left arm. damage 1+1 = 2.
     const rageHit = await withMockedRandom([0.72, 0.99, 0.5], () =>
       handleAttack(db, 'raging_atk', 'I jab @dummy_b', calm.row, calm.col));
-    assert.match(rageHit, /raging_atk attacked dummy_b/);
+    assert.match(rageHit, /raging_atk .*dummy_b.*\(2\)/);
     const dummyArm = (await getBodyParts(db, 'dummy_b')).find(p => p.label === 'left arm');
     assert.equal(dummyArm.hp, 2, 'aggressive attacker dealt 2 (base 1 + damageBonus 1)');
   } finally {

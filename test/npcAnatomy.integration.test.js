@@ -135,7 +135,7 @@ test('Plan 021 (1b): handleAttack honors a called shot vs a BODIED NPC end-to-en
     // no crit), pickTargetPart (0.5 → consumed, then OVERRIDDEN by the called shot).
     const out = await withMockedRandom([0.0, 0.99, 0.5], () =>
       game.handleAttack(db, 'hunter', 'aim for the left wing @wyrm', room.row, room.col));
-    assert.match(out, /hunter attacked Frost Wyrm/, 'the wyrm was struck');
+    assert.match(out, /hunter .*Frost Wyrm.*\(\d+\)/, 'the wyrm was struck');
     const wing = (await game.getBodyParts(db, 'wyrm')).find(p => p.label === 'left wing');
     assert.equal(wing.severed, 1, 'the called shot severed the named wing on the bodied NPC');
     const msg = await db.prepare("SELECT message FROM messages WHERE message = ?").bind("Frost Wyrm's left wing is destroyed.").first();
@@ -680,7 +680,7 @@ test('Plan 024-fix (server accepts the structured aim): handleAttack honors opti
     // as the (now-fixed) toolbar sends it for an NPC. RNG: speed (hit), crit (no), pick (consumed).
     const out = await withMockedRandom([0.0, 0.99, 0.5], () =>
       game.handleAttack(db, 'hunter', 'strike @wyrm', room.row, room.col, { targetPart: 'left wing' }));
-    assert.match(out, /hunter attacked Frost Wyrm/, 'the wyrm was struck');
+    assert.match(out, /hunter .*Frost Wyrm.*\(\d+\)/, 'the wyrm was struck');
     const wing = (await game.getBodyParts(db, 'wyrm')).find(p => p.label === 'left wing');
     assert.equal(wing.severed, 1, 'the structured targetPart severed the named wing on the bodied NPC');
   } finally {

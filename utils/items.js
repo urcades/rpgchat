@@ -18,17 +18,17 @@ const ITEM_TEMPLATES = [
   // Class signature items — granted equipped at signup, never drop.
   { templateId: 'beggars_cup', name: "Beggar's Cup", slotType: 'trinket', rarity: 'signature', modifiers: { intelligence: 1 }, dropWeight: 0 },
   { templateId: 'oath_plate', name: 'Oath Plate', slotType: 'torso', rarity: 'signature', modifiers: { maxHealth: 6 }, dropWeight: 0 },
-  { templateId: 'iron_cleaver', name: 'Iron Cleaver', slotType: 'hand', rarity: 'signature', modifiers: { strength: 1 }, dropWeight: 0 },
+  { templateId: 'iron_cleaver', name: 'Iron Cleaver', slotType: 'hand', rarity: 'signature', modifiers: { strength: 1 }, weaponClass: 'blade', dropWeight: 0 },
   { templateId: 'reagent_satchel', name: 'Reagent Satchel', slotType: 'trinket', rarity: 'signature', modifiers: { intelligence: 1, maxStamina: 5 }, dropWeight: 0 },
   { templateId: 'chalk_and_line', name: 'Chalk and Line', slotType: 'hand', rarity: 'signature', modifiers: { speed: 1 }, dropWeight: 0 },
   { templateId: 'humming_focus', name: 'Humming Focus', slotType: 'hand', rarity: 'signature', modifiers: { intelligence: 2, maxHealth: -3 }, dropWeight: 0 },
-  { templateId: 'hooked_knife', name: 'Hooked Knife', slotType: 'hand', rarity: 'signature', modifiers: { speed: 1, strength: 1 }, dropWeight: 0 },
+  { templateId: 'hooked_knife', name: 'Hooked Knife', slotType: 'hand', rarity: 'signature', modifiers: { speed: 1, strength: 1 }, weaponClass: 'pierce', dropWeight: 0 },
   { templateId: 'worn_psalter', name: 'Worn Psalter', slotType: 'trinket', rarity: 'signature', modifiers: { maxHealth: 3, intelligence: 1 }, dropWeight: 0 },
 
   // Common drop pool.
-  { templateId: 'rusty_knife', name: 'Rusty Knife', slotType: 'hand', rarity: 'common', modifiers: { strength: 1 }, dropWeight: 3 },
+  { templateId: 'rusty_knife', name: 'Rusty Knife', slotType: 'hand', rarity: 'common', modifiers: { strength: 1 }, weaponClass: 'pierce', dropWeight: 3 },
   { templateId: 'padded_vest', name: 'Padded Vest', slotType: 'torso', rarity: 'common', modifiers: { maxHealth: 3 }, dropWeight: 3 },
-  { templateId: 'cracked_buckler', name: 'Cracked Buckler', slotType: 'hand', rarity: 'common', modifiers: { maxHealth: 3 }, dropWeight: 2 },
+  { templateId: 'cracked_buckler', name: 'Cracked Buckler', slotType: 'hand', rarity: 'common', modifiers: { maxHealth: 3 }, weaponClass: 'blunt', dropWeight: 2 },
   { templateId: 'lucky_bone', name: 'Lucky Bone', slotType: 'trinket', rarity: 'common', modifiers: { speed: 1 }, dropWeight: 2 },
   { templateId: 'heavy_boots', name: 'Heavy Boots', slotType: 'leg', rarity: 'common', modifiers: { maxHealth: 6, speed: -1 }, dropWeight: 2 },
   { templateId: 'tattered_hood', name: 'Tattered Hood', slotType: 'head', rarity: 'common', modifiers: { intelligence: 1 }, dropWeight: 2 },
@@ -36,20 +36,20 @@ const ITEM_TEMPLATES = [
 
   // Rare drop pool.
   { templateId: 'wyrmscale_cloak', name: 'Wyrmscale Cloak', slotType: 'torso', rarity: 'rare', modifiers: { maxHealth: 9, speed: 1 }, affinity: { fire: -0.5 }, dropWeight: 1 },
-  { templateId: 'frostbitten_fang', name: 'Frostbitten Fang', slotType: 'hand', rarity: 'rare', modifiers: { strength: 3 }, dropWeight: 1 },
+  { templateId: 'frostbitten_fang', name: 'Frostbitten Fang', slotType: 'hand', rarity: 'rare', modifiers: { strength: 3 }, weaponClass: 'pierce', dropWeight: 1 },
   { templateId: 'coldlight_circlet', name: 'Coldlight Circlet', slotType: 'head', rarity: 'rare', modifiers: { intelligence: 3 }, dropWeight: 1 },
 
   // Plan 020b: skill-granting gear — equip to borrow another class's ability
   // (018c's grantsAbility). Appended so the weighted pick's first-rare is unchanged.
-  { templateId: 'venom_fang', name: 'Venom Fang', slotType: 'hand', rarity: 'rare', modifiers: { speed: 1 }, grantsAbility: 'mark', dropWeight: 1 },
+  { templateId: 'venom_fang', name: 'Venom Fang', slotType: 'hand', rarity: 'rare', modifiers: { speed: 1 }, weaponClass: 'pierce', grantsAbility: 'mark', dropWeight: 1 },
   { templateId: 'acolytes_censer', name: "Acolyte's Censer", slotType: 'trinket', rarity: 'rare', modifiers: { intelligence: 1 }, grantsAbility: 'bless', dropWeight: 1 },
   { templateId: 'spark_focus', name: 'Spark Focus', slotType: 'hand', rarity: 'rare', modifiers: { intelligence: 1 }, grantsAbility: 'arcane_pin', dropWeight: 1 },
 
   // Plan 020c: elemental gear. A weapon's `element` tags its hits (→ a status on the
   // struck part, model B). Armor's `affinity` resists (-) or worsens (+) an element
   // on the part it's worn on. Appended (rare/common) so weighted-pick firsts hold.
-  { templateId: 'flametongue', name: 'Flametongue', slotType: 'hand', rarity: 'rare', modifiers: { strength: 2 }, element: 'fire', dropWeight: 1 },
-  { templateId: 'frostbrand', name: 'Frostbrand', slotType: 'hand', rarity: 'rare', modifiers: { strength: 1, speed: 1 }, element: 'cold', dropWeight: 1 },
+  { templateId: 'flametongue', name: 'Flametongue', slotType: 'hand', rarity: 'rare', modifiers: { strength: 2 }, element: 'fire', weaponClass: 'blade', dropWeight: 1 },
+  { templateId: 'frostbrand', name: 'Frostbrand', slotType: 'hand', rarity: 'rare', modifiers: { strength: 1, speed: 1 }, element: 'cold', weaponClass: 'blade', dropWeight: 1 },
 
   // Plan 007: shop stock — one per SHOP_ITEM_CATALOG name (utils/roomEcology.js).
   // The economy floor: cheap, modest gear bought via /buy. Never drops
@@ -58,7 +58,7 @@ const ITEM_TEMPLATES = [
   { templateId: 'tin_flask', name: 'Tin Flask', slotType: 'trinket', rarity: 'shop', modifiers: { maxStamina: 5 }, dropWeight: 0 },
   { templateId: 'salted_bread', name: 'Salted Bread', slotType: 'consumable', category: 'consumable', rarity: 'shop', modifiers: {}, onUse: [{ kind: 'heal', amount: 8 }], dropWeight: 0 },
   { templateId: 'red_thread', name: 'Red Thread', slotType: 'trinket', rarity: 'shop', modifiers: { speed: 1, maxHealth: -3 }, dropWeight: 0 },
-  { templateId: 'chipped_knife', name: 'Chipped Knife', slotType: 'hand', rarity: 'shop', modifiers: { strength: 1 }, dropWeight: 0 },
+  { templateId: 'chipped_knife', name: 'Chipped Knife', slotType: 'hand', rarity: 'shop', modifiers: { strength: 1 }, weaponClass: 'pierce', dropWeight: 0 },
   { templateId: 'blue_candle', name: 'Blue Candle', slotType: 'hand', rarity: 'shop', modifiers: { intelligence: 1 }, dropWeight: 0 },
   { templateId: 'wax_seal', name: 'Wax Seal', slotType: 'trinket', rarity: 'shop', modifiers: { intelligence: 1 }, dropWeight: 0 },
   // Plan 018c: an item can grant an ability — equipping the scrap lets any class

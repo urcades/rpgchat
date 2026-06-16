@@ -100,7 +100,7 @@ test('Plan 006: a crouched defender dodges a hit a standing defender would take'
     // Standing defender, roll 0.65 -> hit (chance 0.70), no crit, pick 0.5 -> left arm.
     const landed = await withMockedRandom([0.65, 0.99, 0.5], () =>
       handleAttack(db, 'striker', 'I swing at @stander', calm.row, calm.col));
-    assert.match(landed, /striker attacked stander/, 'standing defender is struck');
+    assert.match(landed, /striker .*stander.*\(1\)/, 'standing defender is struck for 1');
     const standerArm = (await getBodyParts(db, 'stander')).find(p => p.label === 'left arm');
     assert.equal(standerArm.hp, 3, 'standing defender took the 1 damage (4 -> 3)');
 
@@ -135,7 +135,7 @@ test('Plan 024: an explicit aimed part (targeting toolbar) routes the hit to tha
     const landed = await withMockedRandom([0.5, 0.99, 0.5], () =>
       handleAttack(db, 'sniper', 'I swing at @mark left arm', calm.row, calm.col, { targetPart: 'head' }));
 
-    assert.match(landed, /sniper attacked mark for 2 damage/, 'base 1 + aimed-head bonus 1 = 2 damage');
+    assert.match(landed, /sniper .*mark.*\(2\)/, 'base 1 + aimed-head bonus 1 = 2 damage');
     assert.doesNotMatch(landed, /\bhead\b/i, 'the aimed limb never appears in the chat prose');
 
     const parts = await getBodyParts(db, 'mark');
