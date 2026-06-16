@@ -309,6 +309,7 @@ export async function getRoomPresence(db, row, col, worldDay) {
             u.deathClock,
             u.disposition,
             u.role,
+            u.health,
             rp.lastSeenTick
      FROM roomPresence rp
      JOIN users u ON u.username = rp.username

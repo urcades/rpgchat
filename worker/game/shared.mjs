@@ -28,6 +28,7 @@ const {
 const {
   getAbility,
   getInnateAbilityIds,
+  getActiveAbilitiesForJob,
   resolveAbilityStaminaCost,
   riteRankFromCasts,
   RITE_RANK_MAX
@@ -104,6 +105,7 @@ export {
   // abilities
   getAbility,
   getInnateAbilityIds,
+  getActiveAbilitiesForJob,
   resolveAbilityStaminaCost,
   riteRankFromCasts,
   RITE_RANK_MAX,
@@ -174,6 +176,12 @@ export const REGROW_EFFECT_TYPE = 'regrow';
 export const HARMFUL_EFFECTS = new Set(['poison', 'arcane_pin', 'marked']);
 export const AMBIENT_HOSTILE_RESPAWN_INTERVAL = 6;
 export const NPC_VOICE_INTERVAL = 1; // Plan 013e: near-immediate replies — NPCs answer almost every line
+// Campaign B (013 tail): proactive ambient murmurs are owner-locked to OBSERVE+THROTTLE
+// (no hard cap). Unlike the near-immediate reply path, an idle-but-watched room must NOT
+// drip a billed inference every loop — gate ambient chatter on this per-room tick interval
+// (the room's own coords on the upsertCooldown/shouldApplyEffect rails). Bigger than the
+// reply interval on purpose: replies are reactive (a human just spoke), ambient is filler.
+export const AMBIENT_VOICE_INTERVAL = 5;
 export const NPC_HEAL_AMOUNT = 12; // Plan 013d: HP a friendly NPC cleric restores when tending a wounded asker
 // Plan 023b: the incapacitated negative-HP band. At 0 HP a player falls
 // incapacitated (deathClock 0); further blows and the passive pulse drive the

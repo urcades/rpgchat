@@ -215,3 +215,77 @@ test('Plan 013c: with no model, a threatening line still provokes via the keywor
     await db.close();
   }
 });
+
+// --- Campaign B (013 tail): cost monitoring (owner-locked: observe + throttle). The NPC
+// dialogue paths tag each line with `billed` (true only for a real, billed inference), and
+// the ambient path now carries a per-room cooldown so a watched-idle room can't drip an
+// inference every loop. logEvent writes through console.log, so capture that to read the tag.
+
+function captureLogEvents(fn) {
+  const real = console.log;
+  const events = [];
+  console.log = (payload) => { if (payload && typeof payload === 'object' && payload.event) events.push(payload); };
+  return Promise.resolve()
+    .then(fn)
+    .finally(() => { console.log = real; })
+    .then(() => events);
+}
+
+test('Campaign B (cost): a model line is billed, a fallback line is not', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  try {
+    const room = findCalmRoom(getWorldDay());
+    await addHuman(db, game, 'patron', room.row, room.col);
+    await addSocialNpc(db, game, 'soc_bar_billed', 'Mara', 'friendly', 'barmaid', room.row, room.col);
+    await humanSays(db, 'patron', room.row, room.col, 'lovely evening, another ale please');
+
+    // A working model → source 'model' → billed: true.
+    const modelAi = { run: async () => ({ response: '{"speech":"Coming right up.","intent":"friendly","request":"none"}' }) };
+    const modelEvents = await captureLogEvents(() => game.runNpcReply(db, modelAi, room.row, room.col));
+    const modelReply = modelEvents.find(e => e.event === 'npc.reply');
+    assert.ok(modelReply, 'a reply event was logged');
+    assert.equal(modelReply.source, 'model');
+    assert.equal(modelReply.billed, true, 'a model inference is billed');
+
+    // No binding → source 'fallback:no-binding' → billed: false. Use a fresh line + room so
+    // the reply cooldown (NPC_VOICE_INTERVAL) does not suppress this second reply.
+    const room2 = { row: room.row, col: room.col + 1 };
+    await addHuman(db, game, 'patron2', room2.row, room2.col);
+    await addSocialNpc(db, game, 'soc_bar_fb', 'Sil', 'friendly', 'barmaid', room2.row, room2.col);
+    await humanSays(db, 'patron2', room2.row, room2.col, 'good evening to you');
+    const fbEvents = await captureLogEvents(() => game.runNpcReply(db, null, room2.row, room2.col));
+    const fbReply = fbEvents.find(e => e.event === 'npc.reply');
+    assert.ok(fbReply, 'a reply event was logged for the fallback path');
+    assert.match(fbReply.source, /^fallback:/);
+    assert.equal(fbReply.billed, false, 'a fallback line is never billed');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Campaign B (cost): the per-room ambient cooldown blocks a back-to-back murmur', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  try {
+    const room = findCalmRoom(getWorldDay());
+    await addHuman(db, game, 'watcher', room.row, room.col);
+    await addSocialNpc(db, game, 'soc_amb_1', 'Mara', 'friendly', 'barmaid', room.row, room.col);
+    const ai = { run: async () => ({ response: '{"speech":"Quiet night.","intent":"friendly","request":"none"}' }) };
+
+    // First murmur lands and stamps the per-room ambient cooldown.
+    const first = await game.runNpcAmbient(db, ai, room.row, room.col);
+    assert.equal(first.spoke, true, 'the first ambient murmur is emitted');
+
+    // An immediate second call is throttled (ticks have not advanced past AMBIENT_VOICE_INTERVAL).
+    const second = await game.runNpcAmbient(db, ai, room.row, room.col);
+    assert.equal(second.spoke, false, 'the back-to-back ambient murmur is suppressed');
+    assert.equal(second.throttled, true, 'and it reports the throttle, not an empty room');
+
+    // Only ONE npc line was inserted (the throttled call never reached insertMessage).
+    const lines = await db.prepare("SELECT COUNT(*) AS n FROM messages WHERE kind = 'npc' AND roomRow = ? AND roomCol = ?").bind(room.row, room.col).first();
+    assert.equal(lines.n, 1, 'the throttle prevented a second inserted murmur');
+  } finally {
+    await db.close();
+  }
+});

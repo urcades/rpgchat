@@ -125,10 +125,13 @@ test('Plan 013f: proactive ambient chatter — a present human gets murmurs, an 
     assert.equal(last.username, 'soc_amb_1');
     assert.equal(last.kind, 'npc');
 
-    // Pacing is the DO loop's job (wall-clock cadence), not this function's — so a
-    // direct second call emits again rather than being tick-throttled into silence.
+    // Campaign B (013 tail) cost monitoring (owner-locked): the ambient path now carries a
+    // per-room cooldown (AMBIENT_VOICE_INTERVAL) so a watched-idle room can't drip a billed
+    // inference every loop. A back-to-back call is throttled into silence (it never reaches
+    // the model), reporting `throttled` rather than an empty-room `spoke:false`.
     const second = await runNpcAmbient(db, STUB_AI, room.row, room.col);
-    assert.equal(second.spoke, true, 'the function itself emits each call; the loop paces it');
+    assert.equal(second.spoke, false, 'the back-to-back ambient call is throttled (cost control)');
+    assert.equal(second.throttled, true, 'and it reports the throttle, not an empty room');
   } finally {
     await db.close();
   }

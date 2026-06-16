@@ -6,6 +6,7 @@
 // dereferenced at module load).
 
 import {
+  AMBIENT_VOICE_INTERVAL,
   NPC_HEAL_AMOUNT,
   NPC_VOICE_INTERVAL,
   abilitiesModule,
@@ -175,7 +176,10 @@ export async function runNpcReply(db, ai, row, col) {
   });
   // Diagnostic (2026-06-15): surface whether the line came from the model or a fallback,
   // and why — the failure used to be swallowed silently, hiding a non-working binding.
-  logEvent({ event: 'npc.reply', roomRow: row, roomCol: col, npc: speaker.username, source: response.source, error: response.error });
+  // Campaign B (013 tail) cost monitoring (owner-locked: OBSERVE, no hard cap): `billed`
+  // is true only when an inference was actually billed (source === 'model'); a fallback
+  // line ('fallback:*') costs nothing. Aggregating this in the logs is how cost is watched.
+  logEvent({ event: 'npc.reply', roomRow: row, roomCol: col, npc: speaker.username, source: response.source, billed: response.source === 'model', error: response.error });
   if (!response.speech) {
     return { spoke: false, provoked };
   }
@@ -239,9 +243,23 @@ export async function runNpcAmbient(db, ai, row, col) {
     return { spoke: false };
   }
 
-  // Plan 013f: NO tick cooldown — ticks barely advance while a player idles, so a tick
-  // throttle would leave the room silent for minutes. The DO loop's wall-clock cadence is
-  // the throttle; this emits one murmur per call when observed.
+  // Campaign B (013 tail) cost monitoring (owner-locked: OBSERVE + THROTTLE, no hard cap):
+  // the ambient path used to have NO per-room cooldown — a watched-idle room dripped a
+  // (billed) inference every DO loop. Gate it on a per-room ambient cooldown (the existing
+  // upsertCooldown/shouldApplyEffect rails, the room's own coords, effectType 'npc_ambient',
+  // interval AMBIENT_VOICE_INTERVAL) so back-to-back murmurs are throttled. Checked BEFORE
+  // generation, so a throttled room costs nothing. The reply path keeps its own (tighter)
+  // cooldown — replies are reactive, ambient is filler.
+  const ambientCooldown = await dbFirst(
+    db,
+    `SELECT lastAppliedTick FROM roomEffectCooldowns
+     WHERE username = '__npc_ambient' AND roomRow = ? AND roomCol = ? AND effectType = 'npc_ambient' AND worldDay = ?`,
+    [row, col, worldDay]
+  );
+  if (!shouldApplyEffect({ currentTick, lastAppliedTick: ambientCooldown ? ambientCooldown.lastAppliedTick : null, interval: AMBIENT_VOICE_INTERVAL })) {
+    return { spoke: false, throttled: true };
+  }
+
   const speaker = npcs[Math.floor(Math.random() * npcs.length)];
   const recent = await getMessages(db, row, col, currentTick);
   const ecology = await getRoomEcology(db, speaker.username, row, col, worldDay, currentTick);
@@ -260,6 +278,11 @@ export async function runNpcAmbient(db, ai, row, col) {
     return { spoke: false };
   }
   await insertMessage(db, row, col, speaker.username, response.speech, 'npc');
-  logEvent({ event: 'npc.ambient', roomRow: row, roomCol: col, npc: speaker.username, source: response.source });
+  // Stamp the cooldown only after a murmur actually lands (mirrors the reply path), so a
+  // generation that yielded nothing doesn't burn the room's ambient window.
+  await upsertCooldown(db, '__npc_ambient', row, col, 'npc_ambient', currentTick, worldDay);
+  // `billed`: true only when the line came from a real (billed) inference, false on a
+  // fallback — the cost signal the owner watches.
+  logEvent({ event: 'npc.ambient', roomRow: row, roomCol: col, npc: speaker.username, source: response.source, billed: response.source === 'model' });
   return { spoke: true, npc: speaker.username, speech: response.speech };
 }

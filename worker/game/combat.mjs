@@ -21,6 +21,7 @@ import {
   clampNumber,
   escapeRegExp,
   getAbility,
+  getActiveAbilitiesForJob,
   getAttackTrace,
   getEffectiveUser,
   getPhaseFromTick,
@@ -54,6 +55,7 @@ import { bumpRiteMastery, getUsableAbilityIds, upsertCooldown } from './progress
 import {
   advanceGlobalTick,
   getCurrentTickValue,
+  getRoomPresence,
   getUser,
   resolveExpiredGamblingRounds,
   roomHasEffect
@@ -195,6 +197,88 @@ export async function applyElementOnHit(db, { attacker, target, element, partLab
   return { element, status: statusType, magnitude };
 }
 
+// Campaign B (013 tail): a hostile NPC's offensive ability kit. Three pure guards
+// decide it; the engine — never a name — owns targeting, so a flipped social NPC can
+// threaten with its job abilities but can NEVER turn a beneficial one on the player.
+
+// Whether a hostile may use this ability AT ALL. The "scarier support" set: a hostile
+// is allowed self-buffs, ally buffs/heals, and offensive abilities — but NEVER a
+// 'corpse'-target (a hostile must never `revive`). Default-deny: unknown targets out.
+export function isHostileUsable(ability) {
+  if (!ability) {
+    return false;
+  }
+  if (ability.kind === 'passive') {
+    return false;
+  }
+  return ability.target === 'enemy' || ability.target === 'self' || ability.target === 'none' || ability.target === 'ally';
+}
+
+// The kit a hostile NPC draws from. 021 monsters are UNCHANGED — a non-empty
+// CREATURE_ABILITIES entry (keyed by displayName) takes precedence and is returned
+// byte-identical (an array of ability ids). Otherwise derive from the NPC's JOB: every
+// active ability the job grants, filtered to the hostile-usable set. A jobless / unkitted
+// NPC yields [] → the caller falls to basic attacks.
+export function getHostileKit(npc) {
+  const creatureKit = CREATURE_ABILITIES[npc.displayName];
+  if (creatureKit && creatureKit.length) {
+    return creatureKit;
+  }
+  return getActiveAbilitiesForJob(npc.job)
+    .filter(isHostileUsable)
+    .map(ability => ability.id);
+}
+
+// THE hard safety guard. The ability's declared `target` — set by the ENGINE in the
+// 018 registry, never inferred from a name — decides who a hostile cast lands on:
+//   enemy → the player (the only path that EVER returns the player)
+//   self  → the casting NPC
+//   ally  → the most-wounded OTHER hostile NPC in the room, else the caster itself
+//           (NEVER the player — a hostile heal/buff can never benefit you)
+//   none  → the caster (the resolver is ignored by the behavior)
+//   anything else → null → the caller SKIPS the cast (default-deny).
+// INVARIANT: a non-'enemy' ability can NEVER resolve onto the player.
+export function resolveHostileTarget(ability, npc, player, alliedHostiles = []) {
+  if (!ability) {
+    return null;
+  }
+  switch (ability.target) {
+    case 'enemy':
+      return player.username;
+    case 'self':
+    case 'none':
+      return npc.username;
+    case 'ally': {
+      const candidates = (alliedHostiles || []).filter(a => a && a.username !== npc.username);
+      if (candidates.length === 0) {
+        return npc.username;
+      }
+      // Most-wounded first (lowest health), so a hostile cleric's heal goes where it
+      // helps the mob most; ties are stable by username for determinism.
+      const mostWounded = candidates
+        .slice()
+        .sort((a, b) => (Number(a.health) || 0) - (Number(b.health) || 0) || String(a.username).localeCompare(String(b.username)))[0];
+      return mostWounded.username;
+    }
+    default:
+      return null;
+  }
+}
+
+// The allied hostiles a caster may buff/heal: every OTHER NPC sharing the room that is
+// itself hostile and still standing. Used by resolveHostileTarget for 'ally' abilities —
+// the player is never in this set, so an 'ally' cast can never touch them.
+async function getAlliedHostiles(db, row, col, casterUsername) {
+  const worldDay = getWorldDay();
+  const presence = await getRoomPresence(db, row, col, worldDay);
+  return presence
+    .filter(p => p.isNpc
+      && p.username !== casterUsername
+      && (p.disposition === null || p.disposition === undefined || p.disposition === 'hostile')
+      && !p.incapacitated)
+    .map(p => ({ username: p.username, health: Number(p.health) }));
+}
+
 export async function runHostileRoomAction(db, row, col) {
   const tick = await advanceGlobalTick(db);
   const worldDay = getWorldDay();
@@ -233,28 +317,41 @@ export async function runHostileRoomAction(db, row, col) {
     return { tick, acted: false };
   }
 
-  // Plan 021b: a creature with an ability kit CASTS on alternating ticks — drawn
-  // from the 018 registry and invoked via runAbility (the same resolver players use),
-  // with a display-named actor so the messages read well. Other ticks fall through
-  // to the basic attack below.
-  const kit = CREATURE_ABILITIES[npc.displayName] || [];
+  // Plan 021b + Campaign B (013 tail): a hostile with an ability kit CASTS on alternating
+  // ticks — drawn from the 018 registry and invoked via runAbility (the same resolver
+  // players use), with a display-named actor so the messages read well. 021 monsters keep
+  // their CREATURE_ABILITIES kit byte-identical; a flipped social NPC derives its kit from
+  // its JOB (getHostileKit). Targeting is decided by the ENGINE via ability.target
+  // (resolveHostileTarget), never by name — so a non-'enemy' ability can NEVER land on the
+  // player (a hostile cleric heals/buffs itself or an allied hostile, throws offense at you,
+  // but never benefits you). Other ticks fall through to the basic attack below.
+  const kit = getHostileKit(npc);
   if (kit.length && tick.tick % 2 === 0) {
     const abilityId = kit[Math.floor(tick.tick / 2) % kit.length];
-    const actorName = npc.displayName || npc.username;
-    const effectiveActor = { ...getEffectiveUser(npc), username: actorName };
-    try {
-      await runAbility(db, abilityId, {
-        username: actorName,
-        effectiveActor,
-        target: player.username,
-        row,
-        col,
-        currentTick: tick.tick,
-        phase: getPhaseFromTick(tick.tick)
-      });
-      return { tick, acted: true, target: player.username, cast: abilityId };
-    } catch (err) {
-      // Any ability error → fall through to a basic attack.
+    const ability = getAbility(abilityId);
+    const alliedHostiles = ability && ability.target === 'ally'
+      ? await getAlliedHostiles(db, row, col, npc.username)
+      : [];
+    const target = resolveHostileTarget(ability, npc, player, alliedHostiles);
+    // Default-deny: an ability whose target the engine can't safely resolve (e.g. 'corpse')
+    // is SKIPPED — we never improvise a target. Falls through to the basic attack.
+    if (target !== null) {
+      const actorName = npc.displayName || npc.username;
+      const effectiveActor = { ...getEffectiveUser(npc), username: actorName };
+      try {
+        await runAbility(db, abilityId, {
+          username: actorName,
+          effectiveActor,
+          target,
+          row,
+          col,
+          currentTick: tick.tick,
+          phase: getPhaseFromTick(tick.tick)
+        });
+        return { tick, acted: true, target, cast: abilityId };
+      } catch (err) {
+        // Any ability error → fall through to a basic attack.
+      }
     }
   }
 
@@ -885,9 +982,13 @@ export async function runAbility(db, abilityId, { username, effectiveActor, targ
       return { message };
     }
     case 'brace': {
-      // Self only — ward the actor regardless of any selected target.
+      // Self only — ward the actor. `target` is the engine-resolved self: for a player
+      // cast getSkillTarget returns the invoker (target === username, byte-identical);
+      // for an NPC cast resolveHostileTarget('self') returns the NPC's real username, so
+      // the ward lands on the NPC's row (not its opaque-vs-display-name mismatch). The
+      // message still reads by the actor's name (username = display name for NPCs).
       await addStatusEffect(db, {
-        username,
+        username: target || username,
         source: username,
         effectType: 'ward',
         magnitude: 1,
