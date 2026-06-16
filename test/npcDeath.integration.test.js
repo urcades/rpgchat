@@ -113,14 +113,88 @@ test('Plan 013f: a dying NPC begs, and a surviving bystander reacts in horror', 
     await addSocialNpc(db, game, 'soc:victim', 'Mara', 'friendly', room.row, room.col);
     await addSocialNpc(db, game, 'soc:witness', 'Joss', 'friendly', room.row, room.col);
 
-    const victim = await db.prepare("SELECT * FROM users WHERE username = 'soc:victim'").first();
-    await game.defeatNpc(db, victim, { killer: 'killer', row: room.row, col: room.col, currentTick: 1 });
+    // Plan 013g: NPCs go through the band like players. A killing blow DOWNS Mara — she
+    // gasps a plea (incapacitation), not an instant death.
+    await game.descendTowardDeath(db, 'soc:victim', { cause: 'attack by killer', row: room.row, col: room.col, blowDamage: 6, overkill: 2, currentTick: 1 });
+    const throes = await db.prepare("SELECT message FROM messages WHERE message LIKE 'Mara falls, gasping:%' LIMIT 1").first();
+    assert.ok(throes, 'the downed NPC gasped a plea');
+    const down = await db.prepare("SELECT incapacitated FROM users WHERE username = 'soc:victim'").first();
+    assert.equal(down.incapacitated, 1, 'Mara is downed, not yet dead');
 
-    const throes = await db.prepare("SELECT message FROM messages WHERE message LIKE 'Mara chokes out:%' LIMIT 1").first();
-    assert.ok(throes, 'the dying NPC gasped a last plea');
-    // The surviving witness (friendly => horror) reacts, attributed to them by name.
+    // A finishing blow ends her (true death -> defeatNpc), and the surviving witness reacts.
+    await game.descendTowardDeath(db, 'soc:victim', { cause: 'attack by killer', row: room.row, col: room.col, blowDamage: 20, overkill: 20, currentTick: 2 });
+    assert.equal(await db.prepare("SELECT username FROM users WHERE username = 'soc:victim'").first(), null, 'Mara is truly dead');
     const reaction = await db.prepare("SELECT message FROM messages WHERE message LIKE 'Joss:%' ORDER BY id DESC LIMIT 1").first();
     assert.ok(reaction, 'a bystander reacted to the death');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 013g: a killing blow DOWNS an NPC (not instant death); a finisher ends it with loot', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  try {
+    const room = findCalmRoom(getWorldDay());
+    await addHuman(db, game, 'slayer', room.row, room.col);
+    await addSocialNpc(db, game, 'soc:thug', 'Grix', 'hostile', room.row, room.col);
+
+    // Modest blow (overkill under the gib threshold) -> DOWNED, not dead.
+    await game.descendTowardDeath(db, 'soc:thug', { cause: 'attack by slayer', row: room.row, col: room.col, blowDamage: 6, overkill: 2, currentTick: 1 });
+    const downed = await db.prepare("SELECT incapacitated, health FROM users WHERE username = 'soc:thug'").first();
+    assert.ok(downed, 'still present — downed, not deleted');
+    assert.equal(downed.incapacitated, 1);
+    assert.equal(downed.health, 0);
+    const lootBefore = await db.prepare("SELECT COUNT(*) AS n FROM items WHERE name = 'Monster Remains'").first();
+    assert.equal(lootBefore.n, 0, 'no remains while still clinging on');
+
+    // A finishing gib ends them via defeatNpc — loot/remains drop now.
+    await game.descendTowardDeath(db, 'soc:thug', { cause: 'attack by slayer', row: room.row, col: room.col, blowDamage: 20, overkill: 20, currentTick: 2 });
+    assert.equal(await db.prepare("SELECT username FROM users WHERE username = 'soc:thug'").first(), null, 'truly dead');
+    const remains = await db.prepare("SELECT COUNT(*) AS n FROM items WHERE name = 'Monster Remains'").first();
+    assert.ok(remains.n >= 1, 'defeatNpc dropped remains on true death');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 013g: a downed NPC bleeds out on the tick and then truly dies (defeatNpc)', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  try {
+    const room = findCalmRoom(getWorldDay());
+    await addHuman(db, game, 'witness', room.row, room.col);
+    await addSocialNpc(db, game, 'soc:bleeder', 'Mara', 'hostile', room.row, room.col);
+    await game.descendTowardDeath(db, 'soc:bleeder', { cause: 'attack by witness', row: room.row, col: room.col, blowDamage: 6, overkill: 2, currentTick: 1 });
+    assert.equal((await db.prepare("SELECT incapacitated FROM users WHERE username = 'soc:bleeder'").first()).incapacitated, 1);
+
+    // The downed NPC bleeds out on the world tick (0 -> -30 at -1/tick), then defeatNpc.
+    for (let i = 0; i < 31; i += 1) {
+      await game.processIncapacitationBleed(db, 2 + i);
+    }
+    assert.equal(await db.prepare("SELECT username FROM users WHERE username = 'soc:bleeder'").first(), null, 'bled out to true death');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 013g: an NPC that kills a player is credited in the graveyard (kill attribution)', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  try {
+    const room = findCalmRoom(getWorldDay());
+    await addHuman(db, game, 'victim', room.row, room.col);
+    await game.getUserState(db, 'victim');
+
+    // Bren (an NPC) downs then finishes the player; the cause carries Bren's display name.
+    await game.descendTowardDeath(db, 'victim', { cause: 'attack by Bren', row: room.row, col: room.col, blowDamage: 6, overkill: 2, currentTick: 1 });
+    await game.descendTowardDeath(db, 'victim', { cause: 'attack by Bren', row: room.row, col: room.col, blowDamage: 20, overkill: 20, currentTick: 2 });
+
+    assert.equal(await db.prepare("SELECT username FROM users WHERE username = 'victim'").first(), null, 'the player is dead');
+    const kill = await db.prepare("SELECT killerUsername, defeatedKind FROM killHistory WHERE defeatedUsername = 'victim'").first();
+    assert.ok(kill, 'the kill was recorded');
+    assert.equal(kill.killerUsername, 'Bren', 'the NPC slayer is credited (graveyard shows it)');
+    assert.equal(kill.defeatedKind, 'player');
   } finally {
     await db.close();
   }

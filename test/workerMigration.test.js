@@ -588,8 +588,8 @@ test('Killing attack messages are shown before defeat and death system messages'
     assert.ok(atkIdx < defeatIdx, 'attack precedes defeat');
     assert.ok(lines.some(m => /Ash Scout leaves behind remains\./.test(m)), 'remains dropped');
     assert.ok(
-      lines.some((m, i) => i < defeatIdx && /Ash Scout (lets out|collapses|shudders|crumples)/.test(m)),
-      'a death-throes line precedes the defeat'
+      lines.some((m, i) => i < defeatIdx && /Ash Scout (is torn apart|lets out|collapses|shudders|crumples)/.test(m)),
+      'a death-throes/gib line precedes the defeat'
     );
 
     await withMockedRandom([0.1, 0.99], () => handleAttackAction(db, 'fighter', calm.row, calm.col, '@rival'));
@@ -2356,9 +2356,10 @@ test('Plan 005: defeating an NPC drops loot onto the room floor', async () => {
   const { createNpcForEvent, handleAttack, updatePresence } = await import('../worker/game.mjs');
 
   try {
-    // Fast, present attacker so the speed contest can be won with a low roll;
-    // strength 1 deals 1 damage, enough to drop a 1-HP NPC in one blow.
-    await seedLiveUser(db, 'looter', { job: 'Fighter', health: 30, maxHealth: 30, speed: 20, strength: 1 });
+    // Plan 013g: NPCs now go through the incapacitation band, so a weak blow only DOWNS
+    // them. A heavy hit (strength 60 -> 16 base damage, overkill >= the gib threshold)
+    // kills outright in one blow, which is what this loot-on-defeat test needs.
+    await seedLiveUser(db, 'looter', { job: 'Fighter', health: 30, maxHealth: 30, speed: 20, strength: 60 });
     const calm = findCalmRoom(getWorldDay());
     await updatePresence(db, 'looter', calm.row, calm.col);
     await createNpcForEvent(db, {

@@ -1187,18 +1187,6 @@ const CREATURE_DEATH_RATTLES = ['lets out a final shriek', 'collapses with a wet
 const NPC_HORROR = ['Gods — they killed {who}!', 'Murder! Murder, here!', 'Someone help — {who} is dead!', 'No… no, not like this.'];
 const NPC_GLOAT = ['Justice, at last.', 'The cur had it coming.', 'One less troublemaker in here.', 'Let that be a lesson.'];
 
-// A dying NPC's last gasp — begging + gurgling for people, a death-rattle for beasts.
-async function emitNpcDeathThroes(db, npc, row, col, deferred = null) {
-  const name = npc.displayName || npc.username;
-  if (npc.npcKind === 'social') {
-    const beg = NPC_DEATH_BEGS[Math.floor(Math.random() * NPC_DEATH_BEGS.length)];
-    await emitSystemMessage(db, row, col, `${name} chokes out: "${garbleSpeech(beg)}"`, deferred, 'death');
-  } else {
-    const rattle = CREATURE_DEATH_RATTLES[Math.floor(Math.random() * CREATURE_DEATH_RATTLES.length)];
-    await emitSystemMessage(db, row, col, `${name} ${rattle}.`, deferred, 'death');
-  }
-}
-
 // The surviving social NPCs react to a death: horror over an ally or an innocent; grim
 // gloating when the room had already turned hostile on the deceased (a "criminal").
 async function emitDeathReaction(db, { row, col, deadName, deadWasNpc, deferred = null }) {
@@ -1554,21 +1542,55 @@ export async function moveUserToCemetery(db, username, cause, row, col, options 
 // body gives out entirely — health and every part drop to 0 so the death clock (not
 // stray limb HP) is the single measure of the life left in them. This also keeps the
 // `users.health == Σ part hp` invariant exact (0 == 0) through the downed state.
-async function incapacitate(db, username, cause, row, col, { currentTick = null, deferredSystemMessages = null } = {}) {
+// Plan 023b/013g: down a combatant — player OR NPC — into the bleeding-out band. Body
+// zeroed so the death clock is the sole measure of remaining life. Players scatter their
+// gear and have body parts to zero; NPCs are bodyless and drop loot only on true death, so
+// they just gasp a plea (social) or a broken rattle (beast) and fall.
+async function incapacitate(db, user, cause, row, col, { currentTick = null, deferredSystemMessages = null } = {}) {
+  const name = user.displayName || user.username;
   await dbRun(
     db,
     "UPDATE users SET incapacitated = 1, deathClock = 0, downedCause = ?, stance = 'prone', health = 0 WHERE username = ?",
-    [cause, username]
+    [cause, user.username]
   );
-  await dbRun(db, 'UPDATE bodyParts SET hp = 0 WHERE username = ?', [username]);
-  await dbRun(db, 'DELETE FROM statusEffects WHERE username = ?', [username]); // falling clears chill/burn/etc.
-  // Items spill NOW, while they still draw breath — the vulnerability is the point.
-  const dropped = await dropPlayerItemsOnDeath(db, username, row, col);
-  if (dropped > 0) {
-    await emitSystemMessage(db, row, col, `${username}'s belongings spill across the floor as they fall.`, deferredSystemMessages, 'death');
+  await dbRun(db, 'DELETE FROM statusEffects WHERE username = ?', [user.username]); // falling clears chill/burn/etc.
+  if (user.isNpc) {
+    if (user.npcKind === 'social') {
+      const beg = NPC_DEATH_BEGS[Math.floor(Math.random() * NPC_DEATH_BEGS.length)];
+      await emitSystemMessage(db, row, col, `${name} falls, gasping: "${garbleSpeech(beg)}"`, deferredSystemMessages, 'death');
+    } else {
+      const rattle = CREATURE_DEATH_RATTLES[Math.floor(Math.random() * CREATURE_DEATH_RATTLES.length)];
+      await emitSystemMessage(db, row, col, `${name} ${rattle}, barely clinging on.`, deferredSystemMessages, 'death');
+    }
+  } else {
+    await dbRun(db, 'UPDATE bodyParts SET hp = 0 WHERE username = ?', [user.username]);
+    // Items spill NOW, while they still draw breath — the vulnerability is the point.
+    const dropped = await dropPlayerItemsOnDeath(db, user.username, row, col);
+    if (dropped > 0) {
+      await emitSystemMessage(db, row, col, `${name}'s belongings spill across the floor as they fall.`, deferredSystemMessages, 'death');
+    }
+    await emitSystemMessage(db, row, col, `${name} collapses in a spreading pool of blood, unable to stand.`, deferredSystemMessages, 'death');
   }
-  await emitSystemMessage(db, row, col, `${username} collapses in a spreading pool of blood, unable to stand.`, deferredSystemMessages, 'death');
-  await createTrace(db, { row, col, traceType: 'body', intensity: 2, attacker: getKillerFromCause(cause), target: username, createdTick: currentTick ?? 0, expiryTick: null, worldDay: getWorldDay() });
+  await createTrace(db, { row, col, traceType: 'body', intensity: 2, attacker: getKillerFromCause(cause), target: user.username, createdTick: currentTick ?? 0, expiryTick: null, worldDay: getWorldDay() });
+}
+
+// Plan 013g: the true-death router. NPCs end via defeatNpc (loot, remains, kill credit,
+// room reaction) — never a cemetery/corpse. Players go to the grave (or gib).
+async function finishOff(db, user, { cause, row, col, currentTick = null, gib = false, deferredSystemMessages = null } = {}) {
+  if (user.isNpc) {
+    const killer = getKillerFromCause(cause) || 'their wounds';
+    if (gib) {
+      await emitSystemMessage(db, row, col, `${user.displayName || user.username} is torn apart.`, deferredSystemMessages, 'death');
+      await createTrace(db, { row, col, traceType: 'body', intensity: 3, attacker: killer, target: user.username, createdTick: currentTick ?? 0, expiryTick: null, worldDay: getWorldDay() });
+    }
+    await defeatNpc(db, user, { killer, row, col, currentTick, deferredSystemMessages });
+    return;
+  }
+  if (gib) {
+    await gibAndKill(db, user.username, cause, row, col, { currentTick, deferredSystemMessages });
+  } else {
+    await trueDeath(db, user.username, cause, row, col, { currentTick, deferredSystemMessages });
+  }
 }
 
 // True death without dismemberment — a finishing blow on the downed, or a bleed-out.
@@ -1605,18 +1627,21 @@ async function gibAndKill(db, username, cause, row, col, { currentTick = null, d
 // The single decision point every combat death site calls. `blowDamage` is the
 // blow's intended damage; `overkill` is damage that spilled past a live body.
 export async function descendTowardDeath(db, username, { cause, row, col, blowDamage = 0, overkill = 0, currentTick = null, deferredSystemMessages = null } = {}) {
-  const u = await dbFirst(db, 'SELECT username, incapacitated, deathClock FROM users WHERE username = ? AND isNpc = 0', [username]);
+  // Plan 013g: players AND NPCs descend through the same band — load the full row so
+  // finishOff/incapacitate can branch on isNpc.
+  const u = await dbFirst(db, 'SELECT * FROM users WHERE username = ?', [username]);
   if (!u) {
     return { state: 'gone' };
   }
   const gib = overkill >= GIB_OVERKILL || blowDamage >= GIB_OVERKILL;
+  const name = u.displayName || u.username;
 
   if (!u.incapacitated) {
     if (gib) {
-      await gibAndKill(db, username, cause, row, col, { currentTick, deferredSystemMessages });
+      await finishOff(db, u, { cause, row, col, currentTick, gib: true, deferredSystemMessages });
       return { state: 'gibbed' };
     }
-    await incapacitate(db, username, cause, row, col, { currentTick, deferredSystemMessages });
+    await incapacitate(db, u, cause, row, col, { currentTick, deferredSystemMessages });
     return { state: 'incapacitated' };
   }
 
@@ -1624,15 +1649,11 @@ export async function descendTowardDeath(db, username, { cause, row, col, blowDa
   const loss = Math.max(INCAP_BLOW_MIN, blowDamage);
   const next = u.deathClock - loss;
   if (gib || next <= DEATH_FLOOR) {
-    if (gib) {
-      await gibAndKill(db, username, cause, row, col, { currentTick, deferredSystemMessages });
-    } else {
-      await trueDeath(db, username, cause, row, col, { currentTick, deferredSystemMessages });
-    }
+    await finishOff(db, u, { cause, row, col, currentTick, gib, deferredSystemMessages });
     return { state: gib ? 'gibbed' : 'died' };
   }
   await dbRun(db, 'UPDATE users SET deathClock = ? WHERE username = ?', [next, username]);
-  await emitSystemMessage(db, row, col, `${username} is struck where they lie — life pooling out (${next}/${DEATH_FLOOR}).`, deferredSystemMessages, 'death');
+  await emitSystemMessage(db, row, col, `${name} is struck where they lie — life pooling out (${next}/${DEATH_FLOOR}).`, deferredSystemMessages, 'death');
   return { state: 'bleeding', deathClock: next };
 }
 
@@ -1650,12 +1671,14 @@ async function reviveFromIncapacitation(db, username, row, col) {
 // player loses INCAP_BLEED_PER_PULSE from their clock and truly dies at the floor.
 // Queries users directly (not via roomPresence) so a disconnected body still bleeds.
 export async function processIncapacitationBleed(db, currentTick = null) {
+  // Plan 013g: players AND downed NPCs bleed out here. SELECT u.* so finishOff can route a
+  // bled-out NPC to defeatNpc and a player to the grave.
   const downed = await dbAll(
     db,
-    `SELECT u.username, u.deathClock, u.downedCause, rp.roomRow, rp.roomCol
+    `SELECT u.*, rp.roomRow, rp.roomCol
      FROM users u
      LEFT JOIN roomPresence rp ON rp.username = u.username
-     WHERE u.incapacitated = 1 AND u.isNpc = 0`
+     WHERE u.incapacitated = 1`
   );
   for (const d of downed) {
     const row = d.roomRow ?? 0;
@@ -1663,13 +1686,13 @@ export async function processIncapacitationBleed(db, currentTick = null) {
     const next = d.deathClock - INCAP_BLEED_PER_TICK;
     if (next <= DEATH_FLOOR) {
       const cause = d.downedCause ? `bled out after ${d.downedCause}` : 'bled out';
-      await trueDeath(db, d.username, cause, row, col, { currentTick });
+      await finishOff(db, d, { cause, row, col, currentTick });
     } else {
       await dbRun(db, 'UPDATE users SET deathClock = ? WHERE username = ?', [next, d.username]);
-      // Plan 013e: the health bar now shows the falling count live, so the room only gets
-      // an occasional gasp (every ~5 points) instead of a line every single tick.
+      // Plan 013e: the health bar shows the falling count live, so the room only gets an
+      // occasional gasp (every ~5 points) instead of a line every single tick.
       if (next % 5 === 0) {
-        await insertSystemMessage(db, row, col, `${d.username} bleeds, fading (${next}/${DEATH_FLOOR}).`, 'death');
+        await insertSystemMessage(db, row, col, `${d.displayName || d.username} bleeds, fading (${next}/${DEATH_FLOOR}).`, 'death');
       }
     }
   }
@@ -1739,11 +1762,10 @@ async function recordKill(db, {
     return;
   }
 
-  const killerUser = await dbFirst(db, 'SELECT username, isNpc FROM users WHERE username = ?', [killer]);
-  if (!killerUser || killerUser.isNpc) {
-    return;
-  }
-
+  // Plan 013g: record the killer by whatever name the cause carries — a player's username
+  // OR an NPC's display name (the slayer field "by X" is already a display name post-013e).
+  // This credits NPC kills of players in the graveyard; player kill-COUNTS still match by
+  // username (an NPC display name simply won't collide with any player's tally).
   await dbRun(
     db,
     `INSERT INTO killHistory
@@ -2052,9 +2074,8 @@ export async function defeatNpc(db, npc, { killer, row, col, currentTick, deferr
     currentTick
   });
 
-  // Plan 013f: NPCs die like players now — a last gasp before they fall.
-  await emitNpcDeathThroes(db, npc, row, col, deferredSystemMessages);
-
+  // Plan 013g: the dying gasp/beg happened when they were downed (incapacitate); defeatNpc
+  // is the true death — removal, loot, kill credit, and the room's reaction.
   await dbRun(db, 'DELETE FROM users WHERE username = ? AND isNpc = 1', [npc.username]);
   await dbRun(db, 'DELETE FROM roomPresence WHERE username = ?', [npc.username]);
   await dbRun(db, 'DELETE FROM statusEffects WHERE username = ?', [npc.username]);
@@ -2968,16 +2989,9 @@ async function damageUser(db, username, amount, cause, row, col) {
   const nextHealth = result.healthAfter;
 
   if (result.died) {
-    if (target.isNpc) {
-      // NPCs still die instantly; the health>0 guard avoids a double-defeat.
-      if (target.health > 0) {
-        await defeatNpc(db, target, { killer: cause.replace(/.* by /, ''), row, col, currentTick: await getCurrentTickValue(db) });
-      }
-      return { killed: true, remainingHealth: 0 };
-    }
-    // Plan 023b: a player doesn't die here — they descend. descendTowardDeath reads
-    // their incapacitated state and either downs them, hastens the clock, or finishes
-    // them (true death / gib). recordKill now fires inside trueDeath, once, on actual death.
+    // Plan 013g: players AND NPCs descend through the same band — descendTowardDeath reads
+    // the incapacitated state and either downs them, hastens the clock, or finishes them
+    // (true death / gib), routing an NPC's end to defeatNpc and a player's to the grave.
     const outcome = await descendTowardDeath(db, username, {
       cause,
       row,
@@ -3797,18 +3811,10 @@ export async function handleAttack(db, username, message, row, col, options = {}
       worldDay
     });
 
-    if (wasKilled && attackedUser.isNpc) {
-      await defeatNpc(db, attackedUser, {
-        killer: username,
-        row,
-        col,
-        currentTick: createdTick,
-        deferredSystemMessages: options.deferredSystemMessages
-      });
-    } else if (wasKilled) {
-      // Plan 023b: the blow downs (or gibs/finishes) — it doesn't auto-entomb. The
-      // overkill from applyBodyDamage decides incapacitate vs. instant gib; a blow on
-      // an already-downed body hastens their death clock. recordKill fires in trueDeath.
+    if (wasKilled) {
+      // Plan 013g: players AND NPCs descend through the same band — the blow downs them
+      // (begging, bleeding); a finishing blow or a gib ends them. descendTowardDeath routes
+      // an NPC's true death to defeatNpc and a player's to the grave.
       await descendTowardDeath(db, user.username, {
         cause: `attack by ${username}`,
         row,
