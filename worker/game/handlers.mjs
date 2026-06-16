@@ -18,11 +18,14 @@ import {
   getPhaseFromTick,
   getWorldDay,
   parseCalledShot,
-  resolveAbilityStaminaCost
+  resolveAbilityStaminaCost,
+  riteRankFromCasts,
+  shouldApplyEffect
 } from './shared.mjs';
 import { changes, dbFirst, dbRun } from '../db.mjs';
 import { ensureBody } from './body.mjs';
 import {
+  RITE_COOLDOWN_EFFECT_PREFIX,
   handleAttack,
   handleRollCommand,
   useClassSkill,
@@ -49,6 +52,7 @@ import {
 import { insertMessage, insertSystemMessage } from './messages.mjs';
 import {
   awardGoldMaybe,
+  getRiteMastery,
   getUsableAbilityIds,
   runPlayerAction,
   switchJob,
@@ -404,16 +408,53 @@ export async function handleAttackAction(db, username, row, col, message, target
   });
 }
 
+// Plan 012 (tail): the per-ability rite cooldown gate. Mirrors /regrow's
+// SELECT-then-assert against roomEffectCooldowns, on the same rail
+// (effectType 'rite:<abilityId>', pseudo-room 0,0, keyed by worldDay). Runs inside
+// handleSkillAction's validate — BEFORE spendStamina — so a blocked rite costs NO
+// stamina and does NOT advance the tick. Only abilities that declare cooldownTicks
+// are gated; every existing skill (no cooldownTicks) is untouched.
+async function assertRiteOffCooldown(db, username, ability, currentTick) {
+  if (!ability || !Number.isFinite(ability.cooldownTicks) || ability.cooldownTicks <= 0) {
+    return;
+  }
+  const worldDay = getWorldDay();
+  const cooldown = await dbFirst(
+    db,
+    `SELECT lastAppliedTick FROM roomEffectCooldowns
+     WHERE username = ? AND roomRow = 0 AND roomCol = 0 AND effectType = ? AND worldDay = ?`,
+    [username, RITE_COOLDOWN_EFFECT_PREFIX + ability.id, worldDay]
+  );
+  const ready = shouldApplyEffect({
+    currentTick,
+    lastAppliedTick: cooldown ? cooldown.lastAppliedTick : null,
+    interval: ability.cooldownTicks
+  });
+  assertAction(ready, 'That rite is still gathering — wait a few ticks.', 429);
+}
+
 export async function handleSkillAction(db, username, row, col, skillId, targetUsername, actionTick, incantation = '') {
   await assertActable(db, username); // Plan 023b: the downed cannot invoke skills (incl. their own rescue).
+  const ability = getAbility(skillId);
+  // Plan 012 (tail): mastery rank (derived from the player's cumulative successful
+  // casts of THIS ability — never stored) raises the rite's power AND lifts its
+  // word cap. Non-rite skills carry no mastery row, so rank is 0 and the cost is
+  // unchanged. NPCs never reach this handler (player-only entrypoint).
+  const rank = riteRankFromCasts(await getRiteMastery(db, username, skillId));
   // Plan 018c: cost is data-driven — base plus any linguistic surcharge from the
   // typed incantation. Every ability defaults to 1 stamina with no prose, so this
   // is parity today; plan 012 supplies linguistic abilities and the prose path.
-  const staminaCost = resolveAbilityStaminaCost(getAbility(skillId), { text: incantation });
+  // Plan 012 (tail): rank lifts the linguistic word cap (rank 0 = byte-identical).
+  const staminaCost = resolveAbilityStaminaCost(ability, { text: incantation, rank });
   return runPlayerAction(db, {
     username,
     staminaCost,
-    validate: async () => validateClassSkillUse(db, { username, skillId, targetUsername }),
+    validate: async () => {
+      // Cooldown gate fires BEFORE stamina is spent: a blocked rite throws 429 here,
+      // so runPlayerAction never reaches spendStamina or advanceTick.
+      await assertRiteOffCooldown(db, username, ability, actionTick);
+      return validateClassSkillUse(db, { username, skillId, targetUsername });
+    },
     perform: async () => useClassSkill(db, {
       username,
       skillId,
@@ -422,7 +463,8 @@ export async function handleSkillAction(db, username, row, col, skillId, targetU
       col,
       currentTick: actionTick,
       phase: getPhaseFromTick(actionTick),
-      incantation
+      incantation,
+      rank
     }),
     advanceTick: () => advanceGlobalTick(db)
   });

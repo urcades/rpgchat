@@ -28,7 +28,9 @@ const {
 const {
   getAbility,
   getInnateAbilityIds,
-  resolveAbilityStaminaCost
+  resolveAbilityStaminaCost,
+  riteRankFromCasts,
+  RITE_RANK_MAX
 } = abilitiesModule;
 
 // Re-exported as a whole because npcCanRevive (npc seam) calls
@@ -103,6 +105,8 @@ export {
   getAbility,
   getInnateAbilityIds,
   resolveAbilityStaminaCost,
+  riteRankFromCasts,
+  RITE_RANK_MAX,
   // progression grid
   getDailyBoard,
   getGridNode,

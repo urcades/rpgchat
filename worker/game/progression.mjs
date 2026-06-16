@@ -120,6 +120,38 @@ export async function upsertCooldown(db, username, row, col, effectType, current
   );
 }
 
+// --- Plan 012 (tail): rite mastery -----------------------------------------
+// Per-player, per-incantation-ability cumulative successful-cast count. Rank is
+// DERIVED from this count (utils/abilities.riteRankFromCasts) and never stored;
+// the table is persistent (survives the daily reset, death, and a job change — it
+// is NOT swept by cleanupOldWorldDayData and has no worldDay). An absent row is
+// rank 0. Writes are PLAYER-ONLY (guarded by the caller) so an NPC casting a
+// future linguistic ability never accrues mastery under its opaque username.
+
+// The cumulative successful-cast count for this player + ability (0 if none yet).
+export async function getRiteMastery(db, username, abilityId) {
+  const row = await dbFirst(
+    db,
+    'SELECT casts FROM riteMastery WHERE username = ? AND abilityId = ?',
+    [username, abilityId]
+  );
+  return row ? Number(row.casts) || 0 : 0;
+}
+
+// Increment the cast count by one (insert-or-bump). Returns the new count. Call
+// only on the player-cast path, once per SUCCESSFUL cast (deterministic).
+export async function bumpRiteMastery(db, username, abilityId) {
+  await dbRun(
+    db,
+    `INSERT INTO riteMastery (username, abilityId, casts)
+     VALUES (?, ?, 1)
+     ON CONFLICT(username, abilityId) DO UPDATE SET
+      casts = casts + 1`,
+    [username, abilityId]
+  );
+  return getRiteMastery(db, username, abilityId);
+}
+
 // --- Plan 019b: the daily progression grid --------------------------------
 // ONE shared board generated per worldDay from a Penrose tiling (utils/progression
 // Grid.js). Daily builds: your point budget is your LEVEL, re-spent each day;

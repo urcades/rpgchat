@@ -104,9 +104,11 @@ export {
 export {
   allocateAttributePoint,
   assertEnoughStamina,
+  bumpRiteMastery,
   getAllocatableStats,
   getGrantedAbilityIds,
   getProgressionGrid,
+  getRiteMastery,
   respecProgression,
   runPlayerAction,
   spendStamina,

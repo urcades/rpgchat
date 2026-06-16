@@ -86,3 +86,127 @@ test('Plan 012: /cast requires a target and a rite to cast', async () => {
     await db.close();
   }
 });
+
+// --- Plan 012 (tail): rite caps/cadence + mastery curve --------------------
+
+test('Plan 012 (tail): riteRankFromCasts is a deterministic log2 climb capped at 5', () => {
+  assert.equal(abilities.RITE_RANK_MAX, 5);
+  const cases = [[0, 0], [1, 1], [3, 2], [7, 3], [15, 4], [31, 5], [1e6, 5]];
+  for (const [casts, rank] of cases) {
+    assert.equal(abilities.riteRankFromCasts(casts), rank, `casts ${casts} → rank ${rank}`);
+  }
+});
+
+test('Plan 012 (tail): mastery rank lifts the linguistic word cap (rank 0 is byte-identical)', () => {
+  const bolt = abilities.getAbility('word_bolt');
+  const verbose = 'a '.repeat(40); // 40 words — well over any cap
+  // rank 0: cap stays 12 → 1 + 12 = 13 (parity with the no-rank path).
+  assert.equal(abilities.resolveAbilityStaminaCost(bolt, { text: verbose, rank: 0 }), 13, 'rank 0 cap = 12');
+  // rank 3: cap lifts by rank*2 = 6 → 12 + 6 = 18 → 1 + 18 = 19.
+  assert.equal(abilities.resolveAbilityStaminaCost(bolt, { text: verbose, rank: 3 }), 19, 'rank 3 cap = 18');
+  // A short rite never hits the cap, so rank doesn't change it.
+  assert.equal(abilities.resolveAbilityStaminaCost(bolt, { text: 'burn the foul wretch', rank: 3 }), 5, 'under cap → rank-invariant');
+});
+
+test('Plan 012 (tail): the rite cooldown blocks an immediate second cast (429) and spends NO stamina', async () => {
+  const db = await createMigratedDb();
+  const { handleCastAction, getUserState, updatePresence } = await import('../worker/game.mjs');
+  try {
+    const calm = findCalmRoom(getWorldDay());
+    await seedUser(db, 'mage', 'Mage', 10);
+    await seedUser(db, 'dummy', 'Novice', 1);
+    await updatePresence(db, 'mage', calm.row, calm.col);
+    await updatePresence(db, 'dummy', calm.row, calm.col);
+    await getUserState(db, 'dummy');
+
+    // First cast lands (forced hit) — costs 1 + 3 words = 4 stamina and stamps the cooldown.
+    await withForcedHit(() => handleCastAction(db, 'mage', calm.row, calm.col, '/cast searing wrath unbound @dummy'));
+    const afterFirst = (await getUserState(db, 'mage')).effectiveStats.stamina;
+    assert.equal(afterFirst, 100 - 4, 'first cast spent the scaled stamina');
+
+    // Immediate second cast is gated BEFORE stamina is spent → 429, no spend, no tick.
+    const tickBefore = (await db.prepare('SELECT value FROM tick WHERE id = 1').bind().first()).value;
+    await assert.rejects(
+      () => handleCastAction(db, 'mage', calm.row, calm.col, '/cast searing wrath unbound @dummy'),
+      (err) => err.statusCode === 429 && /gathering/i.test(err.message)
+    );
+    const afterBlocked = (await getUserState(db, 'mage')).effectiveStats.stamina;
+    assert.equal(afterBlocked, afterFirst, 'a blocked rite spends NO stamina');
+    const tickAfter = (await db.prepare('SELECT value FROM tick WHERE id = 1').bind().first()).value;
+    assert.equal(tickAfter, tickBefore, 'a blocked rite does NOT advance the tick');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 012 (tail): the rite cooldown clears after cooldownTicks', async () => {
+  const db = await createMigratedDb();
+  const { handleCastAction, getUserState, updatePresence } = await import('../worker/game.mjs');
+  try {
+    const calm = findCalmRoom(getWorldDay());
+    await seedUser(db, 'mage', 'Mage', 10);
+    await seedUser(db, 'dummy', 'Novice', 1);
+    await updatePresence(db, 'mage', calm.row, calm.col);
+    await updatePresence(db, 'dummy', calm.row, calm.col);
+    await getUserState(db, 'dummy');
+
+    // First cast at tick 0 stamps the cooldown (cooldownTicks = 5).
+    await withForcedHit(() => handleCastAction(db, 'mage', calm.row, calm.col, '/cast searing wrath unbound @dummy'));
+    // Jump the world clock to exactly cooldownTicks past the stamp.
+    await db.prepare('UPDATE tick SET value = ? WHERE id = 1').bind(abilities.getAbility('word_bolt').cooldownTicks).run();
+
+    const before = (await getUserState(db, 'dummy')).effectiveStats.health;
+    await withForcedHit(() => handleCastAction(db, 'mage', calm.row, calm.col, '/cast searing wrath unbound @dummy'));
+    const after = (await getUserState(db, 'dummy')).effectiveStats.health;
+    assert.ok(before - after > 0, 'the rite fires again once the cooldown has elapsed');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 012 (tail): mastery rank 3 (casts=7) makes a 3-word bolt deal 2+3+3=8 with (rank 3) in the line', async () => {
+  const db = await createMigratedDb();
+  const { handleCastAction, getUserState, updatePresence } = await import('../worker/game.mjs');
+  try {
+    const calm = findCalmRoom(getWorldDay());
+    await seedUser(db, 'mage', 'Mage', 10);
+    await seedUser(db, 'dummy', 'Novice', 1);
+    await updatePresence(db, 'mage', calm.row, calm.col);
+    await updatePresence(db, 'dummy', calm.row, calm.col);
+    await getUserState(db, 'dummy');
+
+    // Seed 7 prior casts → riteRankFromCasts(7) = 3.
+    await db.prepare('INSERT INTO riteMastery (username, abilityId, casts) VALUES (?, ?, ?)').bind('mage', 'word_bolt', 7).run();
+
+    const before = (await getUserState(db, 'dummy')).effectiveStats.health;
+    await withForcedHit(() => handleCastAction(db, 'mage', calm.row, calm.col, '/cast searing wrath unbound @dummy'));
+    const after = (await getUserState(db, 'dummy')).effectiveStats.health;
+    // 3 words + rank 3 → 2 + 3 + 3 = 8.
+    assert.equal(before - after, 8, 'damage = 2 + words(3) + rank(3)');
+
+    const line = await db.prepare("SELECT message FROM messages WHERE message LIKE 'mage incants%' ORDER BY id DESC LIMIT 1").bind().first();
+    assert.match(line.message, /8 damage/);
+    assert.match(line.message, /\(rank 3\)/, 'rank is folded into the existing rite line');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Plan 012 (tail): a successful cast increments the mastery cast count 0 → 1', async () => {
+  const db = await createMigratedDb();
+  const { handleCastAction, getUserState, updatePresence, getRiteMastery } = await import('../worker/game.mjs');
+  try {
+    const calm = findCalmRoom(getWorldDay());
+    await seedUser(db, 'mage', 'Mage', 10);
+    await seedUser(db, 'dummy', 'Novice', 1);
+    await updatePresence(db, 'mage', calm.row, calm.col);
+    await updatePresence(db, 'dummy', calm.row, calm.col);
+    await getUserState(db, 'dummy');
+
+    assert.equal(await getRiteMastery(db, 'mage', 'word_bolt'), 0, 'no mastery before the first cast');
+    await withForcedHit(() => handleCastAction(db, 'mage', calm.row, calm.col, '/cast searing wrath unbound @dummy'));
+    assert.equal(await getRiteMastery(db, 'mage', 'word_bolt'), 1, 'a successful cast bumps casts to 1');
+  } finally {
+    await db.close();
+  }
+});

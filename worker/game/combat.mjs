@@ -50,7 +50,7 @@ import { descendTowardDeath } from './death.mjs';
 import { getSocketedMateriaEffects } from './inventory.mjs';
 import { createTrace, insertSystemMessage } from './messages.mjs';
 import { provokeRoomNpcs } from './npc.mjs';
-import { getUsableAbilityIds } from './progression.mjs';
+import { bumpRiteMastery, getUsableAbilityIds, upsertCooldown } from './progression.mjs';
 import {
   advanceGlobalTick,
   getCurrentTickValue,
@@ -678,16 +678,30 @@ async function tryHarmfulSkillHit(db, { effectiveActor, target, skillLabel, row,
   return false;
 }
 
-export async function useClassSkill(db, { username, skillId, targetUsername, row, col, currentTick, phase, incantation = '' }) {
+export async function useClassSkill(db, { username, skillId, targetUsername, row, col, currentTick, phase, incantation = '', rank = 0 }) {
   const { effectiveActor, target } = await validateClassSkillUse(db, { username, skillId, targetUsername });
-  return runAbility(db, skillId, { username, effectiveActor, target, row, col, currentTick, phase, incantation });
+  // isPlayerCast = true: this is the player-invoked path (the only caller of
+  // useClassSkill). It authorizes the rite-mastery + cooldown writes in runAbility,
+  // which must NEVER fire for an NPC caster (whose username is an opaque id).
+  return runAbility(db, skillId, { username, effectiveActor, target, row, col, currentTick, phase, incantation, rank, isPlayerCast: true });
+}
+
+// Plan 012 (tail): stamp the per-ability rite cooldown on the same rail /regrow
+// uses — effectType 'rite:<abilityId>', pseudo-room (0,0) (rooms are 1-indexed so
+// 0,0 never collides), keyed by worldDay. The gate that READS this lives in
+// handleSkillAction's validate (before stamina is spent). Player-only — the caller
+// guards on isPlayerCast.
+export const RITE_COOLDOWN_EFFECT_PREFIX = 'rite:';
+
+async function stampRiteCooldown(db, username, abilityId, currentTick) {
+  await upsertCooldown(db, username, 0, 0, RITE_COOLDOWN_EFFECT_PREFIX + abilityId, currentTick, getWorldDay());
 }
 
 // The ability resolver: behavior keyed by ability id, callable by any invoker (a
 // player class skill today; an equipped item or an NPC tomorrow — plans 018c/021).
 // Behavior parity with the per-class switch it replaced: identical formulas,
 // messages, and message kinds. Validation and targeting happen in the caller.
-export async function runAbility(db, abilityId, { username, effectiveActor, target, row, col, currentTick, phase, incantation = '' }) {
+export async function runAbility(db, abilityId, { username, effectiveActor, target, row, col, currentTick, phase, incantation = '', rank = 0, isPlayerCast = false }) {
   switch (abilityId) {
     case 'scrounge': {
       const gold = 1 + Math.max(1, Math.floor(effectiveActor.intelligence / 2));
@@ -924,18 +938,32 @@ export async function runAbility(db, abilityId, { username, effectiveActor, targ
     case 'word_bolt': {
       // Plan 012: the rite's power scales with the incantation's word count (its
       // stamina cost already scaled, in handleSkillAction). Language as mechanics.
+      // Plan 012 (tail): mastery adds rank to the damage and lifts the word cap;
+      // the per-ability cooldown is stamped once the rite FIRES (hit or miss — the
+      // gathering is spent either way), and mastery accrues only on a LANDED cast.
+      // Both writes are PLAYER-ONLY (isPlayerCast) — an NPC casting this would never
+      // touch the cooldown or mastery tables under its opaque username.
       const hit = await tryHarmfulSkillHit(db, { effectiveActor, target, skillLabel: 'Word Bolt', row, col });
+      if (isPlayerCast) {
+        await stampRiteCooldown(db, username, abilityId, currentTick);
+      }
       if (!hit) {
         return { message: `${target} dodged ${username}'s Word Bolt.`, missed: true };
       }
       const words = String(incantation || '').trim().split(/\s+/).filter(Boolean).length;
-      const damage = 2 + words;
+      const masteryRank = Math.max(0, Math.floor(Number(rank) || 0));
+      const damage = 2 + words + masteryRank;
       const result = await damageUser(db, target, damage, `word bolt by ${username}`, row, col);
+      if (isPlayerCast) {
+        await bumpRiteMastery(db, username, abilityId);
+      }
+      // Mastery surfaces MINIMALLY — folded into the existing rite line only.
+      const rankTag = masteryRank > 0 ? ` (rank ${masteryRank})` : '';
       const message = words > 0
-        ? `${username} incants a ${words}-word bolt at ${target} for ${damage} damage.`
-        : `${username} sputters a wordless bolt at ${target} for ${damage} damage.`;
+        ? `${username} incants a ${words}-word bolt at ${target} for ${damage} damage${rankTag}.`
+        : `${username} sputters a wordless bolt at ${target} for ${damage} damage${rankTag}.`;
       await insertSystemMessage(db, row, col, message, 'rite');
-      return { message, damage, words, ...result };
+      return { message, damage, words, rank: masteryRank, ...result };
     }
     default:
       throw new ActionError('Unknown skill.');

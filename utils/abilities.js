@@ -92,13 +92,18 @@ const ABILITIES = {
   word_bolt: {
     id: 'word_bolt', label: 'Word Bolt', kind: 'active', target: 'enemy', contest: true,
     costStamina: 1,
+    // Plan 012 (tail): cooldownTicks gates re-casting through the per-ability
+    // cooldown rail (effectType 'rite:word_bolt', pseudo-room 0,0). Mastery lifts
+    // the linguistic word-cap by rank*2 above this base (see riteRankFromCasts).
     cost: { stamina: 1, linguistic: { perWord: 1, max: 12 } },
+    cooldownTicks: 5,
     description: 'A spoken bolt — the more words you incant, the harder it strikes (and the more it costs).',
     effects: [
       'Cast via /cast <incantation> @target.',
-      'Damage = 2 + the word count of your incantation.',
-      'Stamina = 1 + word count (capped at 13).',
-      'Uses a speed contest, so faster targets can dodge it.'
+      'Damage = 2 + the word count of your incantation + your rite rank.',
+      'Stamina = 1 + word count (cap rises with rank).',
+      'Uses a speed contest, so faster targets can dodge it.',
+      'Re-casting is gated by a short cooldown.'
     ]
   },
 
@@ -227,7 +232,31 @@ function countCapitals(text) {
   return matches ? matches.length : 0;
 }
 
-function evaluateLinguisticCost(spec, text) {
+// Plan 012 (tail): the mastery curve. Rank is DERIVED from a player's cumulative
+// successful casts of a given incantation-ability (never stored) — a slow log2
+// climb capped at RITE_RANK_MAX. casts 0→rank 0, 1→1, 3→2, 7→3, 15→4, 31→5, and
+// everything beyond clamps at 5. Pure and total: a missing/negative count is rank 0.
+const RITE_RANK_MAX = 5;
+
+function riteRankFromCasts(casts) {
+  const n = Math.floor(Number(casts) || 0);
+  if (n < 1) {
+    return 0;
+  }
+  return Math.min(RITE_RANK_MAX, Math.floor(Math.log2(n + 1)));
+}
+
+// rank lifts a linguistic spec's word cap by 2 per rank (a master can pack more
+// words into one rite before it caps). rank 0 leaves the spec byte-identical, so
+// every existing caller is unaffected.
+function effectiveLinguisticMax(spec, rank = 0) {
+  if (!Number.isFinite(spec.max)) {
+    return null;
+  }
+  return spec.max + Math.max(0, Math.floor(rank)) * 2;
+}
+
+function evaluateLinguisticCost(spec, text, rank = 0) {
   if (!spec || typeof spec !== 'object') {
     return 0;
   }
@@ -243,8 +272,9 @@ function evaluateLinguisticCost(spec, text) {
     cost += spec.perCapital * countCapitals(text);
   }
   cost = Math.round(cost);
-  if (Number.isFinite(spec.max)) {
-    cost = Math.min(cost, spec.max);
+  const max = effectiveLinguisticMax(spec, rank);
+  if (max != null) {
+    cost = Math.min(cost, max);
   }
   return Math.max(0, cost);
 }
@@ -253,6 +283,10 @@ function evaluateLinguisticCost(spec, text) {
 // ({ text }). Base = ability.cost.stamina ?? ability.costStamina ?? 1, plus any
 // linguistic surcharge. Defaults preserve the flat 1-stamina cost every skill has
 // today; plan 012 supplies abilities with a linguistic cost and a prose path.
+// context may carry { text, rank }. rank (plan 012 mastery) defaults to 0, lifting
+// the linguistic word-cap by rank*2 so a master's verbose rite can cost more before
+// it caps; rank 0 reproduces the original cost exactly, so every existing caller and
+// test stays byte-identical.
 function resolveAbilityStaminaCost(ability, context = {}) {
   if (!ability) {
     return 1;
@@ -261,13 +295,15 @@ function resolveAbilityStaminaCost(ability, context = {}) {
   const base = Number.isFinite(cost.stamina)
     ? cost.stamina
     : (Number.isFinite(ability.costStamina) ? ability.costStamina : 1);
-  const surcharge = cost.linguistic ? evaluateLinguisticCost(cost.linguistic, context.text) : 0;
+  const rank = Math.max(0, Math.floor(Number(context.rank) || 0));
+  const surcharge = cost.linguistic ? evaluateLinguisticCost(cost.linguistic, context.text, rank) : 0;
   return Math.max(0, base + surcharge);
 }
 
 module.exports = {
   ABILITIES,
   CLASS_ABILITIES,
+  RITE_RANK_MAX,
   getAbility,
   getInnateAbilityIds,
   getAbilitiesForJob,
@@ -276,5 +312,6 @@ module.exports = {
   getPassiveAbilitiesForJob,
   getPassiveStatModifiers,
   evaluateLinguisticCost,
+  riteRankFromCasts,
   resolveAbilityStaminaCost
 };
