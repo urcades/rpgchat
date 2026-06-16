@@ -57,18 +57,34 @@ STOP conditions; update the row when done.
 | [003](003-action-path-test-coverage.md) | R4 | Tests for job-change / leveling / inn handlers (+ auth-crypto, signup, coords) | P2 | S | 002 | ✅ DONE & LIVE (2026-06-16, Campaign A; +29 tests) |
 | [004](004-async-error-boundaries.md) | R3 | Error boundaries + structured logging on async paths | P2 | M | — | ✅ DONE & LIVE (2026-06-16, Campaign A; `guard()` on alarm/scheduled/runAfterResponse/wakeActiveRooms, +13 tests) |
 | [005](005-split-game-module.md) | T1 | Split `game.mjs` behind a stable facade | P3 | L | MED | do last | ✅ DONE & LIVE (2026-06-16, Campaign A; 156-line facade + 10 seams, 117 exports, 319 tests, zero test edits) |
+| 006 | P1 | Combat & loop query perf (per-target getAttackElement/consumeStatusModifier N+1; `SELECT u.*` over-fetch; doubled roomNeedsLoop/roomHasActiveHostiles per alarm; getRoomEcology recomputed by reply+ambient) | P3 | M | MED | — | TODO |
+| 007 | P1 | Hot-path D1 index additions (`bodyParts(username,slotType,severed)`; `items(corpseOf,roomRow,roomCol)`; `users(isNpc,…)`) — additive migration; pairs with 006 | P3 | S | LOW | pairs w/ 006 | TODO |
+| 008 | — | index.mjs decomposition + route/DO testability (split the `cloudflare:workers` import so the Hono app/routes/DO are importable under `node --test`; export `auth.mjs` crypto primitives) | P3 | M | MED | sibling to adv-005 | TODO |
+| 009 | — | `users` query-helper / schema-contract consolidation (~18 inline `SELECT … FROM users`) | P3 | M | MED | — | TODO |
+| 010 | — | Command-handler boilerplate dedup (~10 `handle*Command`) | P3 | M | LOW | — | TODO |
+| 011 | — | Dependency bumps (wrangler, hono) + npm-audit triage (14 dev-only HIGHs) | P3 | S | LOW | — | TODO |
+| 012 | — | DX/docs/observability sweep (repo `CLAUDE.md`, `smoke.mjs` explicit `exit(0)`, request-id correlation, troubleshooting/seed docs) | P3 | S–M | LOW | — | TODO |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (reason) | REJECTED (reason)
+
+> **adv-006…adv-012** were promoted from the "Deferred findings from the 2026-06-15 deep audit"
+> prose (below) into rows here so the index shows what remains; effort/risk are coarse. None has a
+> standalone plan file written yet — say the word and any becomes a full executor-ready plan.
+> **Campaign B (the deferred product "tails" of plans 012/013/019/021/022) shipped this session**
+> and lives in `plans/` (record: `plans/CAMPAIGN-B-product-tails.md`) — not an `advisor-plans/` item.
+> The **H1 session-cookie `Secure` flag** (Reliability/security table above) remains part of the
+> pre-launch security gate (with password hashing + login rate-limiting), not executed mid-flight.
 
 **Recommended order**: 001 → 002 → 003 → 004 → 005. Rationale: 001 is the only real
 bug and is highest leverage (money path); 002 is a trivial win that 003 builds on;
 004 is independent hardening; 005 touches the file the others edit, so it goes last
 to avoid rebase churn.
 
-**D1 (leaderboard kills/level)** is the obvious quick product win — not written as a
-plan yet; say the word and it becomes 006. The other direction items (D2 plan-008
-sequencing, D3 movement/revival, D4 item trade/storage) are roadmap calls for `plans/`,
-not improvement plans.
+**D1 (leaderboard kills/level)** is the obvious quick product win — still not written as a
+plan; say the word and it gets one. (It's a product direction for `plans/`, not part of the
+adv-006…adv-012 tech-debt sequence above — those slots are now taken.) The other direction
+items (D2 plan-008 sequencing, D3 movement/revival, D4 item trade/storage) are likewise
+roadmap calls for `plans/`, not improvement plans; D2/D3 shipped, **D4 remains open**.
 
 ## Campaign A — totalizing hardening pass (✅ COMPLETE 2026-06-16)
 
@@ -82,6 +98,9 @@ Security audit: **zero findings**. CORRECTNESS-001 (NPC-kill null-deref) vetted 
 (117 exports, zero test edits), smoke 10/10 + combat-smoke 9/9.
 
 ### Deferred findings from the 2026-06-15 deep audit (real, NOT critical — backlog, not executed this run)
+
+> These are now tracked as **adv-006…adv-012** in the "Plans written" table above (promoted 2026-06-16
+> so the index shows what remains). The detail/evidence below is retained as the backing for those rows.
 
 | Finding | Cat | Effort | Note |
 |---|---|---|---|
