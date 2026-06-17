@@ -115,7 +115,6 @@ export {
   allocateAttributePoint,
   assertEnoughStamina,
   bumpRiteMastery,
-  getAllocatableStats,
   getGrantedAbilityIds,
   getProgressionGrid,
   getRiteMastery,

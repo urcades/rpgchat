@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <title>World Map</title>
@@ -30,7 +30,12 @@
       }
     }
     fetch('/world-events')
-      .then(response => response.json())
+      .then(response => {
+        if (response.ok === false) {
+          throw new Error('World events unavailable');
+        }
+        return response.json();
+      })
       .then(events => {
         events.forEach(event => {
           const item = gridItems.get(`${event.row}:${event.col}`);
@@ -48,7 +53,12 @@
     // just returns the "too far" page). Null position = first placement of the
     // day, when everywhere is reachable.
     fetch('/map-state')
-      .then(response => response.json())
+      .then(response => {
+        if (response.ok === false) {
+          throw new Error('Map state unavailable');
+        }
+        return response.json();
+      })
       .then(({ position }) => {
         if (!position) {
           return;

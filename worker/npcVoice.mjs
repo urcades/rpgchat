@@ -60,12 +60,6 @@ const ROLE_VOICE = {
   ambient_hostile: 'Cryptic, unsettling menace.'
 };
 
-export function fallbackFor(role) {
-  const lines = FALLBACK_LINES[role] || FALLBACK_LINES.patron;
-  // Deterministic-friendly: callers that need variety pass a random; default first line.
-  return lines[0];
-}
-
 export function pickFallback(role, random = Math.random) {
   const lines = FALLBACK_LINES[role] || FALLBACK_LINES.patron;
   return lines[Math.floor(random() * lines.length)] || lines[0];

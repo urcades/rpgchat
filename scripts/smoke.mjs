@@ -47,11 +47,10 @@ function check(name, ok, detail = '') {
 function finish() {
   const failed = results.filter(r => !r.ok).length;
   console.log('');
-  if (failed) {
-    console.log(`SMOKE FAILED: ${failed}/${results.length} checks failed against ${BASE_URL}`);
-    process.exit(1);
-  }
-  console.log(`SMOKE PASSED: ${results.length}/${results.length} checks against ${BASE_URL}`);
+  console.log(failed
+    ? `SMOKE FAILED: ${failed}/${results.length} checks failed against ${BASE_URL}`
+    : `SMOKE PASSED: ${results.length}/${results.length} checks against ${BASE_URL}`);
+  process.exit(failed ? 1 : 0);
 }
 
 async function main() {

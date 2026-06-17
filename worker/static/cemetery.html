@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <title>Graveyard</title>
@@ -13,7 +13,12 @@
   </main>
   <script>
     fetch('/cemetery-data')
-      .then(response => response.json())
+      .then(response => {
+        if (!response.ok) {
+          throw new Error('Graveyard unavailable');
+        }
+        return response.json();
+      })
       .then(players => {
         const root = document.getElementById('cemetery');
         if (players.length === 0) {
@@ -28,6 +33,9 @@
           div.textContent = `${player.username} [${player.job || 'Novice'}] lvl ${player.level || 0}, ${player.gold || 0}g — ${player.cause || 'unknown cause'}${slainBy}${when}`;
           root.appendChild(div);
         });
+      })
+      .catch(() => {
+        document.getElementById('cemetery').textContent = 'The graveyard is unavailable right now.';
       });
   </script>
 </body>

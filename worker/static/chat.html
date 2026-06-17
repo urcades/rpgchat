@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <title>Chat</title>
@@ -46,7 +46,7 @@
     <div id="stance-bar" class="action-bar"></div>
     <div id="skill-bar" class="action-bar"></div>
     <form class="chat-form" id="chat-form">
-      <input type="text" id="message" name="message">
+      <input type="text" id="message" name="message" aria-label="Message">
       <button type="button" id="clear-target" style="display: none;">Untarget</button>
       <button type="submit" id="send-button">Send</button>
       <button type="button" id="attack-button">Attack</button>
@@ -58,6 +58,7 @@
     let phase = 'Day';
     let heartbeatTimer;
     let socketRetryDelay = 1000;
+    let realtimeStopped = false; // set on death / auth-expiry / page teardown so the socket stops reconnecting forever
     let roomStateRefreshTimer = null;
     let currentSkill = null;
     let currentSkills = [];
@@ -173,8 +174,21 @@
       }
     }
 
+    // Tear down realtime for good: stop the heartbeat poll and close the socket
+    // without rescheduling. Called when the session is over (death / auth-expiry)
+    // or the page is going away, so onclose doesn't spin up an endless reconnect
+    // loop against an endpoint that will only reject a dead/authless session.
+    function stopRealtime() {
+      realtimeStopped = true;
+      clearInterval(heartbeatTimer);
+      if (socket && socket.close) {
+        socket.close();
+      }
+    }
+
     function redirectIfDead(response) {
       if (response.status === 410) {
+        stopRealtime();
         response.json()
           .then(data => {
             window.location.href = data.redirect || '/you-died';
@@ -189,6 +203,7 @@
 
     function redirectIfResponseLandedOnDeath(response) {
       if (response.redirected && ['/death', '/you-died'].includes(new URL(response.url).pathname)) {
+        stopRealtime();
         window.location.href = new URL(response.url).pathname;
         return true;
       }
@@ -327,10 +342,16 @@
 
     function loadTick() {
       fetch('/tick')
-        .then(response => response.json())
+        .then(response => {
+          if (!response.ok) {
+            throw new Error('Tick unavailable');
+          }
+          return response.json();
+        })
         .then(data => {
           renderTick(data.tick);
-        });
+        })
+        .catch(() => {}); // a transient tick miss is harmless — the next poll recovers it
     }
 
     function setParagraph(parent, text) {
@@ -531,6 +552,9 @@
     // the 15s poll. onclose schedules a reconnect with exponential backoff (1s, 2s,
     // 4s … capped at 30s), reset on a successful open; onerror closes to trigger it.
     function connectSocket() {
+      if (realtimeStopped) {
+        return; // session is over or the page is unloading — don't reopen
+      }
       const socketProtocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
       socket = new WebSocket(`${socketProtocol}${window.location.host}/ws/${row}/${col}`);
 
@@ -557,6 +581,9 @@
       };
 
       socket.onclose = function() {
+        if (realtimeStopped) {
+          return; // death / auth-expiry / teardown — stay closed, don't reconnect forever
+        }
         setTimeout(connectSocket, socketRetryDelay);
         socketRetryDelay = Math.min(socketRetryDelay * 2, 30000);
       };
@@ -861,6 +888,12 @@
           updateAll();
         }
       });
+
+      // Leaving the page (navigation, tab close, bfcache): stop the heartbeat and
+      // close the socket so we don't leak a timer or a reconnect loop on teardown.
+      if (window.addEventListener) {
+        window.addEventListener('pagehide', stopRealtime);
+      }
 
       connectSocket();
     });

@@ -23,8 +23,8 @@ findings you select. This index is the menu.
 |---|---------|-----|--------|--------|------|------|----------|
 | T1 | God module `worker/game.mjs` — **now 4,937 lines** (3,148 at audit; grew with 013/020–023) | tech-debt | Every change touches one file; high cognitive load; latent circular-import risk with index.mjs | L | MED | HIGH | `worker/game.mjs`; seams: combat / inventory / body / room-ecology / npc-events / progression / commands |
 | T2 | Duplicated `createSqliteD1` D1 shim across 3 test files | tech-debt | A shim change must be made 3× and can drift | S | LOW | HIGH | `test/workerMigration.test.js`, `test/items.integration.test.js`, `test/combat.integration.test.js` |
-| P1 | N+1 queries per target in `handleAttack` | perf | ~4-5 queries/target inside the loop; only bites multi-target attacks (single-target is the norm) | M | LOW | HIGH | `worker/game.mjs:2507-2509` + per-target `consumeStatusModifier` |
-| P2 | Unbounded `SELECT`s in `getRoomEcology` / kills in `getUserState` | perf | Payload/scan grows with room age & player kill count; no LIMIT on traces/floor items, kills LIMIT 50 | S | LOW | MED | `worker/game.mjs:651-668`, `:734-751` |
+| P1 | N+1 queries per target in `handleAttack` | perf | ~4-5 queries/target inside the loop; only bites multi-target attacks (single-target is the norm) | M | LOW | HIGH | `worker/game/combat.mjs` (`handleAttack` + per-target `consumeStatusModifier`) |
+| P2 | Unbounded `SELECT`s in `getRoomEcology` / kills in `getUserState` | perf | Payload/scan grows with room age & player kill count; no LIMIT on traces/floor items, kills LIMIT 50 | S | LOW | MED | `worker/game/world.mjs` (`getRoomEcology`, `getUserState`) |
 
 ## Direction (options for the maintainer — not ranked against bugs)
 
@@ -121,8 +121,8 @@ Security audit: **zero findings**. CORRECTNESS-001 (NPC-kill null-deref) vetted 
 ## Considered and rejected (so they aren't re-audited)
 
 - **Rename the duplicate-`0002` migrations** (`0002_resurrection_requests.sql` + `0002_world_events.sql`): REJECTED. wrangler tracks applied migrations by filename; renaming files already applied to prod makes it treat them as new/unapplied and re-run non-idempotent statements (the HP ×3 rebase). The prefix collision is cosmetic and sorts deterministically. Leave applied migrations untouched; only avoid the pattern for *future* files.
-- **SQL "injection" in `effectiveMaxStaminaSql`** (`worker/game.mjs:936-954`): by-construction safe — the interpolated CASE is built from the hardcoded `JOBS` config, never request data. LOW code-smell at most, not a vulnerability.
-- **Stamina check-then-act race** (`worker/game.mjs:903-919`): already correctly guarded by `UPDATE … WHERE stamina >= ?` + `changes()` check. Not a finding.
+- **SQL "injection" in `effectiveMaxStaminaSql`** (`worker/game/progression.mjs`): by-construction safe — the interpolated CASE is built from the hardcoded `JOBS` config, never request data. LOW code-smell at most, not a vulnerability.
+- **Stamina check-then-act race** (`worker/game/progression.mjs`): already correctly guarded by `UPDATE … WHERE stamina >= ?` + `changes()` check. Not a finding.
 - **"No DB indexes"**: migrations already define the relevant composite indexes (`idx_roomPresence_room_day`, `idx_messages_timestamp`, `idx_bodyParts_user`, `idx_items_owner/room`). Non-finding.
 - **Plaintext passwords**: known/intentional pre-production decision, warned on the login page.
 

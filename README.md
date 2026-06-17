@@ -6,12 +6,27 @@ The previous local Express/SQLite app has been removed. New development should h
 
 ## Runtime
 
-- `worker/index.mjs` contains the Worker routes and room Durable Object.
-- `worker/game.mjs` contains the Cloudflare-facing game/action loop.
-- `worker/resurrection.mjs` handles paid resurrection requests.
-- `worker/static/` contains the HTML/CSS served by the Worker.
+- `worker/index.mjs` contains the Hono routes, the `RoomObject` Durable Object
+  (room-local realtime + WebSocket fan-out, driven by a DO `alarm()` game loop),
+  the cron-triggered `scheduled()` handler (a `* * * * *` tick that advances the
+  world and seeds daily events), and the Stripe webhook boundary.
+- `worker/game.mjs` is a stable ~175-line **facade** (plan adv-005): it re-exports
+  the public surface from cohesive seams under `worker/game/` — `combat.mjs`,
+  `world.mjs` (rooms/ecology/ticks/presence/leaderboard), `body.mjs`,
+  `inventory.mjs`, `progression.mjs`, `death.mjs`, `npc.mjs`, `handlers.mjs`,
+  `messages.mjs`, `shared.mjs`. Imports `from './game.mjs'` keep working unchanged.
+- `worker/npcVoice.mjs` generates NPC dialogue via the optional `[ai]`
+  (Workers AI, `env.AI`) binding, falling back to canned per-role lines.
+- `worker/resurrection.mjs` handles paid resurrection requests; `worker/stripe.mjs`
+  verifies the webhook signature; `worker/auth.mjs` handles session cookies.
+- `worker/static/` contains the HTML/CSS served by the Worker — including the
+  chat view, the world map, the progression grid, the leaderboard, and the
+  cemetery.
 - `migrations/` contains D1 schema migrations.
-- `utils/jobs.js`, `utils/roomEcology.js`, and `utils/leveling.js` are shared game-domain modules used by the Worker.
+- `utils/` holds the shared, pure game-domain modules used by the Worker (11):
+  `abilities.js`, `body.js`, `combatFlavor.js`, `items.js`, `jobs.js`,
+  `leveling.js`, `npcGrowth.js`, `progressionGrid.js`, `recipes.js`,
+  `roomEcology.js`, `worldEvents.js`.
 
 ## Local Development
 

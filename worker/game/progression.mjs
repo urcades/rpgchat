@@ -54,10 +54,6 @@ export async function spendStamina(db, username, cost = 1) {
 // NOT here yet (it's body-bound: maxHealth == Σ part maxHp — see the plan).
 const ALLOCATABLE_STATS = { strength: 1, speed: 1, intelligence: 1, maxStamina: 5 };
 
-export function getAllocatableStats() {
-  return { ...ALLOCATABLE_STATS };
-}
-
 export async function allocateAttributePoint(db, username, stat) {
   const step = ALLOCATABLE_STATS[stat];
   assertAction(step, 'You cannot raise that attribute.');
