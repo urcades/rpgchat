@@ -145,6 +145,47 @@ test('/give: through the handlers.mjs /give route (spends stamina, advances the 
   }
 });
 
+test('adv-006: resolveGiveTarget resolves a CO-LOCATED recipient but rejects an identically-named one standing elsewhere', async () => {
+  const db = await createMigratedDb();
+  const { handleGiveCommand, getUserState, updatePresence } = await import('../worker/game.mjs');
+
+  try {
+    const calm = findCalmRoom(getWorldDay());
+    const other = { row: calm.row, col: (calm.col % 16) + 1 };
+    await seedLiveUser(db, 'donor');
+    await seedLiveUser(db, 'nearby');   // co-located with the donor
+    await seedLiveUser(db, 'faraway');  // present, but in a DIFFERENT room
+    await updatePresence(db, 'donor', calm.row, calm.col);
+    await updatePresence(db, 'nearby', calm.row, calm.col);
+    await updatePresence(db, 'faraway', other.row, other.col);
+    await getUserState(db, 'donor');
+    await getUserState(db, 'nearby');
+    await getUserState(db, 'faraway');
+
+    // Two carried items so we can attempt both a co-located and a remote hand-off.
+    await insertCarriedItem(db, 'donor', { name: 'Old Boot', slotType: 'leg' });
+    await insertCarriedItem(db, 'donor', { name: 'Worn Cap', slotType: 'head' });
+
+    // Co-located target resolves and receives the item (presence-scoped resolution).
+    const ok = await handleGiveCommand(db, 'donor', calm.row, calm.col, '/give Old Boot @nearby');
+    assert.deepEqual(ok, { gave: 'Old Boot', to: 'nearby' }, 'a co-located recipient resolves and receives');
+    const moved = await db.prepare("SELECT ownerUsername FROM items WHERE name = 'Old Boot'").first();
+    assert.equal(moved.ownerUsername, 'nearby', 'ownership moved to the co-located recipient');
+
+    // A real, present user who is NOT in this room is rejected with "is not here" —
+    // and the item the donor tried to give stays put.
+    await assert.rejects(
+      handleGiveCommand(db, 'donor', calm.row, calm.col, '/give Worn Cap @faraway'),
+      /faraway is not here/,
+      'a recipient standing in another room is not a valid give target'
+    );
+    const still = await db.prepare("SELECT ownerUsername FROM items WHERE name = 'Worn Cap'").first();
+    assert.equal(still.ownerUsername, 'donor', 'a give to an out-of-room target leaves ownership unchanged');
+  } finally {
+    await db.close();
+  }
+});
+
 test('/give: rejects giving to yourself', async () => {
   const db = await createMigratedDb();
   const { handleGiveCommand, getUserState, updatePresence } = await import('../worker/game.mjs');

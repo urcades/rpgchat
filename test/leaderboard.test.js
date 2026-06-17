@@ -107,6 +107,31 @@ test('Plan 024: ordering is kills desc, then level desc, then gold desc', async 
   }
 });
 
+test('adv-006: an all-equal tie (same kills/level/gold) is broken DETERMINISTICALLY by username ASC', async () => {
+  const db = await createMigratedDb();
+  try {
+    // Three players identical on every ranking key, seeded out of alphabetical order.
+    // Without the username tie-break the order would be insertion/rowid-dependent;
+    // with it the board is stable and sorted by username ascending.
+    await seedPlayer(db, 'charlie', { level: 4, gold: 50 });
+    await seedPlayer(db, 'alice', { level: 4, gold: 50 });
+    await seedPlayer(db, 'bob', { level: 4, gold: 50 });
+
+    // One kill each — equal kills too, so ONLY the username tie-break can order them.
+    await recordKill(db, 'charlie', 'v1');
+    await recordKill(db, 'alice', 'v2');
+    await recordKill(db, 'bob', 'v3');
+
+    const { getLeaderboard } = await import('../worker/game.mjs');
+    const board = await getLeaderboard(db);
+    const ranked = board.filter(p => ['alice', 'bob', 'charlie'].includes(p.username)).map(p => p.username);
+
+    assert.deepEqual(ranked, ['alice', 'bob', 'charlie'], 'all-equal ties resolve by username ASC, stably');
+  } finally {
+    await db.close();
+  }
+});
+
 test('Plan 024: each row carries username, level, kills, and gold', async () => {
   const db = await createMigratedDb();
   try {

@@ -463,14 +463,24 @@ export async function giveItem(db, fromUsername, itemName, toUsername, row, col)
 // by username OR displayName) so naming works the same way everywhere — but the gate set
 // is give-specific: no self-give, players only, and the recipient must be standing here
 // (present and not incapacitated/a corpse). Throws the precise ActionError per failure.
+//
+// adv-006: the recipient must be CO-LOCATED, so the candidate pool is resolved from
+// roomPresence JOIN users for THIS room (mirroring validateAttackTargets) instead of a
+// full users scan filtered in JS. The presence semantics match the prior give gate
+// exactly — a roomPresence row for this room+worldDay (no lastSeenAt staleness filter,
+// so a present-but-idle recipient still resolves as before) — and the giver is added to
+// the pool so @self/@me still resolves. A named target that resolves to NO co-located
+// row falls through to a TARGETED (by-mention, not full-scan) existence check purely to
+// pick the right miss message: "<name> is not here." when that user exists elsewhere,
+// "No such person here." when no user matches at all — byte-identical to before.
 async function resolveGiveTarget(db, giverUsername, row, col, message) {
   const mentioned = [...message.matchAll(/@([A-Za-z0-9_-]+)/g)].map(m => m[1].toLowerCase());
   if (mentioned.length === 0) {
     throw new ActionError('Name who you are giving it to: /give <item> @who.');
   }
   const selfNamed = mentioned.includes('self') || mentioned.includes('me');
+  const worldDay = getWorldDay();
 
-  // Every named user that EXISTS (present or not), with the fields the gates read.
   const matchesName = (name) => {
     const n = String(name || '').toLowerCase();
     if (n.length < 2) {
@@ -478,11 +488,7 @@ async function resolveGiveTarget(db, giverUsername, row, col, message) {
     }
     return new RegExp(`(^|[^a-z0-9_-])${escapeRegExp(n)}([^a-z0-9_-]|$)`, 'i').test(message);
   };
-  const candidates = await dbAll(
-    db,
-    "SELECT username, COALESCE(displayName, username) AS displayName, isNpc, incapacitated FROM users WHERE username != 'System'"
-  );
-  const named = candidates.filter(user => {
+  const matchesMention = (user) => {
     if (selfNamed && user.username === giverUsername) {
       return true;
     }
@@ -492,14 +498,59 @@ async function resolveGiveTarget(db, giverUsername, row, col, message) {
       return true;
     }
     return matchesName(dname) || matchesName(uname);
-  });
+  };
 
-  // Gates IN ORDER, each with its own message: exists, not self, not an NPC, present here.
+  // Co-located candidates only: a roomPresence row for this room+day, plus the giver
+  // (so @self/@me resolves). Same room-presence join /attack uses — the recipient has
+  // to be standing here anyway, so the whole-table scan was wasted work.
+  const occupants = await dbAll(
+    db,
+    `SELECT u.username, COALESCE(u.displayName, u.username) AS displayName, u.isNpc, u.incapacitated
+     FROM roomPresence rp
+     JOIN users u ON u.username = rp.username
+     WHERE rp.roomRow = ?
+       AND rp.roomCol = ?
+       AND rp.worldDay = ?
+       AND rp.username != 'System'`,
+    [row, col, worldDay]
+  );
+  const giver = await dbFirst(
+    db,
+    "SELECT username, COALESCE(displayName, username) AS displayName, isNpc, incapacitated FROM users WHERE username = ? AND username != 'System'",
+    [giverUsername]
+  );
+  const pool = giver
+    ? [...occupants.filter(o => o.username !== giverUsername), giver]
+    : occupants;
+  const named = pool.filter(matchesMention);
+
+  // Gates IN ORDER, each with its own message: exists/present, not self, not an NPC.
+  // Prefer a non-giver match (so "/give x @me @other" hands to other, as before).
   const target = named.find(user => user.username !== giverUsername) || named[0] || null;
   if (selfNamed && (!target || target.username === giverUsername)) {
     throw new ActionError('You cannot give an item to yourself.');
   }
   if (!target) {
+    // No co-located match. Distinguish "named a real user who's elsewhere" (→ is not
+    // here, by displayName) from "named nobody" (→ No such person here), via a targeted
+    // existence check on the mentioned names — no full-table scan.
+    const absent = mentioned.length
+      ? await dbFirst(
+        db,
+        `SELECT COALESCE(displayName, username) AS displayName
+         FROM users
+         WHERE username != 'System'
+           AND (LOWER(username) IN (${mentioned.map(() => '?').join(',')})
+                OR LOWER(COALESCE(displayName, username)) IN (${mentioned.map(() => '?').join(',')}))
+         ORDER BY username ASC
+         LIMIT 1`,
+        [...mentioned, ...mentioned]
+      )
+      : null;
+    const namedElsewhere = absent || (await findNamedUserByMessage(db, giverUsername, message, matchesMention));
+    if (namedElsewhere) {
+      throw new ActionError(`${namedElsewhere.displayName} is not here.`);
+    }
     throw new ActionError('No such person here.');
   }
   if (target.username === giverUsername) {
@@ -508,21 +559,24 @@ async function resolveGiveTarget(db, giverUsername, row, col, message) {
   if (target.isNpc) {
     throw new ActionError('You can only give items to other players.');
   }
-
-  const worldDay = getWorldDay();
-  const present = await dbFirst(
-    db,
-    `SELECT 1 AS hit FROM roomPresence
-     WHERE username = ? AND roomRow = ? AND roomCol = ? AND worldDay = ?`,
-    [target.username, row, col, worldDay]
-  );
-  if (!present) {
-    throw new ActionError(`${target.displayName} is not here.`);
-  }
   if (target.incapacitated) {
     throw new ActionError(`${target.displayName} cannot take that right now.`);
   }
   return target;
+}
+
+// adv-006: the give resolver's "is not here" fallback recovers a named-but-absent
+// user's displayName. The exact @mention IN-list catches the common case cheaply; this
+// covers the whole-name-boundary fuzzy match (e.g. a multi-word displayName embedded in
+// the message) the original full-scan filter also honored, by scanning users ONLY when
+// the cheap exact lookup missed AND a mention was given — never on the hot path.
+async function findNamedUserByMessage(db, giverUsername, message, matchesMention) {
+  const everyUser = await dbAll(
+    db,
+    "SELECT username, COALESCE(displayName, username) AS displayName, isNpc, incapacitated FROM users WHERE username != 'System'"
+  );
+  const named = everyUser.filter(matchesMention);
+  return named.find(user => user.username !== giverUsername) || named[0] || null;
 }
 
 export async function handleGiveCommand(db, username, row, col, message) {

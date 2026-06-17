@@ -826,11 +826,16 @@ export async function getActiveRound(db, row, col, worldDay, tickValue) {
   };
 }
 
-export async function getRoomEcology(db, username, row, col, worldDay = getWorldDay(), tickValue = null) {
+// adv-006: `access` may be a pre-resolved getRoomAccessState result threaded in
+// by a caller that already computed it for THIS (user, room, tick) — requireRoomUse
+// does, on the /room-state path — so the inn-access state is resolved once per
+// request instead of twice (here AND in the gate). Omitted (the default) ⇒ resolve
+// it inline exactly as before, so every other caller is byte-for-byte unchanged.
+export async function getRoomEcology(db, username, row, col, worldDay = getWorldDay(), tickValue = null, access = null) {
   const currentTick = tickValue === null ? await getCurrentTickValue(db) : tickValue;
   const phase = getPhaseFromTick(currentTick);
   const features = getRoomFeaturesForTick(row, col, currentTick, worldDay);
-  const [traces, innAccess, activeRound, presence, event, groundItems] = await Promise.all([
+  const [traces, resolvedAccess, activeRound, presence, event, groundItems] = await Promise.all([
     dbAll(
       db,
       `SELECT id, roomRow, roomCol, traceType, intensity, attacker, target, createdTick, expiryTick, worldDay, createdAt
@@ -842,12 +847,13 @@ export async function getRoomEcology(db, username, row, col, worldDay = getWorld
        ORDER BY createdTick DESC, id DESC`,
       [row, col, worldDay, currentTick]
     ),
-    getRoomAccessState(db, username, row, col, currentTick, worldDay),
+    access === null ? getRoomAccessState(db, username, row, col, currentTick, worldDay) : Promise.resolve(access),
     getActiveRound(db, row, col, worldDay, currentTick),
     getRoomPresence(db, row, col, worldDay),
     getActiveRoomEvent(db, row, col, worldDay),
     getFloorItems(db, row, col)
   ]);
+  const innAccess = resolvedAccess;
   const traceSummary = summarizeTraces(traces);
   const effectPayload = getRoomEffectPayload({ row, col, worldDay, features, innAccess, activeRound });
 
@@ -865,6 +871,33 @@ export async function getRoomEcology(db, username, row, col, worldDay = getWorld
     description: composeRoomDescription({ row, col, phase, features, traceSummary }),
     ...effectPayload
   };
+}
+
+// adv-006: the room DESCRIPTION string in isolation — exactly the value
+// getRoomEcology computes for its `description` field, but WITHOUT the five extra
+// reads (inn access, gambling round, presence, active event, floor items) that
+// the full ecology payload needs and the description does not. composeRoomDescription
+// reads only { row, col, phase, features, traceSummary }; this assembles those from
+// the same room-feature derivation and the same roomTraces query getRoomEcology uses,
+// so the produced string is byte-identical. The NPC dialogue paths (which only ever
+// read ecology.description) call this instead of building the whole payload.
+export async function getRoomDescription(db, row, col, worldDay = getWorldDay(), tickValue = null) {
+  const currentTick = tickValue === null ? await getCurrentTickValue(db) : tickValue;
+  const phase = getPhaseFromTick(currentTick);
+  const features = getRoomFeaturesForTick(row, col, currentTick, worldDay);
+  const traces = await dbAll(
+    db,
+    `SELECT id, roomRow, roomCol, traceType, intensity, attacker, target, createdTick, expiryTick, worldDay, createdAt
+     FROM roomTraces
+     WHERE roomRow = ?
+       AND roomCol = ?
+       AND worldDay = ?
+       AND (expiryTick IS NULL OR expiryTick >= ?)
+     ORDER BY createdTick DESC, id DESC`,
+    [row, col, worldDay, currentTick]
+  );
+  const traceSummary = summarizeTraces(traces);
+  return composeRoomDescription({ row, col, phase, features, traceSummary });
 }
 
 export async function getUserState(db, username) {
@@ -1014,12 +1047,16 @@ export async function getUserState(db, username) {
   };
 }
 
-export async function getRoomState(db, username, row, col, tickValue = null) {
+// adv-006: `access` threads the pre-resolved inn-access state requireRoomUse
+// already produced (alongside tickValue) on the /room-state path into getRoomEcology,
+// so getRoomAccessState runs once per request, not twice. Omitted ⇒ resolved inline
+// (identical payload), so callers that don't have it pre-computed are unchanged.
+export async function getRoomState(db, username, row, col, tickValue = null, access = null) {
   const stateStart = nowMs();
   const worldDay = getWorldDay();
   const tick = tickValue === null ? await getCurrentTickValue(db) : tickValue;
   const [roomResult, messagesResult, userResult] = await Promise.all([
-    measureAsync(() => getRoomEcology(db, username, row, col, worldDay, tick)),
+    measureAsync(() => getRoomEcology(db, username, row, col, worldDay, tick, access)),
     measureAsync(() => getMessages(db, row, col, tick)),
     measureAsync(() => getUserState(db, username))
   ]);
@@ -1555,18 +1592,32 @@ export async function roomNeedsLoop(db, row, col) {
   return Boolean(social);
 }
 
-// Plan 024: the living leaderboard. Kills DERIVE from killHistory (the same
-// correlated COUNT(*) the cemetery/death pages use) — no kills column, no
-// migration. NPCs are excluded; the ranking is kills first (the point of the
-// board), then level, then gold as tie-breakers.
+// Plan 024: the living leaderboard. Kills DERIVE from killHistory — no kills
+// column, no migration. NPCs are excluded; the ranking is kills first (the point
+// of the board), then level, then gold as tie-breakers.
+//
+// adv-006: the per-row correlated `(SELECT COUNT(*) ...)` re-scanned killHistory
+// once per user (O(users × killHistory)); a single pre-aggregated LEFT JOIN
+// (idx_killHistory_killer-backed GROUP BY, one pass) yields the IDENTICAL counts
+// in O(users + killHistory). COALESCE makes a killer with no rows 0 (the LEFT
+// JOIN's NULL), exactly as the subquery's COUNT(*) returned 0. The sort is
+// unchanged except for an added `username ASC` final tie-break so an all-equal
+// tie (same kills/level/gold) is DETERMINISTIC rather than insertion-ordered.
+// LIMIT 100 caps the payload (the board only renders a top slice anyway).
 export async function getLeaderboard(db) {
   return dbAll(
     db,
     `SELECT u.username, u.gold, u.level,
-            (SELECT COUNT(*) FROM killHistory kh WHERE kh.killerUsername = u.username) AS kills
+            COALESCE(k.c, 0) AS kills
      FROM users u
+     LEFT JOIN (
+       SELECT killerUsername, COUNT(*) AS c
+       FROM killHistory
+       GROUP BY killerUsername
+     ) k ON k.killerUsername = u.username
      WHERE u.isNpc = 0
        AND u.username != 'System'
-     ORDER BY kills DESC, u.level DESC, u.gold DESC`
+     ORDER BY kills DESC, u.level DESC, u.gold DESC, u.username ASC
+     LIMIT 100`
   );
 }

@@ -21,7 +21,7 @@ import { applyBodyHeal } from './body.mjs';
 import { runAbility } from './combat.mjs';
 import { emitSystemMessage, getMessages, insertMessage, insertSystemMessage } from './messages.mjs';
 import { upsertCooldown } from './progression.mjs';
-import { getCurrentTickValue, getRoomEcology, getRoomPresence } from './world.mjs';
+import { getCurrentTickValue, getRoomDescription, getRoomPresence } from './world.mjs';
 
 
 // Plan 013c: the model-absent floor for hostile speech. Overt threats/violence provoke
@@ -166,7 +166,10 @@ export async function runNpcReply(db, ai, row, col) {
     return { spoke: false, provoked };
   }
 
-  const ecology = await getRoomEcology(db, speaker.username, row, col, worldDay, currentTick);
+  // adv-006: the reply only needs the room DESCRIPTION, not the whole ecology
+  // payload — getRoomDescription composes the identical string from features +
+  // traces alone, skipping the presence/items/round/event/access reads.
+  const roomDescription = await getRoomDescription(db, row, col, worldDay, currentTick);
   const response = await generateNpcResponse(ai, {
     npc: {
       displayName: speaker.displayName || speaker.username,
@@ -174,7 +177,7 @@ export async function runNpcReply(db, ai, row, col) {
       role: speaker.role || speaker.npcKind,
       disposition: speaker.disposition
     },
-    roomDescription: ecology.description,
+    roomDescription,
     recentMessages: recent.slice(-6),
     addressedBy: last.displayName || last.username,
     mode: 'reply'
@@ -267,7 +270,9 @@ export async function runNpcAmbient(db, ai, row, col) {
 
   const speaker = npcs[Math.floor(Math.random() * npcs.length)];
   const recent = await getMessages(db, row, col, currentTick);
-  const ecology = await getRoomEcology(db, speaker.username, row, col, worldDay, currentTick);
+  // adv-006: ambient murmurs read only the room description — same lightweight
+  // composeRoomDescription path as the reply, not the full ecology payload.
+  const roomDescription = await getRoomDescription(db, row, col, worldDay, currentTick);
   const response = await generateNpcResponse(ai, {
     npc: {
       displayName: speaker.displayName || speaker.username,
@@ -275,7 +280,7 @@ export async function runNpcAmbient(db, ai, row, col) {
       role: speaker.role || speaker.npcKind,
       disposition: speaker.disposition
     },
-    roomDescription: ecology.description,
+    roomDescription,
     recentMessages: recent.slice(-6),
     mode: 'ambient'
   });
