@@ -22,6 +22,7 @@ import {
   buildAffixRoll,
   clampNumber,
   describeAttack,
+  describeSelfMiss,
   escapeRegExp,
   getAbility,
   getActiveAbilitiesForJob,
@@ -753,7 +754,11 @@ export async function handleAttack(db, username, message, row, col, options = {}
 
     const speedContest = rollSpeedContest(attacker, target, attackerMods, targetMods, { hitDelta, dodgeDelta });
     if (!speedContest.hit) {
-      attackMessages.push(`${targetName} dodged ${username}'s attack`);
+      // A self-targeted whiff reads reflexively ("mog swings at themselves and
+      // misses"); a normal dodge stays "X dodged Y's attack".
+      attackMessages.push(user.username === username
+        ? describeSelfMiss(username, flavorRandom([username, createdTick, 'selfmiss']))
+        : `${targetName} dodged ${username}'s attack`);
       continue;
     }
 

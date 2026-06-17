@@ -12,7 +12,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { describeAttack, PART_NOUNS, VERBS, EXECUTION } = require('../utils/combatFlavor');
+const { describeAttack, describeSelfMiss, PART_NOUNS, VERBS, EXECUTION } = require('../utils/combatFlavor');
 
 // A random() that returns each value in turn, repeating the last once exhausted.
 function seq(values) {
@@ -31,6 +31,14 @@ test('a blade hit names a blade verb and a part-noun, with the damage in parens'
   assert.match(line, /\(4\)/, 'damage rides in parens');
   assert.ok(VERBS.blade.solid.includes('hacks into'), 'verb came from the blade/solid set');
   assert.ok(PART_NOUNS.torso.includes('ribs'), 'noun came from the torso set');
+});
+
+test('a self-targeted miss reads reflexively (describeSelfMiss), never "name … name"', () => {
+  // SELF_MISS[0] = 'swings at themselves and misses' (pick draw 0.0).
+  const line = describeSelfMiss('mog', seq([0.0]));
+  assert.equal(line, 'mog swings at themselves and misses');
+  assert.match(line, /\bthemselves\b/, 'reads reflexively');
+  assert.doesNotMatch(line, /\bmog\b.*\bmog\b/, 'never repeats the actor name');
 });
 
 test('a fist/NPC hit (no weapon class) uses the fist verb set and names no part when part is null', () => {

@@ -27,6 +27,7 @@ const SELF_VERBS = {
 };
 const SELF_NO_PART = ['turns the blow on themselves', 'lashes out at themselves', 'savages themselves'];
 const SELF_DOWNED = ['stops struggling and lets the last blow fall', 'gives up and finishes the job'];
+const SELF_MISS = ['swings at themselves and misses', 'flails and misses their own mark', "can't quite land a blow on themselves", 'pulls the strike at the last instant'];
 function pick(arr, random) { return arr[Math.floor(random() * arr.length)] || arr[0]; }
 function tierOf(damage, isCritical) { if (isCritical || damage >= 6) return 'brutal'; if (damage >= 3) return 'solid'; return 'light'; }
 function describeAttack({ attacker, target, weaponClass = 'fist', part = null, damage = 0, isCritical = false, targetDowned = false, self = false } = {}, random = Math.random) {
@@ -49,4 +50,9 @@ function describeAttack({ attacker, target, weaponClass = 'fist', part = null, d
   const bang = (isCritical || damage >= 6) ? '!' : '';
   return `${attacker} ${verb}${where} ${dmg}${bang}`;
 }
-module.exports = { describeAttack, PART_NOUNS, VERBS, EXECUTION };
+// A self-targeted attack that misses — deadpan, reflexive. (The non-self dodge line
+// stays "X dodged Y's attack"; only the self case routes here.)
+function describeSelfMiss(attacker, random = Math.random) {
+  return `${attacker} ${pick(SELF_MISS, random)}`;
+}
+module.exports = { describeAttack, describeSelfMiss, PART_NOUNS, VERBS, EXECUTION };

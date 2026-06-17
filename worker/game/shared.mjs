@@ -112,7 +112,7 @@ const {
   CALLED_SHOT_HEAD_BONUS
 } = bodyModule;
 
-const { describeAttack } = combatFlavorModule;
+const { describeAttack, describeSelfMiss } = combatFlavorModule;
 
 // Re-export the util destructures so every seam imports them from shared.
 export {
@@ -193,7 +193,8 @@ export {
   CALLED_SHOT_HIT_PENALTY,
   CALLED_SHOT_HEAD_BONUS,
   // combat flavor (weapon- & part-aware attack lines)
-  describeAttack
+  describeAttack,
+  describeSelfMiss
 };
 
 export const PRESENCE_MAX_AGE_SECONDS = 45;
