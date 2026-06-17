@@ -59,23 +59,34 @@ STOP conditions; update the row when done.
 | [003](003-action-path-test-coverage.md) | R4 | Tests for job-change / leveling / inn handlers (+ auth-crypto, signup, coords) | P2 | S | 002 | ✅ DONE & LIVE (2026-06-16, Campaign A; +29 tests) |
 | [004](004-async-error-boundaries.md) | R3 | Error boundaries + structured logging on async paths | P2 | M | — | ✅ DONE & LIVE (2026-06-16, Campaign A; `guard()` on alarm/scheduled/runAfterResponse/wakeActiveRooms, +13 tests) |
 | [005](005-split-game-module.md) | T1 | Split `game.mjs` behind a stable facade | P3 | L | MED | do last | ✅ DONE & LIVE (2026-06-16, Campaign A; 156-line facade + 10 seams, 117 exports, 319 tests, zero test edits) |
-| 006 | P1 | Combat & loop query perf (per-target getAttackElement/consumeStatusModifier N+1; `SELECT u.*` over-fetch; doubled roomNeedsLoop/roomHasActiveHostiles per alarm; getRoomEcology recomputed by reply+ambient) | P3 | M | MED | — | TODO |
-| 007 | P1 | Hot-path D1 index additions (`bodyParts(username,slotType,severed)`; `items(corpseOf,roomRow,roomCol)`; `users(isNpc,…)`) — additive migration; pairs with 006 | P3 | S | LOW | pairs w/ 006 | TODO |
-| 008 | — | index.mjs decomposition + route/DO testability (split the `cloudflare:workers` import so the Hono app/routes/DO are importable under `node --test`; export `auth.mjs` crypto primitives) | P3 | M | MED | sibling to adv-005 | TODO |
-| 009 | — | `users` query-helper / schema-contract consolidation (~18 inline `SELECT … FROM users`) | P3 | M | MED | — | TODO |
-| 010 | — | Command-handler boilerplate dedup (~10 `handle*Command`) | P3 | M | LOW | — | TODO |
-| 011 | — | Dependency bumps (wrangler, hono) + npm-audit triage (14 dev-only HIGHs) | P3 | S | LOW | — | TODO |
-| 012 | — | DX/docs/observability sweep (repo `CLAUDE.md`, `smoke.mjs` explicit `exit(0)`, request-id correlation, troubleshooting/seed docs) | P3 | S–M | LOW | — | TODO |
+| 006 | P1 | Combat & loop query perf | P3 | M | MED | — | ✅ DONE & LIVE (2026-06-17, Campaign D 2d; fetch-equipped-once per attack, getConditionAndGearModifiers cache, dropped redundant `SELECT*`, leaderboard correlated-subquery→`GROUP BY` join, resolveGiveTarget via presence, NPC murmur 6q→1; `529286e`) |
+| 007 | P1 | Hot-path D1 indexes — migration 0018 | P3 | S | LOW | — | ✅ DONE & LIVE (2026-06-17, Campaign D 2d; `0018_hot_path_indexes`: items decay/owner_template, users incapacitated, bodyParts slot — applied remote) |
+| 008 | — | index.mjs/DO/auth testability | P3 | M | MED | — | ✅ DONE & LIVE (2026-06-17, Campaign D W3; export-only — `export app` + auth crypto primitives under the `cloudflare:workers` stub, zero runtime change; +28 route/auth/webhook/DO-alarm tests; `84c7c17`) |
+| 009 | — | `users` query-helper consolidation | P3 | M | MED | — | ✅ DONE & LIVE (2026-06-17, Campaign D W3; `getUserOrNull`/`selectUserColumns`, 11 sites; `2ba4ecb`) |
+| 010 | — | Command-handler dedup | P3 | M | LOW | — | ✅ DONE & LIVE (2026-06-17, Campaign D W3; `COMMAND_REGISTRY` table, 16 dispatch blocks→1; `2ba4ecb`) |
+| 011 | — | Dependency bumps + audit triage | P3 | S | LOW | — | ✅ DONE & LIVE (2026-06-17, Campaign D W1; wrangler 4.101 + hono 4.12.25 — **no new majors existed**; lockfile committed, CI→`npm ci`, `SECURITY-NOTES.md`; `fd5790a`) |
+| 012 | — | DX/docs/observability sweep | P3 | S–M | LOW | — | ✅ DONE & LIVE (2026-06-17, Campaign D W1; repo `CLAUDE.md`, post-adv-005 doc-drift fixes, frontend `.ok/.catch` + a11y + WS/timer teardown, dead-code, smoke `exit(0)`; `9230560`) |
+| 013 | audit | **Tick-loop COST decoupling (CRIT)** — global sweeps off the per-action path + K-room dedup, combat cadence preserved | P1 | L | MED | — | ✅ DONE & LIVE (2026-06-17, Campaign D 2b; `advanceTickOnly` + `claimWorldSweep`; cadence proven by 7 tests; `e972a72`) |
+| 014 | audit | Cross-room `/skill`+`/cast` co-location gate (HIGH) | P2 | M | LOW | — | ✅ DONE & LIVE (2026-06-17, Campaign D 2a; `assertTargetCoLocated`; `d655d33`) |
+| 015 | audit | **Stripe webhook fail-closed (HIGH)** | P1 | S | MED | — | ⏸ **HELD** — predicate + 18 tests shipped (`worker/validation.mjs`); webhook flip pending owner confirming `STRIPE_RESURRECTION_PAYMENT_LINK_ID` is set in prod (branch `feat/adv-015-016-index`, `763e299`) |
+| 016 | audit | Username validation at signup (MED) | P2 | S | LOW | — | ✅ DONE & LIVE (2026-06-17, Campaign D W1; `^[A-Za-z0-9_-]{3,20}$` + reserve `System`/NPC prefixes; `979e353`) |
+| 017/018 | audit | **Concurrency/atomicity (CRIT/HIGH)** — death double-kill/dup-grave, lost-heal delta-writes, ward/mark double-consume, inn/buy/craft/socket/XP/event-victory dup | P1 | L | MED | — | ✅ DONE & LIVE (2026-06-17, Campaign D 2c; claim-then-act + relative deltas, every fix race-tested via `Promise.all`; `2ee371f`) |
+| 019 | audit | `emitDeathReaction` deferred-param bug (HIGH) — mis-ordered death feed | P2 | S | LOW | — | ✅ DONE & LIVE (2026-06-17, Campaign D 2a; `d655d33`) |
+| 020 | audit | Test-hardening sweep (HIGH) | P2 | M | LOW | — | ✅ DONE & LIVE (2026-06-17, Campaign D W3; rite-miss / NPC-cast safety / eat-corpse permadeath / sockets / professions / D1-shim + the adv-008 route tests; `6f10e6e`) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (reason) | REJECTED (reason)
 
-> **adv-006…adv-012** were promoted from the "Deferred findings from the 2026-06-15 deep audit"
-> prose (below) into rows here so the index shows what remains; effort/risk are coarse. None has a
-> standalone plan file written yet — say the word and any becomes a full executor-ready plan.
-> **Campaign B (the deferred product "tails" of plans 012/013/019/021/022) shipped this session**
-> and lives in `plans/` (record: `plans/CAMPAIGN-B-product-tails.md`) — not an `advisor-plans/` item.
-> The **H1 session-cookie `Secure` flag** (Reliability/security table above) remains part of the
-> pre-launch security gate (with password hashing + login rate-limiting), not executed mid-flight.
+> **adv-006…adv-020 are COMPLETE (Campaign D, 2026-06-17).** adv-006…012 were the known backlog;
+> **adv-013…020 were surfaced by a fresh 5-domain `/improve` audit folded into the same pass** — a CRIT
+> tick-loop sweep fan-out (013), a CRIT concurrency/atomicity bug class (017/018: double-kill + duplicate
+> grave, lost-heal writes, economy double-charges), a cross-room skill exploit (014), a Stripe fail-open
+> (015), the death-feed ordering bug (019), username validation (016), and a test-hardening sweep (020).
+> All shipped & live in waves (W1 deps/DX/security · 2a fixes · 2b tick-loop · 2c atomicity · 2d perf ·
+> W3 entrypoint/consolidation/tests), each suite-gated + smoke/combat-smoke-verified on prod, **EXCEPT
+> adv-015 (Stripe fail-closed) — HELD** pending the owner confirming `STRIPE_RESURRECTION_PAYMENT_LINK_ID`
+> is set in prod (flipping it blind would refuse all paid revives). Campaign B's product tails live in
+> `plans/`. The **H1 session-cookie `Secure` flag** remains part of the pre-launch `sec` gate (with
+> password hashing + login rate-limiting), owner-gated, not executed mid-flight.
 
 **Recommended order**: 001 → 002 → 003 → 004 → 005. Rationale: 001 is the only real
 bug and is highest leverage (money path); 002 is a trivial win that 003 builds on;
@@ -86,8 +97,9 @@ to avoid rebase churn.
 landed in **Campaign C (2026-06-17)**, alongside a combat flavor-tail (per-weapon SIGNATURE verbs —
 an Iron Cleaver *cleaves through* / *hacks a wedge from*, a knife *hooks/rips*, a fang *bites*). So
 D1–D4 are all done; the **bal-1** gang-up knob was considered and **dropped — the owner kept it brutal**
-(stakes are public). The remaining open work is the **adv-006…adv-012** tech-debt sequence above and the
-owner-gated security gate (`sec`).
+(stakes are public). With **Campaign D** complete (adv-006…020), the only remaining open work is the
+owner-gated items: **adv-015** (Stripe fail-closed — needs the prod env-var confirm) and the pre-launch
+**`sec`** gate.
 
 ## Campaign A — totalizing hardening pass (✅ COMPLETE 2026-06-16)
 
