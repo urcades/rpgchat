@@ -23,10 +23,10 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "hono": "^4.12.23"
+    "hono": "^4.12.25"
   },
   "devDependencies": {
     "sqlite3": "^5.1.7",
-    "wrangler": "^4.95.0"
+    "wrangler": "^4.101.0"
   }
 }

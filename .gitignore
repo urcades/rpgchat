@@ -5,9 +5,6 @@ node_modules/
 database.sqlite
 .wrangler/
 
-# Package lock file
-package-lock.json
-
 # Log files
 *.log
 

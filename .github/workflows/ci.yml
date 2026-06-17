@@ -27,10 +27,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      # Uses `npm install` (not `npm ci`) because package-lock.json is gitignored
-      # in this repo. If you commit the lockfile, switch this to `npm ci` and add
-      # `cache: 'npm'` above for faster, reproducible installs.
-      - run: npm install
+          # package-lock.json is committed, so installs are reproducible and the
+          # npm cache can key off the lockfile hash.
+          cache: 'npm'
+      - run: npm ci
+      - name: Migration filename/order check (non-blocking)
+        run: npm run check:migrations
+        continue-on-error: true
       - name: Unit + integration tests
         run: npm test
       - name: Worker bundle check (no credentials needed)
@@ -48,10 +51,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      # Uses `npm install` (not `npm ci`) because package-lock.json is gitignored
-      # in this repo. If you commit the lockfile, switch this to `npm ci` and add
-      # `cache: 'npm'` above for faster, reproducible installs.
-      - run: npm install
+          cache: 'npm'
+      - run: npm ci
       # Skips cleanly until CLOUDFLARE_API_TOKEN is added as a repo secret, so this
       # workflow is safe to merge today and "turns on" auto-deploy the moment you
       # set the secret. Runs migrate → deploy → smoke (the npm `deploy` lifecycle).
