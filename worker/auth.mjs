@@ -16,7 +16,12 @@ function encodeBase64Url(buffer) {
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
 
-function parseCookie(header = '') {
+// The crypto + cookie-parsing primitives below are exported so they can be unit-tested
+// directly under `node --test` (see test/authPrimitives.test.js). Exporting is purely
+// additive — createSession/getSession behavior is unchanged; they still call these as
+// before. parseCookie is a general name=value parser; getCookieValues (used by getSession)
+// collects every value for a single cookie name (proxies can send the name twice).
+export function parseCookie(header = '') {
   return header
     .split(';')
     .map(part => part.trim())
@@ -31,7 +36,7 @@ function parseCookie(header = '') {
     }, {});
 }
 
-function getCookieValues(header = '', name) {
+export function getCookieValues(header = '', name) {
   return header
     .split(';')
     .map(part => part.trim())
@@ -48,7 +53,7 @@ function getCookieValues(header = '', name) {
     }, []);
 }
 
-function constantTimeEqual(left, right) {
+export function constantTimeEqual(left, right) {
   if (left.length !== right.length) {
     return false;
   }
@@ -59,7 +64,7 @@ function constantTimeEqual(left, right) {
   return diff === 0;
 }
 
-async function sign(value, secret) {
+export async function sign(value, secret) {
   const key = await crypto.subtle.importKey(
     'raw',
     new TextEncoder().encode(secret),
@@ -75,7 +80,7 @@ async function makeCookieValue(sessionId, secret) {
   return `${sessionId}.${await sign(sessionId, secret)}`;
 }
 
-async function verifyCookieValue(value, secret) {
+export async function verifyCookieValue(value, secret) {
   if (!value || !value.includes('.')) {
     return null;
   }

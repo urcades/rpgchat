@@ -59,7 +59,12 @@ import { elapsedMs, errorFields, guard, logEvent, measureAsync, nowMs } from './
 // is held pending prod env-var confirmation; the predicate lives + is tested in validation.mjs.
 import { isReservedUsername, isValidUsername } from './validation.mjs';
 
-const app = new Hono();
+// `app` is exported so the Hono routes + middleware can be driven end-to-end under
+// `node --test` (with `cloudflare:workers` stubbed via module.registerHooks — see
+// test/errorBoundaries.test.js / test/routeAuthGate.test.js). Exporting the same
+// singleton the default `fetch` delegates to keeps the deploy entrypoint byte-identical:
+// nothing about route registration, middleware order, or wiring changes.
+export const app = new Hono();
 const DEFAULT_RESURRECTION_PAYMENT_LINK_URL = 'https://buy.stripe.com/8x23codZs9Tj8dgertbV600';
 const NO_STORE = 'no-store';
 
