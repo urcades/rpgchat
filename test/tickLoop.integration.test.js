@@ -34,11 +34,11 @@ async function setTick(db, value) {
   await db.prepare('UPDATE tick SET value = ? WHERE id = 1').bind(value).run();
 }
 
-async function seedPlayer(db, username, { health = 30, stamina = 50, speed = 1 } = {}) {
+async function seedPlayer(db, username, { health = 30, maxHealth = 30, stamina = 50, speed = 1 } = {}) {
   await db.prepare(
     `INSERT INTO users (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold)
-     VALUES (?, 'pw', 'Novice', ?, 30, ?, 100, ?, 1, 1, 1, 0)`
-  ).bind(username, health, stamina, speed).run();
+     VALUES (?, 'pw', 'Novice', ?, ?, ?, 100, ?, 1, 1, 1, 0)`
+  ).bind(username, health, maxHealth, stamina, speed).run();
 }
 
 async function placeUser(db, username, row, col, worldDay) {
@@ -174,7 +174,13 @@ test('adv-013: a poison status ticks its damage once per swept tick', async () =
   try {
     const worldDay = getWorldDay();
     const room = findCalmRoom(worldDay);
-    await seedPlayer(db, 'victim', { health: 20 });
+    // Seed at FULL health with a roomy body (maxHealth 70 → every part comfortably > the
+    // poison magnitude), so the −3 poison tick can never cap a small part or destroy a
+    // low-hp vital part (which would zero health and read as a flaky "death by poison").
+    // The cadence under test is the health DELTA per swept tick, which is now exactly −3
+    // regardless of which part pickTargetPart's RNG selects — so this no longer depends on
+    // the global Math.random a concurrently-running test file may have mocked.
+    await seedPlayer(db, 'victim', { health: 70, maxHealth: 70 });
     await placeUser(db, 'victim', room.row, room.col, worldDay);
     // processStatusEffects ticks an effect whose createdTick < currentTick — seed it at 0.
     await db.prepare(
@@ -184,11 +190,11 @@ test('adv-013: a poison status ticks its damage once per swept tick', async () =
 
     await runWorldSweeps(db, 1);
     let row = await db.prepare("SELECT health FROM users WHERE username = 'victim'").first();
-    assert.equal(row.health, 17, 'one swept tick applies exactly one poison tick (−3)');
+    assert.equal(row.health, 67, 'one swept tick applies exactly one poison tick (−3)');
 
     await runWorldSweeps(db, 2);
     row = await db.prepare("SELECT health FROM users WHERE username = 'victim'").first();
-    assert.equal(row.health, 14, 'the next swept tick applies exactly one more (−3) — once per tick');
+    assert.equal(row.health, 64, 'the next swept tick applies exactly one more (−3) — once per tick');
   } finally {
     await db.close();
   }
