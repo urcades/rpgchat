@@ -436,7 +436,7 @@ export async function handleSkillAction(db, username, row, col, skillId, targetU
       // Cooldown gate fires BEFORE stamina is spent: a blocked rite throws 429 here,
       // so runPlayerAction never reaches spendStamina or advanceTick.
       await assertRiteOffCooldown(db, username, ability, actionTick);
-      return validateClassSkillUse(db, { username, skillId, targetUsername });
+      return validateClassSkillUse(db, { username, skillId, targetUsername, row, col });
     },
     perform: async () => useClassSkill(db, {
       username,

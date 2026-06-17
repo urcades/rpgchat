@@ -164,6 +164,75 @@ test('Plan 013g: an NPC that kills a player is credited in the graveyard (kill a
   }
 });
 
+test('adv-019: the death-reaction line is DEFERRED behind the attack + defeat lines, not emitted immediately', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  try {
+    const room = findCalmRoom(getWorldDay());
+    // A heavy hitter so a single landed blow gibs the 1-HP victim (blowDamage >= GIB_OVERKILL=15
+    // => true death this tick => defeatNpc => emitDeathReaction). strength 80 => 1 + floor(80/4) = 21.
+    await db.prepare(
+      `INSERT INTO users (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level)
+       VALUES ('slayer', 'pw', 'Fighter', 30, 30, 100, 100, 20, 80, 5, 1)`
+    ).bind().run();
+    await game.updatePresence(db, 'slayer', room.row, room.col);
+    await game.getUserState(db, 'slayer'); // instantiate the attacker's body
+
+    // A scalar (bodyless) hostile victim with 1 HP — one blow ends it. Distinct, mentionable name.
+    await db.prepare(
+      `INSERT INTO users (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, isNpc, displayName, npcKind, disposition, role, npcWorldDay)
+       VALUES ('mob:goblin:0', 'npc', 'Novice', 1, 1, 100, 100, 1, 1, 1, 1, 1, 'Goblin', 'ambient_hostile', 'hostile', 'patron', ?)`
+    ).bind(getWorldDay()).run();
+    await game.updatePresence(db, 'mob:goblin:0', room.row, room.col);
+
+    // A surviving SOCIAL bystander — the one who reacts. Friendly, so the reaction is horror.
+    await addSocialNpc(db, game, 'soc:witness', 'Joss', 'friendly', room.row, room.col);
+
+    // Drive the real attack path with a deferred buffer, exactly as handleAttackAction does:
+    // handleAttack returns the attacker's combined line (inserted as a normal message), and
+    // every system line it spins off (defeat, death-reaction) is pushed onto the buffer to be
+    // flushed AFTER. Before this fix, emitDeathReaction destructured the wrong param name and
+    // inserted the reaction IMMEDIATELY — landing before the attacker's own line.
+    const deferredSystemMessages = [];
+    const original = Math.random;
+    Math.random = () => 0.001; // guarantee the speed contest lands (and a benign crit roll)
+    let attackLine;
+    try {
+      attackLine = await game.handleAttack(db, 'slayer', '@Goblin', room.row, room.col, { deferredSystemMessages });
+    } finally {
+      Math.random = original;
+    }
+
+    // The victim is truly dead (gibbed -> defeatNpc), confirming we exercised the reaction path.
+    assert.equal(await db.prepare("SELECT username FROM users WHERE username = 'mob:goblin:0'").first(), null, 'the goblin was truly slain');
+
+    // (a) The reaction is in the DEFERRED buffer (it was NOT inserted immediately).
+    const defeatIdx = deferredSystemMessages.findIndex(d => /Goblin is defeated by slayer/.test(d.message));
+    const reactionIdx = deferredSystemMessages.findIndex(d => /^Joss:/.test(d.message));
+    assert.ok(defeatIdx >= 0, 'the defeat line was deferred');
+    assert.ok(reactionIdx >= 0, 'the death-reaction line was deferred (the bug dropped it from the buffer)');
+    // (b) ...and it sits AFTER the defeat line within the buffer.
+    assert.ok(reactionIdx > defeatIdx, 'the reaction is ordered after the defeat line in the deferred buffer');
+
+    // (c) End-to-end order in the room log: flush the buffer after the attacker's own line,
+    // mirroring handlers.mjs, and assert the reaction lands AFTER both the attack and defeat lines.
+    await game.insertMessage(db, room.row, room.col, 'slayer', attackLine);
+    for (const d of deferredSystemMessages) {
+      await game.insertSystemMessage(db, room.row, room.col, d.message, d.kind);
+    }
+    const log = await db.prepare("SELECT message FROM messages WHERE roomRow = ? AND roomCol = ? ORDER BY id ASC").bind(room.row, room.col).all();
+    const order = log.results.map(r => r.message);
+    const attackPos = order.findIndex(m => m.includes('slayer') && m.includes('Goblin') && !/defeated/.test(m));
+    const defeatPos = order.findIndex(m => /Goblin is defeated by slayer/.test(m));
+    const reactionPos = order.findIndex(m => /^Joss:/.test(m));
+    assert.ok(attackPos >= 0 && defeatPos >= 0 && reactionPos >= 0, 'all three lines are present in the room log');
+    assert.ok(attackPos < reactionPos, 'the attacker\'s own line precedes the death reaction');
+    assert.ok(defeatPos < reactionPos, 'the defeat line precedes the death reaction');
+  } finally {
+    await db.close();
+  }
+});
+
 test('Plan 013f: when the room had turned hostile on a player, survivors GLOAT over their death', async () => {
   const db = await createMigratedDb();
   const game = await import('../worker/game.mjs');

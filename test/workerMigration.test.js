@@ -754,7 +754,7 @@ test('Worker class skills write system messages and advance through the shared a
 
 test('Worker harmful class skills can miss without applying damage or status effects', async () => {
   const db = await createMigratedDb();
-  const { getMessages, handleSkillAction } = await import('../worker/game.mjs');
+  const { getMessages, handleSkillAction, updatePresence } = await import('../worker/game.mjs');
 
   try {
     await db.prepare(
@@ -767,15 +767,22 @@ test('Worker harmful class skills can miss without applying damage or status eff
         ('assassin', 'pw', 'Assassin', 12, 12, 100, 100, 1, 1, 1, 0),
         ('quick_target', 'pw', 'Novice', 20, 20, 100, 100, 20, 1, 1, 0)`
     ).run();
+    // adv-014: a skill aimed at another PLAYER now requires co-location; place the
+    // casters and their target together in a calm room (no passive that heals/hurts the
+    // target on the post-action tick) so these casts can land.
+    const calm = findCalmRoom(getWorldDay());
+    for (const u of ['fighter', 'chemist', 'mage', 'assassin', 'quick_target']) {
+      await updatePresence(db, u, calm.row, calm.col);
+    }
 
-    await withMockedRandom([0.99], () => handleSkillAction(db, 'fighter', 1, 1, 'power_strike', 'quick_target', 1));
-    await withMockedRandom([0.99], () => handleSkillAction(db, 'chemist', 1, 1, 'dose', 'quick_target', 51));
-    await withMockedRandom([0.99], () => handleSkillAction(db, 'mage', 1, 1, 'arcane_pin', 'quick_target', 1));
-    await withMockedRandom([0.99], () => handleSkillAction(db, 'assassin', 1, 1, 'mark', 'quick_target', 1));
+    await withMockedRandom([0.99], () => handleSkillAction(db, 'fighter', calm.row, calm.col, 'power_strike', 'quick_target', 1));
+    await withMockedRandom([0.99], () => handleSkillAction(db, 'chemist', calm.row, calm.col, 'dose', 'quick_target', 51));
+    await withMockedRandom([0.99], () => handleSkillAction(db, 'mage', calm.row, calm.col, 'arcane_pin', 'quick_target', 1));
+    await withMockedRandom([0.99], () => handleSkillAction(db, 'assassin', calm.row, calm.col, 'mark', 'quick_target', 1));
 
     const target = await db.prepare("SELECT health, stamina FROM users WHERE username = 'quick_target'").first();
     const statusEffects = await db.prepare("SELECT effectType FROM statusEffects WHERE username = 'quick_target'").all();
-    const messages = await getMessages(db, 1, 1);
+    const messages = await getMessages(db, calm.row, calm.col);
 
     assert.deepEqual(target, { health: 20, stamina: 100 });
     assert.deepEqual(statusEffects.results, []);
@@ -790,7 +797,7 @@ test('Worker harmful class skills can miss without applying damage or status eff
 
 test('Worker helpful and neutral class skills bypass speed contests', async () => {
   const db = await createMigratedDb();
-  const { handleSkillAction } = await import('../worker/game.mjs');
+  const { handleSkillAction, updatePresence } = await import('../worker/game.mjs');
 
   try {
     await db.prepare(
@@ -804,18 +811,25 @@ test('Worker helpful and neutral class skills bypass speed contests', async () =
         ('cleric', 'pw', 'Cleric', 12, 12, 100, 100, 1, 1, 4, 0),
         ('quick_target', 'pw', 'Novice', 10, 20, 100, 100, 20, 1, 1, 0)`
     ).run();
+    // adv-014: ward/dose/bless aim at another PLAYER, so the target must be co-located;
+    // place every actor and the target together in a calm room (no passive that would
+    // heal the target an extra point on the post-action tick and skew the health check).
+    const calm = findCalmRoom(getWorldDay());
+    for (const u of ['novice', 'paladin', 'chemist', 'dungeoneer', 'cleric', 'quick_target']) {
+      await updatePresence(db, u, calm.row, calm.col);
+    }
     await db.prepare(
       `INSERT INTO statusEffects
         (username, source, effectType, magnitude, createdTick, expiryTick, roomRow, roomCol, sourceUsername)
-       VALUES ('quick_target', 'assassin', 'marked', 2, 1, 10, 1, 1, 'assassin')`
-    ).run();
+       VALUES ('quick_target', 'assassin', 'marked', 2, 1, 10, ?, ?, 'assassin')`
+    ).bind(calm.row, calm.col).run();
 
     await withMockedRandom([0.99], async () => {
-      await handleSkillAction(db, 'novice', 1, 1, 'scrounge', '', 1);
-      await handleSkillAction(db, 'paladin', 1, 1, 'ward', 'quick_target', 1);
-      await handleSkillAction(db, 'chemist', 1, 1, 'dose', 'quick_target', 1);
-      await handleSkillAction(db, 'dungeoneer', 1, 1, 'survey', '', 1);
-      await handleSkillAction(db, 'cleric', 1, 1, 'bless', 'quick_target', 1);
+      await handleSkillAction(db, 'novice', calm.row, calm.col, 'scrounge', '', 1);
+      await handleSkillAction(db, 'paladin', calm.row, calm.col, 'ward', 'quick_target', 1);
+      await handleSkillAction(db, 'chemist', calm.row, calm.col, 'dose', 'quick_target', 1);
+      await handleSkillAction(db, 'dungeoneer', calm.row, calm.col, 'survey', '', 1);
+      await handleSkillAction(db, 'cleric', calm.row, calm.col, 'bless', 'quick_target', 1);
     });
 
     const novice = await db.prepare("SELECT gold FROM users WHERE username = 'novice'").first();
@@ -879,7 +893,7 @@ test('Worker missed attacks do not consume mark or ward until a later hit', asyn
 
 test('Worker skill deaths record the skill and source in the cemetery cause', async () => {
   const db = await createMigratedDb();
-  const { handleSkillAction, processStatusEffects, processIncapacitationBleed } = await import('../worker/game.mjs');
+  const { handleSkillAction, processStatusEffects, processIncapacitationBleed, updatePresence } = await import('../worker/game.mjs');
 
   try {
     await db.prepare(
@@ -892,11 +906,17 @@ test('Worker skill deaths record the skill and source in the cemetery cause', as
         (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, gold)
        VALUES ('target', 'pw', 'Novice', 1, 10, 100, 100, 1, 1, 1, 0)`
     ).run();
+    // adv-014: power_strike aims at another PLAYER, so co-locate the fighter and target
+    // in a calm room (a healing passive would revive the downed target on the post-action
+    // tick) for the killing blow to land and the victim to STAY downed.
+    const calm = findCalmRoom(getWorldDay());
+    await updatePresence(db, 'fighter', calm.row, calm.col);
+    await updatePresence(db, 'target', calm.row, calm.col);
 
     // Plan 023b: a killing skill blow now DOWNS the victim (incapacitated) rather than
     // entombing them instantly. The skill + source is recorded immediately as the
     // downedCause, and rides into the cemetery cause when they finally bleed out.
-    await withMockedRandom([0.1], () => handleSkillAction(db, 'fighter', 1, 1, 'power_strike', 'target', 1));
+    await withMockedRandom([0.1], () => handleSkillAction(db, 'fighter', calm.row, calm.col, 'power_strike', 'target', 1));
     const downedByStrike = await db.prepare(
       "SELECT incapacitated, downedCause FROM users WHERE username = 'target'"
     ).first();

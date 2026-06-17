@@ -870,7 +870,7 @@ function getSkillTarget(invoker, targetUsername) {
   return targetUsername && targetUsername.trim() ? targetUsername.trim() : invoker;
 }
 
-export async function validateClassSkillUse(db, { username, skillId, targetUsername }) {
+export async function validateClassSkillUse(db, { username, skillId, targetUsername, row, col }) {
   const actor = await getUser(db, username);
   const effectiveActor = getEffectiveUser(actor);
   const ability = getAbility(skillId);
@@ -884,10 +884,43 @@ export async function validateClassSkillUse(db, { username, skillId, targetUsern
   // target) and 'self' resolve to the actor and need no lookup.
   const target = getSkillTarget(username, targetUsername);
   if ((ability.target === 'ally' || ability.target === 'enemy') && target) {
-    await getUser(db, target, 'Target');
+    const targetUser = await getUser(db, target, 'Target');
+    // adv-014: co-location gate. A skill aimed at ANOTHER PLAYER must reach someone
+    // standing in this room — mirroring /attack's presence gate (validateAttackTargets).
+    // Without this, a named ally/enemy resolved by existence alone, so power_strike,
+    // dose, mark, arcane_pin, ward, bless &c. could land on any player anywhere on the
+    // map. Self-casts, room/no-target abilities, and NPC targets (co-located by
+    // construction in the hostile loop, which bypasses this path) keep prior behavior.
+    if (!targetUser.isNpc && target !== username) {
+      await assertTargetCoLocated(db, target, row, col);
+    }
   }
 
   return { actor, effectiveActor, target, ability };
+}
+
+// adv-014: is `target` standing in (row, col) right now? Reuses the exact presence
+// semantics /attack relies on — a roomPresence row for this worldDay whose lastSeenAt
+// is within PRESENCE_MAX_AGE_SECONDS (NPCs are always "present", but this helper is only
+// called for players, so that branch never fires here). Throws "They aren't here."
+// otherwise. row/col may be undefined if a caller omitted them — treat that as not present.
+async function assertTargetCoLocated(db, target, row, col) {
+  const worldDay = getWorldDay();
+  const present = await dbFirst(
+    db,
+    `SELECT rp.username
+       FROM roomPresence rp
+       JOIN users u ON u.username = rp.username
+      WHERE rp.username = ?
+        AND rp.roomRow = ?
+        AND rp.roomCol = ?
+        AND rp.worldDay = ?
+        AND (u.isNpc = 1 OR rp.lastSeenAt >= datetime('now', ?))`,
+    [target, row, col, worldDay, `-${PRESENCE_MAX_AGE_SECONDS} seconds`]
+  );
+  if (!present) {
+    throw new ActionError('They aren\'t here.');
+  }
 }
 
 async function tryHarmfulSkillHit(db, { effectiveActor, target, skillLabel, row, col }) {
@@ -905,7 +938,7 @@ async function tryHarmfulSkillHit(db, { effectiveActor, target, skillLabel, row,
 }
 
 export async function useClassSkill(db, { username, skillId, targetUsername, row, col, currentTick, phase, incantation = '', rank = 0 }) {
-  const { effectiveActor, target } = await validateClassSkillUse(db, { username, skillId, targetUsername });
+  const { effectiveActor, target } = await validateClassSkillUse(db, { username, skillId, targetUsername, row, col });
   // isPlayerCast = true: this is the player-invoked path (the only caller of
   // useClassSkill). It authorizes the rite-mastery + cooldown writes in runAbility,
   // which must NEVER fire for an NPC caster (whose username is an opaque id).

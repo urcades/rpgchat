@@ -52,7 +52,7 @@ const NPC_GLOAT = ['Justice, at last.', 'The cur had it coming.', 'One less trou
 
 // The surviving social NPCs react to a death: horror over an ally or an innocent; grim
 // gloating when the room had already turned hostile on the deceased (a "criminal").
-export async function emitDeathReaction(db, { row, col, deadName, deadWasNpc, deferred = null }) {
+export async function emitDeathReaction(db, { row, col, deadName, deadWasNpc, deferredSystemMessages = null }) {
   const presence = await getRoomPresence(db, row, col, getWorldDay());
   const survivors = presence.filter(p => p.isNpc && p.npcKind === 'social');
   if (survivors.length === 0) {
@@ -62,7 +62,12 @@ export async function emitDeathReaction(db, { row, col, deadName, deadWasNpc, de
   const roomTurnedOnThem = !deadWasNpc && survivors.some(p => p.disposition === 'hostile');
   const pool = roomTurnedOnThem ? NPC_GLOAT : NPC_HORROR;
   const line = pool[Math.floor(Math.random() * pool.length)].replace('{who}', deadName);
-  await emitSystemMessage(db, row, col, `${speaker.displayName || speaker.username}: "${line}"`, deferred, 'npc');
+  // adv-019: both callers (death.mjs) pass `deferredSystemMessages:`, so this param MUST
+  // match that name — when an array is supplied, emitSystemMessage pushes onto it (the
+  // reaction lands in handleAttack's flush AFTER the attack + kill/defeat lines) instead
+  // of inserting immediately (which mis-ordered it BEFORE them). provokeRoomNpcs already
+  // uses this name; the old `deferred` here was a copy-paste slip that dropped the array.
+  await emitSystemMessage(db, row, col, `${speaker.displayName || speaker.username}: "${line}"`, deferredSystemMessages, 'npc');
 }
 
 // Plan 013d: the model-absent floor for a plea. The model also flags request:'heal' for
