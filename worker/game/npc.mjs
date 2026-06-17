@@ -21,7 +21,7 @@ import { applyBodyHeal } from './body.mjs';
 import { runAbility } from './combat.mjs';
 import { emitSystemMessage, getMessages, insertMessage, insertSystemMessage } from './messages.mjs';
 import { upsertCooldown } from './progression.mjs';
-import { getCurrentTickValue, getRoomDescription, getRoomPresence } from './world.mjs';
+import { getCurrentTickValue, getRoomDescription, getRoomPresence, getUserOrNull } from './world.mjs';
 
 
 // Plan 013c: the model-absent floor for hostile speech. Overt threats/violence provoke
@@ -212,7 +212,7 @@ export async function runNpcReply(db, ai, row, col) {
       const healerName = healer.displayName || healer.username;
       try {
         if (asker.incapacitated) {
-          const healerRow = await dbFirst(db, 'SELECT * FROM users WHERE username = ?', [healer.username]);
+          const healerRow = await getUserOrNull(db, healer.username);
           await runAbility(db, 'revive', {
             username: healerName,
             effectiveActor: getEffectiveUser(healerRow),
@@ -223,7 +223,7 @@ export async function runNpcReply(db, ai, row, col) {
           });
           helped = { by: healer.username, action: 'revive', target: asker.username };
         } else if ((asker.health || 0) < (asker.maxHealth || 0)) {
-          const askerRow = await dbFirst(db, 'SELECT * FROM users WHERE username = ?', [asker.username]);
+          const askerRow = await getUserOrNull(db, asker.username);
           await applyBodyHeal(db, askerRow, NPC_HEAL_AMOUNT, { row, col });
           await insertSystemMessage(db, row, col, `${healerName} tends ${asker.username}'s wounds.`, 'support');
           helped = { by: healer.username, action: 'heal', target: asker.username };

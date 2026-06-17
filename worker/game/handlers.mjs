@@ -180,6 +180,47 @@ export async function handleStanceCommand(db, username, row, col, message) {
   return { stance: requested };
 }
 
+// adv-010: the slash-command dispatch table. Each row is ONE command —
+// add a verb by adding a row, not by hand-rolling another
+// `if (startsWith) return runPlayerAction(...)` block. The table is an ORDERED
+// array (not a keyed map) because dispatch is first-prefix-wins on
+// `message.trim().toLowerCase().startsWith(prefix)`, and that order is
+// load-bearing: `/unsocket` must be tested before `/socket`. Every row carries
+// the exact stamina cost, optional validate, and the perform handler that the
+// inline blocks used. `perform`/`validate` are factories taking the call
+// context `{ db, username, row, col, message }` so each command passes exactly
+// the args it always did — note /socket and /unsocket deliberately call their
+// handler WITHOUT row/col, preserving their (db, username, message) signature.
+//
+// Two row kinds:
+//   • standard — wrapped in runPlayerAction with staminaCost + advanceTick
+//     (advanceTickOnly), exactly like every wrapped command before.
+//   • raw — dispatched directly (no runPlayerAction here). /cast routes through
+//     handleCastAction, which owns its own runPlayerAction (stamina/tick), so it
+//     must NOT be wrapped again — the `raw: true` flag keeps it in the same
+//     ordered table at its original position rather than as a special case.
+const COMMAND_REGISTRY = [
+  { prefix: '/stance', staminaCost: 1, perform: ({ db, username, row, col, message }) => handleStanceCommand(db, username, row, col, message) },
+  { prefix: '/regrow', staminaCost: 20, validate: ({ db, username, row, col, message }) => validateRegrowCommand(db, username, row, col, message), perform: ({ db, username, row, col, message }) => handleRegrowCommand(db, username, row, col, message) },
+  { prefix: '/roll', staminaCost: 1, validate: ({ db, username, row, col, message }) => validateRollCommand(db, username, row, col, message), perform: ({ db, username, row, col, message }) => handleRollCommand(db, username, row, col, message) },
+  { prefix: '/equip', staminaCost: 1, perform: ({ db, username, row, col, message }) => handleEquipCommand(db, username, row, col, message) },
+  { prefix: '/unequip', staminaCost: 1, perform: ({ db, username, row, col, message }) => handleUnequipCommand(db, username, row, col, message) },
+  { prefix: '/take', staminaCost: 1, perform: ({ db, username, row, col, message }) => handleTakeCommand(db, username, row, col, message) },
+  { prefix: '/drop', staminaCost: 1, perform: ({ db, username, row, col, message }) => handleDropCommand(db, username, row, col, message) },
+  { prefix: '/give', staminaCost: 1, perform: ({ db, username, row, col, message }) => handleGiveCommand(db, username, row, col, message) },
+  { prefix: '/use', staminaCost: 1, perform: ({ db, username, row, col, message }) => handleUseCommand(db, username, row, col, message) },
+  { prefix: '/cook', staminaCost: 1, perform: ({ db, username, row, col, message }) => handleCookCommand(db, username, row, col, message) },
+  { prefix: '/brew', staminaCost: 1, perform: ({ db, username, row, col, message }) => handleBrewCommand(db, username, row, col, message) },
+  { prefix: '/forge', staminaCost: 1, perform: ({ db, username, row, col, message }) => handleForgeCommand(db, username, row, col, message) },
+  { prefix: '/eat', staminaCost: 1, perform: ({ db, username, row, col, message }) => handleEatCommand(db, username, row, col, message) },
+  // handleCastAction routes through handleSkillAction, which owns the
+  // runPlayerAction (stamina/tick), so it isn't wrapped again here.
+  { prefix: '/cast', raw: true, dispatch: ({ db, username, row, col, message }) => handleCastAction(db, username, row, col, message) },
+  { prefix: '/unsocket', staminaCost: 1, perform: ({ db, username, message }) => handleUnsocketCommand(db, username, message) },
+  { prefix: '/socket', staminaCost: 1, perform: ({ db, username, message }) => handleSocketCommand(db, username, message) },
+  { prefix: '/buy', staminaCost: 1, validate: ({ db, username, row, col, message }) => validateBuyCommand(db, username, row, col, message), perform: ({ db, username, row, col, message }) => handleBuyCommand(db, username, row, col, message) }
+];
+
 export async function handleChatAction(db, username, row, col, message) {
   // Plan 023b: the incapacitated may speak (garbled — see the plain-speech path
   // below) but every slash-command is an action and is refused.
@@ -188,155 +229,18 @@ export async function handleChatAction(db, username, row, col, message) {
     throw new ActionError('You are incapacitated — you can do nothing but whisper.', 409);
   }
 
-  if (message.trim().toLowerCase().startsWith('/stance')) {
+  const normalized = message.trim().toLowerCase();
+  const command = COMMAND_REGISTRY.find(entry => normalized.startsWith(entry.prefix));
+  if (command) {
+    const ctx = { db, username, row, col, message };
+    if (command.raw) {
+      return command.dispatch(ctx);
+    }
     return runPlayerAction(db, {
       username,
-      staminaCost: 1,
-      perform: async () => handleStanceCommand(db, username, row, col, message),
-      advanceTick: () => advanceTickOnly(db)
-    });
-  }
-
-  if (message.trim().toLowerCase().startsWith('/regrow')) {
-    return runPlayerAction(db, {
-      username,
-      staminaCost: 20,
-      validate: async () => validateRegrowCommand(db, username, row, col, message),
-      perform: async () => handleRegrowCommand(db, username, row, col, message),
-      advanceTick: () => advanceTickOnly(db)
-    });
-  }
-
-  if (message.trim().toLowerCase().startsWith('/roll')) {
-    return runPlayerAction(db, {
-      username,
-      staminaCost: 1,
-      validate: async () => validateRollCommand(db, username, row, col, message),
-      perform: async () => handleRollCommand(db, username, row, col, message),
-      advanceTick: () => advanceTickOnly(db)
-    });
-  }
-
-  if (message.trim().toLowerCase().startsWith('/equip')) {
-    return runPlayerAction(db, {
-      username,
-      staminaCost: 1,
-      perform: async () => handleEquipCommand(db, username, row, col, message),
-      advanceTick: () => advanceTickOnly(db)
-    });
-  }
-
-  if (message.trim().toLowerCase().startsWith('/unequip')) {
-    return runPlayerAction(db, {
-      username,
-      staminaCost: 1,
-      perform: async () => handleUnequipCommand(db, username, row, col, message),
-      advanceTick: () => advanceTickOnly(db)
-    });
-  }
-
-  if (message.trim().toLowerCase().startsWith('/take')) {
-    return runPlayerAction(db, {
-      username,
-      staminaCost: 1,
-      perform: async () => handleTakeCommand(db, username, row, col, message),
-      advanceTick: () => advanceTickOnly(db)
-    });
-  }
-
-  if (message.trim().toLowerCase().startsWith('/drop')) {
-    return runPlayerAction(db, {
-      username,
-      staminaCost: 1,
-      perform: async () => handleDropCommand(db, username, row, col, message),
-      advanceTick: () => advanceTickOnly(db)
-    });
-  }
-
-  if (message.trim().toLowerCase().startsWith('/give')) {
-    return runPlayerAction(db, {
-      username,
-      staminaCost: 1,
-      perform: async () => handleGiveCommand(db, username, row, col, message),
-      advanceTick: () => advanceTickOnly(db)
-    });
-  }
-
-  if (message.trim().toLowerCase().startsWith('/use')) {
-    return runPlayerAction(db, {
-      username,
-      staminaCost: 1,
-      perform: async () => handleUseCommand(db, username, row, col, message),
-      advanceTick: () => advanceTickOnly(db)
-    });
-  }
-
-  if (message.trim().toLowerCase().startsWith('/cook')) {
-    return runPlayerAction(db, {
-      username,
-      staminaCost: 1,
-      perform: async () => handleCookCommand(db, username, row, col, message),
-      advanceTick: () => advanceTickOnly(db)
-    });
-  }
-
-  if (message.trim().toLowerCase().startsWith('/brew')) {
-    return runPlayerAction(db, {
-      username,
-      staminaCost: 1,
-      perform: async () => handleBrewCommand(db, username, row, col, message),
-      advanceTick: () => advanceTickOnly(db)
-    });
-  }
-
-  if (message.trim().toLowerCase().startsWith('/forge')) {
-    return runPlayerAction(db, {
-      username,
-      staminaCost: 1,
-      perform: async () => handleForgeCommand(db, username, row, col, message),
-      advanceTick: () => advanceTickOnly(db)
-    });
-  }
-
-  if (message.trim().toLowerCase().startsWith('/eat')) {
-    return runPlayerAction(db, {
-      username,
-      staminaCost: 1,
-      perform: async () => handleEatCommand(db, username, row, col, message),
-      advanceTick: () => advanceTickOnly(db)
-    });
-  }
-
-  if (message.trim().toLowerCase().startsWith('/cast')) {
-    // handleCastAction routes through handleSkillAction, which owns the
-    // runPlayerAction (stamina/tick), so it isn't wrapped again here.
-    return handleCastAction(db, username, row, col, message);
-  }
-
-  if (message.trim().toLowerCase().startsWith('/unsocket')) {
-    return runPlayerAction(db, {
-      username,
-      staminaCost: 1,
-      perform: async () => handleUnsocketCommand(db, username, message),
-      advanceTick: () => advanceTickOnly(db)
-    });
-  }
-
-  if (message.trim().toLowerCase().startsWith('/socket')) {
-    return runPlayerAction(db, {
-      username,
-      staminaCost: 1,
-      perform: async () => handleSocketCommand(db, username, message),
-      advanceTick: () => advanceTickOnly(db)
-    });
-  }
-
-  if (message.trim().toLowerCase().startsWith('/buy')) {
-    return runPlayerAction(db, {
-      username,
-      staminaCost: 1,
-      validate: async () => validateBuyCommand(db, username, row, col, message),
-      perform: async () => handleBuyCommand(db, username, row, col, message),
+      staminaCost: command.staminaCost,
+      ...(command.validate ? { validate: async () => command.validate(ctx) } : {}),
+      perform: async () => command.perform(ctx),
       advanceTick: () => advanceTickOnly(db)
     });
   }

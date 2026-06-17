@@ -22,7 +22,7 @@ import { descendTowardDeath, reviveFromIncapacitation } from './death.mjs';
 import { getEquippedModifiers } from './inventory.mjs';
 import { insertSystemMessage } from './messages.mjs';
 import { getProgressionModifiers } from './progression.mjs';
-import { getCurrentTickValue, getUser } from './world.mjs';
+import { getCurrentTickValue, getUser, selectUserColumns } from './world.mjs';
 
 
 // Plan 021 (BOLD): the body gate, generalized. A user's body plan decides whether it
@@ -543,7 +543,7 @@ export async function applyBodyHeal(db, user, amount, options = {}) {
   await emitConditionTransitions(db, user.username, partsBefore, working, row, col, displayLabel);
   // Plan 023b: a heal that lifts a downed player back above 0 stands them up.
   if (healthAfter > 0 && row !== undefined && row !== null && col !== undefined && col !== null) {
-    const downed = await dbFirst(db, 'SELECT incapacitated FROM users WHERE username = ?', [user.username]);
+    const downed = await selectUserColumns(db, user.username, 'incapacitated');
     if (downed && downed.incapacitated) {
       await reviveFromIncapacitation(db, user.username, row, col);
     }
@@ -660,7 +660,7 @@ export async function processStatusEffects(db, currentTick) {
   );
 
   for (const effect of activeEffects) {
-    const stillExists = await dbFirst(db, 'SELECT username FROM users WHERE username = ?', [effect.username]);
+    const stillExists = await selectUserColumns(db, effect.username, 'username');
     if (!stillExists) {
       continue;
     }

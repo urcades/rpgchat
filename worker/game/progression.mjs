@@ -26,11 +26,11 @@ import { changes, dbAll, dbFirst, dbRun } from '../db.mjs';
 import { applyBodyDamage } from './body.mjs';
 import { getSocketedMateriaEffects } from './inventory.mjs';
 import { insertSystemMessage } from './messages.mjs';
-import { getCurrentTickValue, getUser, roomHasEffect } from './world.mjs';
+import { getCurrentTickValue, getUser, roomHasEffect, selectUserColumns } from './world.mjs';
 
 
 export async function assertEnoughStamina(db, username, cost = 1) {
-  const user = await dbFirst(db, 'SELECT stamina FROM users WHERE username = ?', [username]);
+  const user = await selectUserColumns(db, username, 'stamina');
   if (!user || user.stamina < cost) {
     throw new ActionError('Not enough stamina.', 400);
   }
@@ -343,7 +343,7 @@ export async function updateLevel(db, username, row, col) {
 }
 
 export async function awardExperience(db, username, amount) {
-  const user = await dbFirst(db, 'SELECT experience, level, isNpc FROM users WHERE username = ?', [username]);
+  const user = await selectUserColumns(db, username, ['experience', 'level', 'isNpc']);
   if (!user || user.isNpc) {
     return { experience: 0, level: 0, leveled: false };
   }
@@ -357,7 +357,7 @@ export async function awardExperience(db, username, amount) {
   // 1 SP per level grants (plans 016/019), and the materia AP bump are all preserved.
   await dbRun(db, 'UPDATE users SET experience = experience + ? WHERE username = ?', [amount, username]);
 
-  const fresh = await dbFirst(db, 'SELECT experience FROM users WHERE username = ?', [username]);
+  const fresh = await selectUserColumns(db, username, 'experience');
   const nextExperience = fresh ? (fresh.experience || 0) : (user.experience || 0) + amount;
   const nextLevel = calculateLevel(nextExperience, BASE_EXPERIENCE_REQUIRED);
 
@@ -368,7 +368,7 @@ export async function awardExperience(db, username, amount) {
   // so the points granted total the level gain and never double. Plan 016 grants 10
   // attribute points/level; plan 019 grants 1 skill point/level (a SEPARATE currency).
   for (;;) {
-    const current = await dbFirst(db, 'SELECT level FROM users WHERE username = ?', [username]);
+    const current = await selectUserColumns(db, username, 'level');
     const storedLevel = current ? (current.level || 0) : 0;
     if (nextLevel <= storedLevel) {
       break;

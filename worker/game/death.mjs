@@ -22,11 +22,11 @@ import { dropItemOnFloor, dropPlayerItemsOnDeath } from './inventory.mjs';
 import { createTrace, emitSystemMessage, insertSystemMessage } from './messages.mjs';
 import { CREATURE_DEATH_RATTLES, NPC_DEATH_BEGS, emitDeathReaction } from './npc.mjs';
 import { awardExperience, upsertCooldown } from './progression.mjs';
-import { getCurrentTickValue } from './world.mjs';
+import { getCurrentTickValue, getUserOrNull, selectUserColumns } from './world.mjs';
 
 
 export async function moveUserToCemetery(db, username, cause, row, col, options = {}) {
-  const user = await dbFirst(db, 'SELECT username, password, level, gold, job FROM users WHERE username = ?', [username]);
+  const user = await selectUserColumns(db, username, ['username', 'password', 'level', 'gold', 'job']);
   if (!user) {
     return false;
   }
@@ -174,7 +174,7 @@ async function finishOff(db, user, { cause, row, col, currentTick = null, gib = 
 
 // True death without dismemberment — a finishing blow on the downed, or a bleed-out.
 async function trueDeath(db, username, cause, row, col, { currentTick = null, deferredSystemMessages = null } = {}) {
-  const downed = await dbFirst(db, 'SELECT downedCause, level FROM users WHERE username = ?', [username]);
+  const downed = await selectUserColumns(db, username, ['downedCause', 'level']);
   const effectiveCause = cause || downed?.downedCause || 'their wounds';
   await recordKill(db, {
     killer: getKillerFromCause(effectiveCause),
@@ -225,7 +225,7 @@ async function claimForFinish(db, username) {
 export async function descendTowardDeath(db, username, { cause, row, col, blowDamage = 0, overkill = 0, currentTick = null, deferredSystemMessages = null } = {}) {
   // Plan 013g: players AND NPCs descend through the same band — load the full row so
   // finishOff/incapacitate can branch on isNpc.
-  const u = await dbFirst(db, 'SELECT * FROM users WHERE username = ?', [username]);
+  const u = await getUserOrNull(db, username);
   if (!u) {
     return { state: 'gone' };
   }
@@ -308,17 +308,26 @@ export async function processIncapacitationBleed(db, currentTick = null) {
   }
 }
 
+// adv-009: the player-only incapacitation read, in one place. Both the action
+// gate and the boolean probe below load the SAME narrow PLAYER row (the
+// `AND isNpc = 0` predicate is load-bearing — an NPC's flag must not gate a
+// player), so this is its single definition. Returns the row ({ incapacitated })
+// or null when no such player exists.
+async function selectPlayerIncapacitated(db, username) {
+  return dbFirst(db, 'SELECT incapacitated FROM users WHERE username = ? AND isNpc = 0', [username]);
+}
+
 // Plan 023b: an incapacitated actor can do nothing but whisper (garbled). Every
 // non-speech action verb calls this gate; speech falls through to handleChatAction.
 export async function assertActable(db, username) {
-  const u = await dbFirst(db, 'SELECT incapacitated FROM users WHERE username = ? AND isNpc = 0', [username]);
+  const u = await selectPlayerIncapacitated(db, username);
   if (u && u.incapacitated) {
     throw new ActionError('You are incapacitated — you can do nothing but whisper.', 409);
   }
 }
 
 export async function isIncapacitated(db, username) {
-  const u = await dbFirst(db, 'SELECT incapacitated FROM users WHERE username = ? AND isNpc = 0', [username]);
+  const u = await selectPlayerIncapacitated(db, username);
   return Boolean(u && u.incapacitated);
 }
 
