@@ -201,20 +201,49 @@ export async function payInnAccess(db, username, row, col) {
   }
 
   const user = await getUser(db, username);
+  // A genuinely-broke player is rejected BEFORE any write (original ordering for this
+  // case), so they never anchor a transient access row that a co-located payer could
+  // momentarily mistake for "already paid". The atomic gold>=fee guard below is still
+  // the real authority; this is just the cheap early-out.
+  assertAction(user.gold >= currentAccess.fee, 'Not enough gold', 402);
+
+  // adv-018: the access ROW is the idempotency anchor, written FIRST. Two concurrent
+  // pays both saw "unpaid" and would each spend the fee (charged twice) before either
+  // wrote the row. Now we INSERT ... ON CONFLICT DO NOTHING against the (username, room,
+  // accessType, worldDay) primary key up front: the FIRST pay inserts (changes()===1)
+  // and is the only one allowed to spend gold; a racing second pay conflicts
+  // (changes()===0) and is treated as already-paid — no second charge.
+  const claimed = await dbRun(
+    db,
+    `INSERT INTO roomAccess
+      (username, roomRow, roomCol, accessType, costPaid, worldDay)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT (username, roomRow, roomCol, accessType, worldDay) DO NOTHING`,
+    [username, row, col, INN_ACCESS_TYPE, currentAccess.fee, worldDay]
+  );
+
+  if (changes(claimed) !== 1) {
+    // A concurrent pay already anchored access this tick — already-paid, no charge.
+    return await getRoomAccessState(db, username, row, col, tickValue, worldDay);
+  }
+
   const goldUpdate = await dbRun(
     db,
     'UPDATE users SET gold = gold - ? WHERE username = ? AND gold >= ?',
     [currentAccess.fee, username, currentAccess.fee]
   );
-  assertAction(changes(goldUpdate) > 0, 'Not enough gold', 402);
-
-  await dbRun(
-    db,
-    `INSERT OR REPLACE INTO roomAccess
-      (username, roomRow, roomCol, accessType, costPaid, worldDay)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [username, row, col, INN_ACCESS_TYPE, currentAccess.fee, worldDay]
-  );
+  if (changes(goldUpdate) <= 0) {
+    // We won the access claim but our gold dropped below the fee since the read (a
+    // concurrent same-user spend) — undo the anchor so the fee gate stays truthful and
+    // 402 exactly as before, rather than letting them in free.
+    await dbRun(
+      db,
+      `DELETE FROM roomAccess
+       WHERE username = ? AND roomRow = ? AND roomCol = ? AND accessType = ? AND worldDay = ?`,
+      [username, row, col, INN_ACCESS_TYPE, worldDay]
+    );
+    assertAction(false, 'Not enough gold', 402);
+  }
 
   return {
     ...currentAccess,

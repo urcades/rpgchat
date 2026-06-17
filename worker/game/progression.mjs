@@ -348,19 +348,44 @@ export async function awardExperience(db, username, amount) {
     return { experience: 0, level: 0, leveled: false };
   }
 
-  const nextExperience = (user.experience || 0) + amount;
+  // adv-018: the experience write is RELATIVE, not absolute. Two concurrent awards used
+  // to both read E and both write E+amount — one award's gain was silently lost, and the
+  // level/AP/SP they granted was computed off the same stale E (mis-granting). Now we
+  // add the delta in place so neither award is dropped, then RECONCILE the level from
+  // the fresh, post-write experience with a claim-then-act loop so the level-up rewards
+  // are granted exactly once across racing callers. Level-up thresholds, the 10 AP +
+  // 1 SP per level grants (plans 016/019), and the materia AP bump are all preserved.
+  await dbRun(db, 'UPDATE users SET experience = experience + ? WHERE username = ?', [amount, username]);
+
+  const fresh = await dbFirst(db, 'SELECT experience FROM users WHERE username = ?', [username]);
+  const nextExperience = fresh ? (fresh.experience || 0) : (user.experience || 0) + amount;
   const nextLevel = calculateLevel(nextExperience, BASE_EXPERIENCE_REQUIRED);
-  const levelDelta = Math.max(0, nextLevel - user.level);
-  if (levelDelta > 0) {
-    await dbRun(
+
+  // Claim-then-act level reconcile. Read the stored level, and if the fresh experience
+  // earns a higher one, advance it with an UPDATE conditioned on the level we just read
+  // (WHERE level = observed). Exactly one racing caller's conditional matches per step
+  // (changes()===1) and grants that step's 10 AP + 1 SP; a loser re-reads and retries,
+  // so the points granted total the level gain and never double. Plan 016 grants 10
+  // attribute points/level; plan 019 grants 1 skill point/level (a SEPARATE currency).
+  for (;;) {
+    const current = await dbFirst(db, 'SELECT level FROM users WHERE username = ?', [username]);
+    const storedLevel = current ? (current.level || 0) : 0;
+    if (nextLevel <= storedLevel) {
+      break;
+    }
+    const levelDelta = nextLevel - storedLevel;
+    const claimed = await dbRun(
       db,
-      // Plan 016 grants 10 attribute points/level; plan 019 grants 1 skill point/
-      // level (a SEPARATE currency for the progression grid).
-      'UPDATE users SET experience = ?, level = ?, attributePoints = attributePoints + ?, skillPoints = skillPoints + ? WHERE username = ?',
-      [nextExperience, nextLevel, levelDelta * 10, levelDelta, username]
+      `UPDATE users
+         SET level = ?, attributePoints = attributePoints + ?, skillPoints = skillPoints + ?
+       WHERE username = ? AND level = ?`,
+      [nextLevel, levelDelta * 10, levelDelta, username, storedLevel]
     );
-  } else {
-    await dbRun(db, 'UPDATE users SET experience = ? WHERE username = ?', [nextExperience, username]);
+    if (changes(claimed) === 1) {
+      break;
+    }
+    // Another concurrent award advanced the level between our read and write — re-read
+    // and retry against the new stored level (which may already cover us).
   }
 
   // Plan 020d: materia socketed in equipped gear grow with the wielder's deeds.
@@ -371,7 +396,11 @@ export async function awardExperience(db, username, amount) {
     [username]
   );
 
-  return { experience: nextExperience, level: nextLevel, leveled: levelDelta > 0 };
+  // This award's own contribution, measured from the level it observed on entry — so a
+  // single (uncontended) call reports identically to before: leveled iff THIS award
+  // crossed a threshold, and the level it reached.
+  const leveled = nextLevel > user.level;
+  return { experience: nextExperience, level: nextLevel, leveled };
 }
 
 // Plan 018c: abilities granted by a player's EQUIPPED items (an item template's

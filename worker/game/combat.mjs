@@ -38,8 +38,7 @@ import {
   changes,
   dbAll,
   dbFirst,
-  dbRun,
-  lastInsertId
+  dbRun
 } from '../db.mjs';
 import { revivePlayer } from '../resurrection.mjs';
 import {
@@ -549,23 +548,35 @@ export async function handleRollCommand(db, username, row, col, message) {
   );
 
   if (!round) {
-    const created = await dbRun(
+    // adv-018: opening a round is INSERT-then-RESELECT. Two first-rollers in the same
+    // den/tick both saw "no open round" and would each INSERT one — splitting the pool
+    // and paying two winners when resolveExpiredGamblingRounds swept both. There is no
+    // uniqueness on (room, day, open) to lean on, so instead of trusting our own
+    // lastInsertId we INSERT, then re-SELECT the EARLIEST surviving open round for this
+    // (room, worldDay) and join THAT. Both racers run the identical deterministic
+    // ORDER BY (startTick ASC, id ASC) over the same rows, so they converge on ONE
+    // round (the lower id); the extra row, if any, is just an empty open round that the
+    // sweep later closes with zero entries. No migration required.
+    await dbRun(
       db,
       `INSERT INTO gamblingRounds
         (roomRow, roomCol, worldDay, startTick, endTick, status, pool)
        VALUES (?, ?, ?, ?, ?, 'open', 0)`,
       [row, col, worldDay, tickValue, tickValue + 10]
     );
-    round = {
-      id: lastInsertId(created),
-      roomRow: row,
-      roomCol: col,
-      worldDay,
-      startTick: tickValue,
-      endTick: tickValue + 10,
-      status: 'open',
-      pool: 0
-    };
+    round = await dbFirst(
+      db,
+      `SELECT *
+       FROM gamblingRounds
+       WHERE roomRow = ?
+         AND roomCol = ?
+         AND worldDay = ?
+         AND status = 'open'
+         AND endTick >= ?
+       ORDER BY startTick ASC, id ASC
+       LIMIT 1`,
+      [row, col, worldDay, tickValue]
+    );
   }
 
   const roll = Math.floor(Math.random() * 20) + 1;
@@ -619,8 +630,13 @@ async function consumeStatusModifier(db, targetUsername, effectType, currentTick
     return 0;
   }
 
-  await dbRun(db, 'DELETE FROM statusEffects WHERE id = ?', [effect.id]);
-  return effect.magnitude || 0;
+  // adv-018: the DELETE is the CLAIM. Two simultaneous hits can both SELECT the same
+  // ward/mark row, but only one DELETE removes it (changes()===1); the loser sees
+  // changes()===0 and credits nothing. Without this both subtracted the magnitude off
+  // one row, so a single ward absorbed two hits / a mark double-counted. The SELECT
+  // only tells us the magnitude to apply — the delete decides whether we apply it.
+  const claim = await dbRun(db, 'DELETE FROM statusEffects WHERE id = ?', [effect.id]);
+  return changes(claim) === 1 ? (effect.magnitude || 0) : 0;
 }
 
 async function calculateAttackDamage(db, attacker, targetUsername, currentTick, attackerMods = null) {
@@ -1024,13 +1040,21 @@ export async function runAbility(db, abilityId, { username, effectiveActor, targ
         [target, 'ward', currentTick]
       );
       let damage = 1 + Math.floor(effectiveActor.strength / 2);
+      // adv-018: DELETE-as-claim, same as consumeStatusModifier. The mark bonus / ward
+      // reduction applies ONLY if THIS cast's DELETE removed the row (changes()===1) —
+      // so two concurrent power strikes can't both consume one mark/ward. Magnitude is
+      // read from the SELECT; the delete is the authority on whether it counts.
       if (marked) {
-        damage += marked.magnitude;
-        await dbRun(db, 'DELETE FROM statusEffects WHERE id = ?', [marked.id]);
+        const claimedMark = await dbRun(db, 'DELETE FROM statusEffects WHERE id = ?', [marked.id]);
+        if (changes(claimedMark) === 1) {
+          damage += marked.magnitude;
+        }
       }
       if (ward) {
-        damage = Math.max(0, damage - ward.magnitude);
-        await dbRun(db, 'DELETE FROM statusEffects WHERE id = ?', [ward.id]);
+        const claimedWard = await dbRun(db, 'DELETE FROM statusEffects WHERE id = ?', [ward.id]);
+        if (changes(claimedWard) === 1) {
+          damage = Math.max(0, damage - ward.magnitude);
+        }
       }
       const result = damage > 0
         ? await damageUser(db, target, damage, `power strike by ${username}`, row, col)
