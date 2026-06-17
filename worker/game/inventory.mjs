@@ -11,6 +11,7 @@ import {
   assertAction,
   commandRest,
   emptyModifiers,
+  escapeRegExp,
   findRecipeByOutputName,
   generateShopStock,
   getItemCategory,
@@ -36,6 +37,7 @@ import {
   parseItemModifiers
 } from './body.mjs';
 import { insertSystemMessage } from './messages.mjs';
+import { logEvent } from '../observability.mjs';
 import { upsertCooldown } from './progression.mjs';
 import { getCurrentTickValue, getUser, roomHasEffect } from './world.mjs';
 
@@ -389,6 +391,137 @@ export async function handleDropCommand(db, username, row, col, message) {
   }
   const { item } = await dropOwnedItem(db, username, rest, row, col);
   return { dropped: item.name };
+}
+
+// --- /give: one-way item hand-off between co-located players -----------------
+// Move a CARRIED item (owned, unequipped) straight from the giver's pack into the
+// recipient's. The item stays carried — ownerUsername flips and roomRow/roomCol stay
+// NULL (it never touches a floor, unlike /drop). Conditional WHERE makes the move
+// race-safe: a second give of an item already gone (handed off, dropped, equipped) is
+// a no-op. Returns the resolved item row so the caller can announce its canonical name.
+export async function giveItem(db, fromUsername, itemName, toUsername) {
+  const item = await findOwnedUnequippedItem(db, fromUsername, itemName);
+  if (!item) {
+    throw new ActionError("You aren't carrying that.");
+  }
+  const result = await dbRun(
+    db,
+    `UPDATE items SET ownerUsername = ?, roomRow = NULL, roomCol = NULL
+     WHERE id = ? AND ownerUsername = ? AND equippedPartId IS NULL`,
+    [toUsername, item.id, fromUsername]
+  );
+  if (changes(result) === 0) {
+    throw new ActionError("You aren't carrying that.");
+  }
+  return { id: item.id, name: item.name };
+}
+
+// Resolve the @target a /give names to a present, alive, non-NPC OTHER player. Mirrors
+// combat's room-presence + displayName matching (whole-name boundaries, @self/@me, match
+// by username OR displayName) so naming works the same way everywhere — but the gate set
+// is give-specific: no self-give, players only, and the recipient must be standing here
+// (present and not incapacitated/a corpse). Throws the precise ActionError per failure.
+async function resolveGiveTarget(db, giverUsername, row, col, message) {
+  const mentioned = [...message.matchAll(/@([A-Za-z0-9_-]+)/g)].map(m => m[1].toLowerCase());
+  if (mentioned.length === 0) {
+    throw new ActionError('Name who you are giving it to: /give <item> @who.');
+  }
+  const selfNamed = mentioned.includes('self') || mentioned.includes('me');
+
+  // Every named user that EXISTS (present or not), with the fields the gates read.
+  const matchesName = (name) => {
+    const n = String(name || '').toLowerCase();
+    if (n.length < 2) {
+      return false;
+    }
+    return new RegExp(`(^|[^a-z0-9_-])${escapeRegExp(n)}([^a-z0-9_-]|$)`, 'i').test(message);
+  };
+  const candidates = await dbAll(
+    db,
+    "SELECT username, COALESCE(displayName, username) AS displayName, isNpc, incapacitated FROM users WHERE username != 'System'"
+  );
+  const named = candidates.filter(user => {
+    if (selfNamed && user.username === giverUsername) {
+      return true;
+    }
+    const uname = String(user.username).toLowerCase();
+    const dname = String(user.displayName).toLowerCase();
+    if (mentioned.includes(uname) || mentioned.includes(dname)) {
+      return true;
+    }
+    return matchesName(dname) || matchesName(uname);
+  });
+
+  // Gates IN ORDER, each with its own message: exists, not self, not an NPC, present here.
+  const target = named.find(user => user.username !== giverUsername) || named[0] || null;
+  if (selfNamed && (!target || target.username === giverUsername)) {
+    throw new ActionError('You cannot give an item to yourself.');
+  }
+  if (!target) {
+    throw new ActionError('No such person here.');
+  }
+  if (target.username === giverUsername) {
+    throw new ActionError('You cannot give an item to yourself.');
+  }
+  if (target.isNpc) {
+    throw new ActionError('You can only give items to other players.');
+  }
+
+  const worldDay = getWorldDay();
+  const present = await dbFirst(
+    db,
+    `SELECT 1 AS hit FROM roomPresence
+     WHERE username = ? AND roomRow = ? AND roomCol = ? AND worldDay = ?`,
+    [target.username, row, col, worldDay]
+  );
+  if (!present) {
+    throw new ActionError(`${target.displayName} is not here.`);
+  }
+  if (target.incapacitated) {
+    throw new ActionError(`${target.displayName} cannot take that right now.`);
+  }
+  return target;
+}
+
+export async function handleGiveCommand(db, username, row, col, message) {
+  // Strip the @mention(s) off the command rest; what remains is the item name.
+  const rest = commandRest(message, '/give');
+  const itemName = rest.replace(/@[A-Za-z0-9_-]+/g, '').replace(/\s+/g, ' ').trim();
+  if (!itemName) {
+    throw new ActionError('Use /give <item name> @target.');
+  }
+
+  // Resolve & gate the recipient BEFORE touching items: exists, not self, a player,
+  // present and able to receive.
+  const target = await resolveGiveTarget(db, username, row, col, message);
+
+  // The giver must own a matching item that isn't equipped. Distinguish "you aren't
+  // carrying that" from "it's equipped" so the equipped case tells them to unequip first.
+  const carried = await findOwnedUnequippedItem(db, username, itemName);
+  if (!carried) {
+    const equipped = await dbFirst(
+      db,
+      `SELECT name FROM items
+       WHERE ownerUsername = ? AND equippedPartId IS NOT NULL AND LOWER(name) = LOWER(?)
+       ORDER BY id ASC LIMIT 1`,
+      [username, itemName]
+    );
+    if (equipped) {
+      throw new ActionError(`Unequip the ${equipped.name} before giving it.`);
+    }
+    throw new ActionError("You aren't carrying that.");
+  }
+
+  const item = await giveItem(db, username, itemName, target.username);
+
+  // Public room line — everyone present sees the hand-off (kind 'support': a peaceful
+  // exchange, not a blow). The recipient is named by what players SEE (displayName).
+  await insertSystemMessage(db, row, col, `${username} hands the ${item.name} to ${target.displayName}.`, 'support');
+
+  // One structured audit line on success.
+  logEvent({ event: 'item.give', giver: username, recipient: target.username, item: item.name });
+
+  return { gave: item.name, to: target.username };
 }
 
 // --- Plan 020a: consumables + the effects-walker ---------------------------

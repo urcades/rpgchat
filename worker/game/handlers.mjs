@@ -42,6 +42,7 @@ import {
   handleEatCommand,
   handleEquipCommand,
   handleForgeCommand,
+  handleGiveCommand,
   handleSocketCommand,
   handleTakeCommand,
   handleUnequipCommand,
@@ -248,6 +249,15 @@ export async function handleChatAction(db, username, row, col, message) {
       username,
       staminaCost: 1,
       perform: async () => handleDropCommand(db, username, row, col, message),
+      advanceTick: () => advanceGlobalTick(db)
+    });
+  }
+
+  if (message.trim().toLowerCase().startsWith('/give')) {
+    return runPlayerAction(db, {
+      username,
+      staminaCost: 1,
+      perform: async () => handleGiveCommand(db, username, row, col, message),
       advanceTick: () => advanceGlobalTick(db)
     });
   }
