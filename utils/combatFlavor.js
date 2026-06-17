@@ -13,6 +13,22 @@ const VERBS = {
   blunt: { light: ['raps', 'knocks against', 'clips'], solid: ['cracks', 'smashes into', 'bludgeons'], brutal: ['caves in', 'shatters', 'crushes'] },
   fist: { light: ['clips', 'jabs at', 'glances off'], solid: ['cracks a fist into', 'drives an elbow into', 'hammers'], brutal: ['slams a savage blow into', 'pounds', 'batters'] }
 };
+// Per-weapon SIGNATURE verbs — a specific wielded weapon reads distinctly (an Iron
+// Cleaver CHOPS, a Hooked Knife HOOKS/RIPS, a fang BITES), layered OVER the weapon-class
+// pool. Keyed by item templateId. Part-agnostic and tier-agnostic: on a LIVE hit, a
+// matching weaponId draws from here INSTEAD of VERBS[klass][tier]. Self, downed-execution,
+// and NPC-fist paths never consult this map, so they stay byte-identical.
+const SIGNATURE = {
+  iron_cleaver: ['chops into', 'hacks a wedge from', 'cleaves through'],
+  flametongue: ['sears across', 'burns a line through'],
+  frostbrand: ['shears through', 'leaves a frostbitten gash in'],
+  hooked_knife: ['hooks into', 'tears a ragged hole in', 'rips open'],
+  rusty_knife: ['saws into', 'works the rusty edge into'],
+  chipped_knife: ['jabs the chipped point into', 'picks at'],
+  frostbitten_fang: ['sinks the fang into', 'bites deep into'],
+  venom_fang: ['sinks the dripping fang into', 'punctures'],
+  cracked_buckler: ['bashes', 'shield-rams', 'cracks the rim into']
+};
 const EXECUTION = {
   head: ["stomps down on {tgt}'s {pn} as they lie — a wet, final crunch", "brings a heel down on {tgt}'s {pn}", "caves in {tgt}'s {pn} where they lie"],
   neck: ["drives a {w} through {tgt}'s throat where they lie", "opens {tgt}'s throat as they bleed out"],
@@ -30,7 +46,7 @@ const SELF_DOWNED = ['stops struggling and lets the last blow fall', 'gives up a
 const SELF_MISS = ['swings at themselves and misses', 'flails and misses their own mark', "can't quite land a blow on themselves", 'pulls the strike at the last instant'];
 function pick(arr, random) { return arr[Math.floor(random() * arr.length)] || arr[0]; }
 function tierOf(damage, isCritical) { if (isCritical || damage >= 6) return 'brutal'; if (damage >= 3) return 'solid'; return 'light'; }
-function describeAttack({ attacker, target, weaponClass = 'fist', part = null, damage = 0, isCritical = false, targetDowned = false, self = false } = {}, random = Math.random) {
+function describeAttack({ attacker, target, weaponClass = 'fist', weaponId = null, part = null, damage = 0, isCritical = false, targetDowned = false, self = false } = {}, random = Math.random) {
   const klass = VERBS[weaponClass] ? weaponClass : 'fist';
   const nouns = part && PART_NOUNS[part];
   const pn = nouns ? pick(nouns, random) : null;
@@ -45,7 +61,11 @@ function describeAttack({ attacker, target, weaponClass = 'fist', part = null, d
     const line = pick(set, random).split('{tgt}').join(target).split('{pn}').join(pn || 'body').split('{w}').join(WEAPON_NOUN[klass]);
     return `${attacker} ${line} ${dmg}`;
   }
-  const verb = pick(VERBS[klass][tierOf(damage, isCritical)], random);
+  // A matching wielded weapon speaks in its own signature voice (part-/tier-agnostic);
+  // otherwise the class+tier pool. The verb pick is a single draw either way, so the
+  // part-noun-then-verb draw order — and every non-signature line — is byte-identical.
+  const verbPool = (weaponId && SIGNATURE[weaponId]) ? SIGNATURE[weaponId] : VERBS[klass][tierOf(damage, isCritical)];
+  const verb = pick(verbPool, random);
   const where = pn ? ` ${target}'s ${pn}` : ` ${target}`;
   const bang = (isCritical || damage >= 6) ? '!' : '';
   return `${attacker} ${verb}${where} ${dmg}${bang}`;

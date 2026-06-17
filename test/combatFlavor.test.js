@@ -33,6 +33,97 @@ test('a blade hit names a blade verb and a part-noun, with the damage in parens'
   assert.ok(PART_NOUNS.torso.includes('ribs'), 'noun came from the torso set');
 });
 
+// ---------------------------------------------------------------------------
+// Per-weapon SIGNATURE verbs — a recognized wielded weapon (by templateId) speaks in
+// its own voice, layered OVER the weapon-CLASS pool. On a LIVE hit a matching weaponId
+// draws from the signature pool INSTEAD of VERBS[klass][tier]; the pool is part- and
+// tier-agnostic, but the part-noun-then-verb draw order is unchanged (noun is still
+// draw 1, the signature verb is draw 2). An absent/unknown weaponId falls straight back
+// to the class verbs, and the self / downed-execution / NPC-fist paths never consult it.
+
+test('a signature weapon (iron_cleaver) speaks its own verb and still names the part', () => {
+  // weaponId iron_cleaver -> SIGNATURE pool, NOT VERBS.blade. part 'torso' -> noun draw 1
+  // (0.0 -> 'ribs'); signature verb draw 2 (0.0 -> SIGNATURE.iron_cleaver[0] = 'chops into').
+  const line = describeAttack(
+    { attacker: 'Mara', target: 'Bandit', weaponClass: 'blade', weaponId: 'iron_cleaver', part: 'torso', damage: 4 },
+    seq([0.0, 0.0])
+  );
+  assert.equal(line, "Mara chops into Bandit's ribs (4)");
+  assert.match(line, /\bchops into\b/, 'the cleaver CHOPS — its signature verb, not the class verb');
+  assert.doesNotMatch(line, /hacks into/, 'the class/tier verb is bypassed when a signature matches');
+  assert.match(line, /Bandit's ribs/, 'the part clause is preserved under a signature');
+});
+
+test('a signature pool is part-agnostic: a hooked_knife HOOKS the head, not a pierce verb', () => {
+  // weaponId hooked_knife -> SIGNATURE pool regardless of the pierce class or the head part.
+  // part 'head' -> noun draw 1 (0.0 -> 'skull'); signature verb draw 2 (0.0 -> 'hooks into').
+  const line = describeAttack(
+    { attacker: 'Vesh', target: 'Guard', weaponClass: 'pierce', weaponId: 'hooked_knife', part: 'head', damage: 5 },
+    seq([0.0, 0.0])
+  );
+  assert.equal(line, "Vesh hooks into Guard's skull (5)");
+  assert.doesNotMatch(line, /drives a blade into|stabs into/, 'no pierce-class verb leaks through');
+});
+
+test('a signature pool is tier-agnostic but keeps the (N) and the bang on a heavy hit', () => {
+  // damage 7 would be the brutal tier, but the signature pool ignores tiers. No part ->
+  // no noun draw; signature verb is the sole draw (0.0 -> 'sinks the fang into'). damage>=6 -> bang.
+  const line = describeAttack(
+    { attacker: 'Wolf', target: 'Ranger', weaponClass: 'pierce', weaponId: 'frostbitten_fang', part: null, damage: 7 },
+    seq([0.0])
+  );
+  assert.equal(line, 'Wolf sinks the fang into Ranger (7)!');
+  assert.match(line, /\(7\)!$/, 'damage in parens and the bang still ride a signature hit');
+});
+
+test('an unknown/absent weaponId falls back to the class verb (regression: the cleaver-less blade)', () => {
+  // weaponId 'mystery_blade' is not in SIGNATURE -> straight back to VERBS.blade.solid.
+  // This is the original blade-hit line, proving the fallback is byte-identical.
+  const unknown = describeAttack(
+    { attacker: 'Mara', target: 'Bandit', weaponClass: 'blade', weaponId: 'mystery_blade', part: 'torso', damage: 4 },
+    seq([0.0, 0.0])
+  );
+  assert.equal(unknown, "Mara hacks into Bandit's ribs (4)", 'unknown weaponId == the class verb line');
+  // And weaponId omitted entirely is identical — the existing assertion still holds.
+  const absent = describeAttack(
+    { attacker: 'Mara', target: 'Bandit', weaponClass: 'blade', part: 'torso', damage: 4 },
+    seq([0.0, 0.0])
+  );
+  assert.equal(absent, "Mara hacks into Bandit's ribs (4)", 'omitted weaponId == the class verb line');
+});
+
+test('a SELF hit ignores the signature pool (reflexive verbs still win)', () => {
+  // Even with a signature weaponId, self routes to SELF_VERBS. part 'neck' -> noun draw 1
+  // (0.0 -> 'throat'); SELF_VERBS.blade draw 2 (0.0 -> 'drags the edge across their own').
+  const line = describeAttack(
+    { attacker: 'mog', target: 'mog', weaponClass: 'blade', weaponId: 'iron_cleaver', part: 'neck', damage: 4, self: true },
+    seq([0.0, 0.0])
+  );
+  assert.equal(line, 'mog drags the edge across their own throat (4)');
+  assert.doesNotMatch(line, /chops into/, 'a self-attack never reaches the signature pool');
+});
+
+test('a DOWNED target ignores the signature pool (execution lines still win)', () => {
+  // targetDowned routes to EXECUTION even with a signature weaponId. part 'head' -> noun draw 1
+  // (0.0 -> 'skull'); execution-line draw 2 (0.0 -> EXECUTION.head[0], the wet final crunch).
+  const line = describeAttack(
+    { attacker: 'Mara', target: 'Bandit', weaponClass: 'blade', weaponId: 'iron_cleaver', part: 'head', damage: 6, targetDowned: true },
+    seq([0.0, 0.0])
+  );
+  assert.equal(line, "Mara stomps down on Bandit's skull as they lie — a wet, final crunch (6)");
+  assert.doesNotMatch(line, /chops into/, 'a downed execution never reaches the signature pool');
+});
+
+test('the NPC/fist path (no weaponId) is untouched by signatures', () => {
+  // The NPC call passes weaponClass:'fist' and no weaponId -> defaults to null -> class verbs.
+  // No part -> verb is the sole draw (0.0 -> VERBS.fist.light[0] = 'clips').
+  const line = describeAttack(
+    { attacker: 'Frost Wyrm', target: 'hunter', weaponClass: 'fist', part: null, damage: 2 },
+    seq([0.0])
+  );
+  assert.equal(line, 'Frost Wyrm clips hunter (2)', 'the fist path is byte-identical (no signature)');
+});
+
 test('a self-targeted miss reads reflexively (describeSelfMiss), never "name … name"', () => {
   // SELF_MISS[0] = 'swings at themselves and misses' (pick draw 0.0).
   const line = describeSelfMiss('mog', seq([0.0]));

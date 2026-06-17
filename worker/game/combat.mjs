@@ -184,18 +184,19 @@ export async function getAttackElement(db, username) {
   return null;
 }
 
-// The weapon class of a player's equipped HAND item (its template's weaponClass) —
-// drives the brutal flavor verb set in describeAttack. Mirrors getAttackElement but
-// scoped to the 'hand' slot (the weapon). Defaults to 'fist' when nothing is wielded.
+// The equipped HAND weapon's flavor identity: its template weaponClass (the brutal
+// verb SET) plus its templateId (the per-weapon SIGNATURE pool, when one exists).
+// Mirrors getAttackElement but scoped to the 'hand' slot. Defaults to
+// { weaponClass: 'fist', weaponId: null } when nothing is wielded.
 export async function getWeaponClass(db, username) {
   const rows = await dbAll(db, 'SELECT templateId FROM items WHERE ownerUsername = ? AND equippedPartId IS NOT NULL', [username]);
   for (const row of rows) {
     const template = getTemplate(row.templateId);
     if (template && template.slotType === 'hand' && template.weaponClass) {
-      return template.weaponClass;
+      return { weaponClass: template.weaponClass, weaponId: row.templateId };
     }
   }
-  return 'fist';
+  return { weaponClass: 'fist', weaponId: null };
 }
 
 // Net affinity to `element` on the struck part: armor worn there (resist − / weak +)
@@ -697,9 +698,10 @@ export async function handleAttack(db, username, message, row, col, options = {}
 
   const attackerMods = attacker.isNpc ? null : await getConditionAndGearModifiers(db, username);
   // Plan: the attacker's weapon class drives the brutal flavor verb set (blade/pierce/
-  // blunt/fist). Resolved ONCE before the targets loop, like the element is fetched.
-  // An unarmed attacker (or an NPC, who never wields a weaponClass item) → 'fist'.
-  const attackerWeaponClass = await getWeaponClass(db, username);
+  // blunt/fist) and its templateId selects a per-weapon SIGNATURE pool when one exists.
+  // Resolved ONCE before the targets loop, like the element is fetched. An unarmed
+  // attacker (or an NPC, who never wields a weaponClass item) → 'fist' / null id.
+  const { weaponClass: attackerWeaponClass, weaponId: attackerWeaponId } = await getWeaponClass(db, username);
 
   // Stance and called shot are attacker-message-level (apply to every target in
   // this attack). NPCs have no parts, so a called shot only routes at player
@@ -785,6 +787,7 @@ export async function handleAttack(db, username, message, row, col, options = {}
       attacker: username,
       target: targetName,
       weaponClass: attackerWeaponClass,
+      weaponId: attackerWeaponId,
       part: calledShot || damageResult.struckLabel,
       damage,
       isCritical: isCriticalAttack,
