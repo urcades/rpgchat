@@ -16,7 +16,7 @@ import {
   rollNpcDrop,
   rollTrophyDrop
 } from './shared.mjs';
-import { dbAll, dbFirst, dbRun } from '../db.mjs';
+import { changes, dbAll, dbFirst, dbRun } from '../db.mjs';
 import { getBodyParts, isBodylessUser } from './body.mjs';
 import { dropItemOnFloor, dropPlayerItemsOnDeath } from './inventory.mjs';
 import { createTrace, emitSystemMessage, insertSystemMessage } from './messages.mjs';
@@ -31,6 +31,18 @@ export async function moveUserToCemetery(db, username, cause, row, col, options 
     return false;
   }
 
+  // adv-017: the user-delete is the CLAIM point. D1 has no interactive transactions and
+  // this path is reached concurrently (a /attack finisher interleaving the DO-alarm
+  // hostile turn, two attackers, the bleed cron) — so two callers could both read the
+  // same live user and each entomb it, leaving TWO graves + TWO corpses. Delete FIRST and
+  // proceed to lay the grave/corpse ONLY if we removed the row (changes()===1); the loser
+  // sees the row already gone and bails with no grave. The grave/corpse contents are
+  // unchanged — only their gating moved behind the atomic delete.
+  const claim = await dbRun(db, 'DELETE FROM users WHERE username = ?', [username]);
+  if (changes(claim) !== 1) {
+    return false;
+  }
+
   await dbRun(
     db,
     `INSERT INTO cemetery
@@ -38,7 +50,6 @@ export async function moveUserToCemetery(db, username, cause, row, col, options 
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
     [user.username, user.password || '', user.level || 0, user.gold || 0, user.job || 'Novice', cause, row, col]
   );
-  await dbRun(db, 'DELETE FROM users WHERE username = ?', [username]);
   await dbRun(db, 'DELETE FROM roomPresence WHERE username = ?', [username]);
   await dbRun(db, 'DELETE FROM statusEffects WHERE username = ?', [username]);
   const droppedCount = await dropPlayerItemsOnDeath(db, username, row, col);
@@ -84,11 +95,19 @@ export async function moveUserToCemetery(db, username, cause, row, col, options 
 // they just gasp a plea (social) or a broken rattle (beast) and fall.
 async function incapacitate(db, user, cause, row, col, { currentTick = null, deferredSystemMessages = null } = {}) {
   const name = user.displayName || user.username;
-  await dbRun(
+  // adv-017: claim the down transition. Two killing blows can race the same standing
+  // victim (a /attack interleaving the DO-alarm hostile turn, or two attackers) — both
+  // read incapacitated=0 and would each spill loot + post the collapse line twice. Guard
+  // the UPDATE with `AND incapacitated = 0` and only proceed when WE flipped the row
+  // (changes()===1); the loser no-ops (returns false) so the side effects fire once.
+  const claim = await dbRun(
     db,
-    "UPDATE users SET incapacitated = 1, deathClock = 0, downedCause = ?, stance = 'prone', health = 0 WHERE username = ?",
+    "UPDATE users SET incapacitated = 1, deathClock = 0, downedCause = ?, stance = 'prone', health = 0 WHERE username = ? AND incapacitated = 0",
     [cause, user.username]
   );
+  if (changes(claim) !== 1) {
+    return false;
+  }
   await dbRun(db, 'DELETE FROM statusEffects WHERE username = ?', [user.username]); // falling clears chill/burn/etc.
   // Plan 021/023b: zero the body for ANY bodied combatant — a player OR a bodied NPC
   // (creatureBodyPlan != null). users.health was just set to 0, so the parts MUST go to
@@ -117,6 +136,7 @@ async function incapacitate(db, user, cause, row, col, { currentTick = null, def
     await emitSystemMessage(db, row, col, `${name} collapses in a spreading pool of blood, unable to stand.`, deferredSystemMessages, 'death');
   }
   await createTrace(db, { row, col, traceType: 'body', intensity: 2, attacker: getKillerFromCause(cause), target: user.username, createdTick: currentTick ?? 0, expiryTick: null, worldDay: getWorldDay() });
+  return true;
 }
 
 // Plan 013g: the true-death router. NPCs end via defeatNpc (loot, remains, kill credit,
@@ -183,6 +203,23 @@ async function gibAndKill(db, username, cause, row, col, { currentTick = null, d
   await trueDeath(db, username, cause, row, col, { currentTick, deferredSystemMessages });
 }
 
+// adv-017: claim a user for the LETHAL transition. `incapacitated = 2` is a sentinel
+// "being finished" state. Two concurrent killing blows (a /attack finisher racing the
+// DO-alarm hostile turn, or the bleed cron) both read the same pre-finish row and would
+// each finishOff — a double recordKill + duplicate grave. The conditional flip to 2
+// (from any not-yet-finishing state, i.e. incapacitated < 2) is the single gate: only the
+// caller that flips the row (changes()===1) proceeds to finishOff; the loser no-ops. The
+// sentinel is short-lived — the row is deleted by trueDeath/gibAndKill/defeatNpc moments
+// later — and no surviving read ever observes it.
+async function claimForFinish(db, username) {
+  const claim = await dbRun(
+    db,
+    'UPDATE users SET incapacitated = 2 WHERE username = ? AND incapacitated < 2',
+    [username]
+  );
+  return changes(claim) === 1;
+}
+
 // The single decision point every combat death site calls. `blowDamage` is the
 // blow's intended damage; `overkill` is damage that spilled past a live body.
 export async function descendTowardDeath(db, username, { cause, row, col, blowDamage = 0, overkill = 0, currentTick = null, deferredSystemMessages = null } = {}) {
@@ -197,7 +234,11 @@ export async function descendTowardDeath(db, username, { cause, row, col, blowDa
 
   if (!u.incapacitated) {
     if (gib) {
-      await finishOff(db, u, { cause, row, col, currentTick, gib: true, deferredSystemMessages });
+      // adv-017: claim before finishing — a second concurrent gib of the same standing
+      // victim must no-op rather than double-kill (double recordKill + duplicate grave).
+      if (await claimForFinish(db, username)) {
+        await finishOff(db, u, { cause, row, col, currentTick, gib: true, deferredSystemMessages });
+      }
       return { state: 'gibbed' };
     }
     await incapacitate(db, u, cause, row, col, { currentTick, deferredSystemMessages });
@@ -208,7 +249,11 @@ export async function descendTowardDeath(db, username, { cause, row, col, blowDa
   const loss = Math.max(INCAP_BLOW_MIN, blowDamage);
   const next = u.deathClock - loss;
   if (gib || next <= DEATH_FLOOR) {
-    await finishOff(db, u, { cause, row, col, currentTick, gib, deferredSystemMessages });
+    // adv-017: the down->finish step. Two finishing blows both read incapacitated=1 and
+    // cross DEATH_FLOOR; claim the lethal transition so only one calls finishOff.
+    if (await claimForFinish(db, username)) {
+      await finishOff(db, u, { cause, row, col, currentTick, gib, deferredSystemMessages });
+    }
     return { state: gib ? 'gibbed' : 'died' };
   }
   await dbRun(db, 'UPDATE users SET deathClock = ? WHERE username = ?', [next, username]);
@@ -245,7 +290,13 @@ export async function processIncapacitationBleed(db, currentTick = null) {
     const next = d.deathClock - INCAP_BLEED_PER_TICK;
     if (next <= DEATH_FLOOR) {
       const cause = d.downedCause ? `bled out after ${d.downedCause}` : 'bled out';
-      await finishOff(db, d, { cause, row, col, currentTick });
+      // adv-017: the bleed cron is a co-equal lethal site with combat finishers (the DO
+      // alarm + an /attack can both finish the same downed body the same instant). Claim
+      // the lethal transition so the bled-out finishOff fires exactly once — no double
+      // recordKill. In a lone pulse the row is incapacitated=1, so this always wins.
+      if (await claimForFinish(db, d.username)) {
+        await finishOff(db, d, { cause, row, col, currentTick });
+      }
     } else {
       await dbRun(db, 'UPDATE users SET deathClock = ? WHERE username = ?', [next, d.username]);
       // Plan 013e: the health bar shows the falling count live, so the room only gets an
@@ -347,6 +398,22 @@ async function recordKill(db, {
 }
 
 async function awardEventVictory(db, event, row, col, currentTick, options = {}) {
+  // adv-017: claim the event-completion FIRST. The payout below (XP + gold per present
+  // player) is NOT idempotent, so a boss finished twice — two killing blows racing through
+  // defeatNpc, or a retried hostile turn — would double-pay every player in the room. Flip
+  // the event active->completed under a conditional WHERE and award ONLY when WE made the
+  // transition (changes()===1); a second caller sees status already 'completed' and no-ops.
+  // The completion write simply moved to the front of the same effects (same amounts, same
+  // "cleared" line); only its position relative to the payout changed.
+  const claim = await dbRun(
+    db,
+    "UPDATE worldEvents SET status = 'completed', completedTick = ? WHERE id = ? AND status = 'active'",
+    [currentTick, event.id]
+  );
+  if (changes(claim) !== 1) {
+    return;
+  }
+
   const presentPlayers = await dbAll(
     db,
     `SELECT rp.username
@@ -380,11 +447,6 @@ async function awardEventVictory(db, event, row, col, currentTick, options = {})
     );
   }
 
-  await dbRun(
-    db,
-    'UPDATE worldEvents SET status = ?, completedTick = ? WHERE id = ?',
-    ['completed', currentTick, event.id]
-  );
   await emitSystemMessage(db, row, col, `${event.title} has been cleared.`, options.deferredSystemMessages);
 }
 
@@ -414,6 +476,15 @@ export async function defeatNpc(db, npc, { killer, row, col, currentTick, deferr
 
   // Plan 013g: the dying gasp/beg happened when they were downed (incapacitate); defeatNpc
   // is the true death — removal, loot, kill credit, and the room's reaction.
+  // adv-017: stamp the npc_dead cooldown BEFORE deleting the NPC's user row. The social
+  // populator respawns a slain slot only if no fresh npc_dead cooldown sits on it; if the
+  // delete landed first, a presence heartbeat could slip in between the delete and the
+  // cooldown write and resurrect the slot. Writing the gravestone first closes that gap.
+  // (The cooldown row keys on username, independent of the user row, so the ordering swap
+  // is otherwise behavior-identical — same message text, same drops, same reaction.)
+  if (npc.npcKind === 'social') {
+    await upsertCooldown(db, npc.username, row, col, 'npc_dead', currentTick ?? 0, getWorldDay());
+  }
   await dbRun(db, 'DELETE FROM users WHERE username = ? AND isNpc = 1', [npc.username]);
   await dbRun(db, 'DELETE FROM roomPresence WHERE username = ?', [npc.username]);
   await dbRun(db, 'DELETE FROM statusEffects WHERE username = ?', [npc.username]);
@@ -423,11 +494,6 @@ export async function defeatNpc(db, npc, { killer, row, col, currentTick, deferr
   // A scalar NPC has no rows, so this is a harmless no-op for it.
   await dbRun(db, 'DELETE FROM bodyParts WHERE username = ?', [npc.username]);
   await dbRun(db, 'UPDATE worldEventEntities SET lastDefeatedTick = ? WHERE username = ?', [currentTick, npc.username]);
-  // Plan 013f: a slain SOCIAL NPC stays slain for the day — mark its slot so the social
-  // populator won't resurrect it on the next presence heartbeat.
-  if (npc.npcKind === 'social') {
-    await upsertCooldown(db, npc.username, row, col, 'npc_dead', currentTick ?? 0, getWorldDay());
-  }
   await emitSystemMessage(db, row, col, `${npc.displayName || npc.username} is defeated by ${killer}.`, deferredSystemMessages, 'combat');
   // Plan 013f: the surviving room reacts to the kill.
   await emitDeathReaction(db, { row, col, deadName: npc.displayName || npc.username, deadWasNpc: true, deferredSystemMessages });

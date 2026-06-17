@@ -34,7 +34,7 @@ async function hasCorpse(db, username) {
 async function insertResurrectedUser(db, grave) {
   await dbRun(
     db,
-    `INSERT INTO users
+    `INSERT OR IGNORE INTO users
       (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold)
      VALUES (?, ?, ?, 30, 30, 100, 100, 1, 1, 1, ?, ?)`,
     [grave.username, grave.password || '', grave.job || 'Novice', grave.level || 0, grave.gold || 0]
@@ -50,11 +50,21 @@ export async function revivePlayer(db, username, row, col) {
   if (!grave) {
     return { revived: false, reason: 'no_grave' };
   }
+  // adv-017: claim the grave FIRST, mirroring fulfillResurrectionCheckout's claim-first
+  // style. Two Cleric revives on one corpse used to both pass the liveUser check and then
+  // collide — the 2nd INSERT PK-violates, or both delete the grave/corpse. Deleting the
+  // grave by id is the single gate: only the caller that removes it (changes()===1)
+  // recreates the user and consumes the corpse; the loser sees the grave already gone and
+  // returns the same no_grave result a stale revive would. Recreate with INSERT OR IGNORE
+  // and consume the corpse only after winning, so the whole revive is idempotent.
+  const claim = await dbRun(db, 'DELETE FROM cemetery WHERE id = ?', [grave.id]);
+  if (changes(claim) !== 1) {
+    return { revived: false, reason: 'no_grave' };
+  }
   const liveUser = await dbFirst(db, 'SELECT username FROM users WHERE username = ?', [username]);
   if (!liveUser) {
     await insertResurrectedUser(db, grave);
   }
-  await dbRun(db, 'DELETE FROM cemetery WHERE id = ?', [grave.id]);
   await dbRun(db, 'DELETE FROM items WHERE corpseOf = ?', [username]);
   await dbRun(db, 'UPDATE sessions SET username = ?, deadUsername = NULL WHERE deadUsername = ?', [username, username]);
   return { revived: true, username };
