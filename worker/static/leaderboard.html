@@ -4,6 +4,25 @@
   <meta charset="utf-8">
   <title>Leaderboard</title>
   <link rel="stylesheet" href="/styles.css">
+  <style>
+    .leaderboard-table {
+      border-collapse: collapse;
+      width: 100%;
+    }
+    .leaderboard-table th,
+    .leaderboard-table td {
+      border-bottom: 1px solid #d9d9d9;
+      padding: .35em .6em;
+      text-align: left;
+    }
+    .leaderboard-table th.num,
+    .leaderboard-table td.num {
+      text-align: right;
+    }
+    .leaderboard-table thead th {
+      font-weight: bold;
+    }
+  </style>
 </head>
 <body>
   <main class="page">
@@ -16,11 +35,50 @@
       .then(response => response.json())
       .then(players => {
         const root = document.getElementById('leaderboard');
-        players.forEach(player => {
-          const div = document.createElement('div');
-          div.textContent = `${player.username}: ${player.gold} gold`;
-          root.appendChild(div);
+        if (players.length === 0) {
+          root.textContent = 'No living players yet.';
+          return;
+        }
+        const table = document.createElement('table');
+        table.className = 'leaderboard-table';
+
+        const head = document.createElement('thead');
+        const headRow = document.createElement('tr');
+        [
+          { label: '#', num: true },
+          { label: 'Player', num: false },
+          { label: 'Level', num: true },
+          { label: 'Kills', num: true },
+          { label: 'Gold', num: true }
+        ].forEach(col => {
+          const th = document.createElement('th');
+          th.textContent = col.label;
+          if (col.num) th.className = 'num';
+          headRow.appendChild(th);
         });
+        head.appendChild(headRow);
+        table.appendChild(head);
+
+        const body = document.createElement('tbody');
+        players.forEach((player, index) => {
+          const row = document.createElement('tr');
+          const cells = [
+            { value: index + 1, num: true },
+            { value: player.username, num: false },
+            { value: player.level || 0, num: true },
+            { value: player.kills || 0, num: true },
+            { value: player.gold || 0, num: true }
+          ];
+          cells.forEach(cell => {
+            const td = document.createElement('td');
+            td.textContent = cell.value;
+            if (cell.num) td.className = 'num';
+            row.appendChild(td);
+          });
+          body.appendChild(row);
+        });
+        table.appendChild(body);
+        root.appendChild(table);
       });
   </script>
 </body>

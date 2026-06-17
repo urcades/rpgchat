@@ -1422,3 +1422,19 @@ export async function roomNeedsLoop(db, row, col) {
   );
   return Boolean(social);
 }
+
+// Plan 024: the living leaderboard. Kills DERIVE from killHistory (the same
+// correlated COUNT(*) the cemetery/death pages use) — no kills column, no
+// migration. NPCs are excluded; the ranking is kills first (the point of the
+// board), then level, then gold as tie-breakers.
+export async function getLeaderboard(db) {
+  return dbAll(
+    db,
+    `SELECT u.username, u.gold, u.level,
+            (SELECT COUNT(*) FROM killHistory kh WHERE kh.killerUsername = u.username) AS kills
+     FROM users u
+     WHERE u.isNpc = 0
+       AND u.username != 'System'
+     ORDER BY kills DESC, u.level DESC, u.gold DESC`
+  );
+}

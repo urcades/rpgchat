@@ -17,6 +17,7 @@ import {
   createItemForOwner,
   getCurrentPosition,
   getCurrentTickValue,
+  getLeaderboard,
   getMessages,
   getActiveWorldEvents,
   getRoomAccessState,
@@ -532,7 +533,7 @@ app.get('/cemetery-data', async c => {
 });
 
 app.get('/leaderboard-data', async c => {
-  const players = await dbAll(c.env.DB, 'SELECT username, gold FROM users WHERE isNpc = 0 ORDER BY gold DESC');
+  const players = await getLeaderboard(c.env.DB);
   return c.json(players);
 });
 

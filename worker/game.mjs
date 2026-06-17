@@ -39,6 +39,7 @@ export {
   getActiveWorldEvents,
   getCurrentPosition,
   getCurrentTickValue,
+  getLeaderboard,
   getRoomAccessState,
   getRoomEcology,
   getRoomFeaturesForTick,
