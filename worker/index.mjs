@@ -54,13 +54,44 @@ import { verifyStripeWebhook } from './stripe.mjs';
 import { canonicalLocalRequestUrl } from './localHost.mjs';
 import { wantsHtmlResponse, wantsJsonResponse } from './http.mjs';
 import { elapsedMs, errorFields, guard, logEvent, measureAsync, nowMs } from './observability.mjs';
+// shouldFulfillResurrection is intentionally NOT imported yet — adv-015 (Stripe fail-closed)
+// is held pending prod env-var confirmation; the predicate lives + is tested in validation.mjs.
+import { isReservedUsername, isValidUsername } from './validation.mjs';
 
 const app = new Hono();
 const DEFAULT_RESURRECTION_PAYMENT_LINK_URL = 'https://buy.stripe.com/8x23codZs9Tj8dgertbV600';
 const NO_STORE = 'no-store';
 
+// adv-012 observability slice: tag each incoming request with a short id so the structured
+// log lines emitted on its path can be correlated. Prefer Cloudflare's per-request ray id
+// (stable across the edge + visible in the dashboard); fall back to a process-local counter
+// when it's absent (local dev / tests). Stored on c.set('requestId', ...) so any handler —
+// and the error path in formError — can read it back with requestIdFromContext(c).
+let requestCounter = 0;
+
+function mintRequestId(c) {
+  const ray = c.req.raw.headers.get('cf-ray');
+  if (ray) {
+    return ray;
+  }
+  requestCounter += 1;
+  return `req-${requestCounter.toString(36)}`;
+}
+
+function requestIdFromContext(c) {
+  // c.get throws if the var was never set (e.g. a request that errored before the
+  // top-level middleware ran); fall back to null so a log line is never blocked.
+  try {
+    return c.get('requestId') ?? null;
+  } catch {
+    return null;
+  }
+}
+
 app.use('*', async (c, next) => {
   const requestStart = nowMs();
+  const requestId = mintRequestId(c);
+  c.set('requestId', requestId);
   const canonicalUrl = canonicalLocalRequestUrl(c.req.url);
   if (canonicalUrl) {
     return redirectNoStore(c, canonicalUrl, 307);
@@ -73,6 +104,7 @@ app.use('*', async (c, next) => {
     if (!isStaticAssetPath(pathname)) {
       logEvent({
         event: 'request.complete',
+        requestId,
         method: c.req.method,
         path: pathname,
         status: c.res.status,
@@ -182,6 +214,18 @@ function runAfterResponse(c, payload, callback) {
 
 function formError(c, err) {
   const statusCode = err.statusCode || 500;
+  // adv-012: correlate every error reply with its request id and emit it as a structured
+  // line (5xx also keeps the raw console.error for the full stack in the dashboard). A
+  // client never sees the id — it only ties the user-facing failure back to the logs.
+  const requestId = requestIdFromContext(c);
+  logEvent({
+    event: 'request.error',
+    requestId,
+    method: c.req.method,
+    path: new URL(c.req.url).pathname,
+    status: statusCode,
+    ...errorFields(err)
+  });
   if (statusCode >= 500) {
     console.error(err);
   }
@@ -344,6 +388,15 @@ app.post('/signup', async c => {
 
     if (!username || !password) {
       throw new ActionError('Username and password are required.');
+    }
+    // adv-016: enforce the username shape BEFORE the reserved check (a clearer error for the
+    // common typo) and before any DB lookup. The pattern also closes a stored-XSS seam —
+    // markup characters can never enter a username and later render in a transcript.
+    if (!isValidUsername(username)) {
+      throw new ActionError('Username must be 3-20 characters: letters, numbers, hyphens, or underscores only.');
+    }
+    if (isReservedUsername(username)) {
+      throw new ActionError('That username is reserved. Please choose another.');
     }
     if (!Object.prototype.hasOwnProperty.call(JOBS, body.job)) {
       throw new ActionError('Invalid job.');
@@ -555,6 +608,11 @@ app.post('/stripe/webhook', async c => {
     }
 
     const session = event.data?.object || {};
+    // adv-015 (HELD pending prod env-var confirmation, Campaign D): the fail-CLOSED rewrite
+    // (shouldFulfillResurrection, in worker/validation.mjs + tested) is staged on branch
+    // feat/adv-015-016-index but NOT shipped until STRIPE_RESURRECTION_PAYMENT_LINK_ID is
+    // confirmed set in prod — flipping it blind would refuse all paid revives if it's unset.
+    // Current behavior (allowlist skipped when the link id is unset) is unchanged for now.
     if (c.env.STRIPE_RESURRECTION_PAYMENT_LINK_ID && session.payment_link !== c.env.STRIPE_RESURRECTION_PAYMENT_LINK_ID) {
       return c.json({ received: true, ignored: true });
     }
