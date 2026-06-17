@@ -58,7 +58,7 @@ import { createTrace, insertSystemMessage } from './messages.mjs';
 import { provokeRoomNpcs } from './npc.mjs';
 import { bumpRiteMastery, getUsableAbilityIds, upsertCooldown } from './progression.mjs';
 import {
-  advanceGlobalTick,
+  advanceTickAndMaybeSweep,
   getCurrentTickValue,
   getRoomPresence,
   getUser,
@@ -353,7 +353,11 @@ async function getAlliedHostiles(db, row, col, casterUsername) {
 }
 
 export async function runHostileRoomAction(db, row, col) {
-  const tick = await advanceGlobalTick(db);
+  // adv-013: the per-5s hostile-room alarm advances the tick (so the combat cadence and NPC
+  // turn parity are preserved exactly), then runs the global sweeps ONLY if it is the first
+  // driver in this tick-window. With K hostile rooms, this collapses ~5K world scans/window
+  // down to one — the sweeps still fire on the 5s combat cadence, just once, not K×.
+  const tick = await advanceTickAndMaybeSweep(db);
   const worldDay = getWorldDay();
   const npc = await dbFirst(
     db,

@@ -37,6 +37,7 @@ import {
   ensureSocialPopulation,
   roomHasActiveHostiles,
   roomNeedsLoop,
+  runDeferredWorldSweeps,
   runHostileRoomAction,
   runNpcAmbient,
   runNpcReply,
@@ -889,6 +890,10 @@ app.post('/chat/:row/:col', async c => {
     const action = await measureAsync(() => handleChatAction(c.env.DB, auth.user.username, row, col, message));
     const result = action.value;
     runAfterResponse(c, { action: 'chat', roomRow: row, roomCol: col }, async () => {
+      // adv-013: the action only advanced the tick synchronously; run the global sweeps
+      // here, off the latency path, deduped by the tick-window claim so a calm-room action
+      // still drives the per-tick effects on its own cadence without K-fold fan-out.
+      await runDeferredWorldSweeps(c.env.DB, result.tick?.tick);
       const broadcast = await measureAsync(() => broadcastRoom(c.env, row, col, { type: 'message', username: auth.user.username, result }));
       const hostileLoop = await measureAsync(() => startHostileLoopIfNeeded(c.env, row, col));
       // Plan 013a: after the player's line lands, give a present NPC a chance to answer.
@@ -939,6 +944,8 @@ app.post('/attack/:row/:col', async c => {
     const action = await measureAsync(() => handleAttackAction(c.env.DB, auth.user.username, row, col, message, targetPart));
     const result = action.value;
     runAfterResponse(c, { action: 'attack', roomRow: row, roomCol: col }, async () => {
+      // adv-013: sweeps run here (off the latency path), deduped by the tick-window claim.
+      await runDeferredWorldSweeps(c.env.DB, result.tick?.tick);
       const broadcast = await measureAsync(() => broadcastRoom(c.env, row, col, { type: 'attack', username: auth.user.username, result }));
       const hostileLoop = await measureAsync(() => startHostileLoopIfNeeded(c.env, row, col));
       logEvent({
@@ -992,6 +999,8 @@ app.post('/skill/:row/:col', async c => {
     ));
     const result = action.value;
     runAfterResponse(c, { action: 'skill', roomRow: row, roomCol: col }, async () => {
+      // adv-013: sweeps run here (off the latency path), deduped by the tick-window claim.
+      await runDeferredWorldSweeps(c.env.DB, result.tick?.tick);
       const broadcast = await measureAsync(() => broadcastRoom(c.env, row, col, { type: 'skill', username: auth.user.username, result }));
       const hostileLoop = await measureAsync(() => startHostileLoopIfNeeded(c.env, row, col));
       logEvent({
@@ -1042,6 +1051,8 @@ app.post('/job/:row/:col', async c => {
     ));
     const result = action.value;
     runAfterResponse(c, { action: 'job', roomRow: row, roomCol: col }, async () => {
+      // adv-013: sweeps run here (off the latency path), deduped by the tick-window claim.
+      await runDeferredWorldSweeps(c.env.DB, result.tick?.tick);
       const broadcast = await measureAsync(() => broadcastRoom(c.env, row, col, { type: 'job', username: auth.user.username, result }));
       const hostileLoop = await measureAsync(() => startHostileLoopIfNeeded(c.env, row, col));
       logEvent({

@@ -797,7 +797,7 @@ test('Worker harmful class skills can miss without applying damage or status eff
 
 test('Worker helpful and neutral class skills bypass speed contests', async () => {
   const db = await createMigratedDb();
-  const { handleSkillAction, updatePresence } = await import('../worker/game.mjs');
+  const { handleSkillAction, updatePresence, runDeferredWorldSweeps } = await import('../worker/game.mjs');
 
   try {
     await db.prepare(
@@ -824,12 +824,18 @@ test('Worker helpful and neutral class skills bypass speed contests', async () =
        VALUES ('quick_target', 'assassin', 'marked', 2, 1, 10, ?, ?, 'assassin')`
     ).bind(calm.row, calm.col).run();
 
+    // adv-013: each action now only advances the tick synchronously; the route fires the
+    // global sweeps (incl. the bless heal-over-time the target receives) from
+    // runAfterResponse on the tick that action produced. Mirror that here — drive the
+    // deferred sweep per action on its own advanced tick — so the post-action target state
+    // is observed exactly as a player would experience it (each tick-window sweeps once).
     await withMockedRandom([0.99], async () => {
-      await handleSkillAction(db, 'novice', calm.row, calm.col, 'scrounge', '', 1);
-      await handleSkillAction(db, 'paladin', calm.row, calm.col, 'ward', 'quick_target', 1);
-      await handleSkillAction(db, 'chemist', calm.row, calm.col, 'dose', 'quick_target', 1);
-      await handleSkillAction(db, 'dungeoneer', calm.row, calm.col, 'survey', '', 1);
-      await handleSkillAction(db, 'cleric', calm.row, calm.col, 'bless', 'quick_target', 1);
+      const sweepAfter = async result => { await runDeferredWorldSweeps(db, result.tick.tick); return result; };
+      await sweepAfter(await handleSkillAction(db, 'novice', calm.row, calm.col, 'scrounge', '', 1));
+      await sweepAfter(await handleSkillAction(db, 'paladin', calm.row, calm.col, 'ward', 'quick_target', 1));
+      await sweepAfter(await handleSkillAction(db, 'chemist', calm.row, calm.col, 'dose', 'quick_target', 1));
+      await sweepAfter(await handleSkillAction(db, 'dungeoneer', calm.row, calm.col, 'survey', '', 1));
+      await sweepAfter(await handleSkillAction(db, 'cleric', calm.row, calm.col, 'bless', 'quick_target', 1));
     });
 
     const novice = await db.prepare("SELECT gold FROM users WHERE username = 'novice'").first();

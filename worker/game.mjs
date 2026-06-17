@@ -29,6 +29,9 @@ export {
 
 export {
   advanceGlobalTick,
+  advanceTickAndMaybeSweep,
+  advanceTickOnly,
+  claimWorldSweep,
   cleanupOldWorldDayData,
   createNpcForEvent,
   ensureDailyWorldEvents,
@@ -54,7 +57,9 @@ export {
   roomHasActiveHostiles,
   roomHasEffect,
   roomNeedsLoop,
+  runDeferredWorldSweeps,
   runScheduledWorldPulse,
+  runWorldSweeps,
   updatePresence,
   validateMovement
 } from './game/world.mjs';

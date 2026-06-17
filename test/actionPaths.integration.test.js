@@ -66,7 +66,7 @@ async function seedPlayer(db, username, opts = {}) {
 
 test('Plan adv-003: /job in a guild changes vocation, folds the job bonus, and spends stamina', async () => {
   const db = await createMigratedDb();
-  const { handleJobChangeAction, updatePresence, getUserState } = await import('../worker/game.mjs');
+  const { handleJobChangeAction, updatePresence, getUserState, runDeferredWorldSweeps } = await import('../worker/game.mjs');
   try {
     const worldDay = getWorldDay();
     const guild = findRoomWithEffect(worldDay, 'guild');
@@ -79,6 +79,11 @@ test('Plan adv-003: /job in a guild changes vocation, folds the job bonus, and s
     const before = await getUserState(db, 'switcher');
     const result = await handleJobChangeAction(db, 'switcher', guild.row, guild.col, 'Mage', roomUseFor(worldDay));
     assert.equal(result.job, 'Mage', 'the action reports the new job');
+    // adv-013: the action now only ADVANCES the tick synchronously; the global sweeps
+    // (incl. the guild's stamina-restoring room passive) run off the latency path. The
+    // route drives them from runAfterResponse — mirror that here so the post-tick state
+    // (the +1 stamina offset below) is observed exactly as a player would experience it.
+    await runDeferredWorldSweeps(db, result.tick.tick);
 
     const row = await db.prepare("SELECT job, stamina FROM users WHERE username = 'switcher'").first();
     assert.equal(row.job, 'Mage', 'the job is persisted');

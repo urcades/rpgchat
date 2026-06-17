@@ -1298,10 +1298,33 @@ export async function processCorpseDecay(db, tickValue = null) {
   }
 }
 
-export async function advanceGlobalTick(db) {
+// adv-013 (the COST split): advancing the tick and running the world sweeps are now
+// two separable steps. The increment is the cheap, always-synchronous part (it carries
+// the combat cadence — every action and every 5s hostile alarm bumps it, and NPC turn
+// logic reads its parity); the five global sweeps are the EXPENSIVE part that scans the
+// whole world and must NOT fan out K× per 5s window.
+
+// The cheap part: bump the global tick by one and report the new value. Runs NO sweeps,
+// so it is safe in the synchronous request-latency path (the per-action advanceTick
+// callback) and is the first thing every tick driver does. `staminaUpdated` mirrors the
+// every-3rd-tick stamina cadence the sweep applies, so a caller can still report it.
+export async function advanceTickOnly(db) {
   await dbRun(db, 'UPDATE tick SET value = value + 1 WHERE id = 1');
   const tickValue = await getCurrentTickValue(db);
+  return {
+    tick: tickValue,
+    staminaUpdated: tickValue % 3 === 0
+  };
+}
 
+// The expensive part: the five GLOBAL sweeps (+ the every-3rd-tick stamina recovery),
+// extracted verbatim from the original advanceGlobalTick. Pure cadence-preservers — every
+// per-tick effect (room hazards, the incap bleed, corpse decay, status ticks, gambling
+// resolution, stamina recovery) keeps the EXACT schedule it had inside advanceGlobalTick;
+// only WHERE/HOW-OFTEN this block runs changes (see claimWorldSweep). `tickValue` is passed
+// in (never re-read) so the sweep operates on the same tick the increment produced, even
+// when the claim runs slightly later (e.g. deferred after the response).
+export async function runWorldSweeps(db, tickValue) {
   if (tickValue % 3 === 0) {
     await recoverStaminaForAllUsers(db);
   }
@@ -1311,17 +1334,97 @@ export async function advanceGlobalTick(db) {
   await processCorpseDecay(db, tickValue);
   await processStatusEffects(db, tickValue);
   await resolveExpiredGamblingRounds(db, tickValue);
+}
 
-  return {
-    tick: tickValue,
-    staminaUpdated: tickValue % 3 === 0
-  };
+// adv-013 (the DEDUP claim): only the FIRST caller in a given tick-window runs the global
+// sweeps; the rest skip. With K hostile rooms the tick advances K+1×/5s and EACH advance
+// used to run all five world-scanning sweeps — ~5K scans/window. The claim collapses that
+// to ONE sweep per window. The marker reuses roomEffectCooldowns (NO migration): a sentinel
+// row (pseudo-user '__world_sweep', pseudo-room 0,0, keyed by worldDay so the daily reset
+// sweeps it like every other cooldown). The conditional UPDATE ... WHERE lastAppliedTick <
+// tickValue is atomic per statement, so exactly one concurrent caller flips it and sees
+// changes()==1; a later caller in the SAME tick is a no-op (changes()==0 → skip). A higher
+// tick always wins, so a fresh window always re-claims. Returns true iff THIS caller won.
+const WORLD_SWEEP_SENTINEL_USER = '__world_sweep';
+const WORLD_SWEEP_EFFECT_TYPE = 'world_sweep';
+
+export async function claimWorldSweep(db, tickValue, worldDay = getWorldDay()) {
+  // Seed the row once (cheap, idempotent) with a sentinel below any real tick so the very
+  // first claim's conditional UPDATE matches. INSERT OR IGNORE never clobbers an existing
+  // marker, so a concurrent seed can't reset a claim already won this window.
+  await dbRun(
+    db,
+    `INSERT OR IGNORE INTO roomEffectCooldowns
+      (username, roomRow, roomCol, effectType, lastAppliedTick, worldDay)
+     VALUES (?, 0, 0, ?, -1, ?)`,
+    [WORLD_SWEEP_SENTINEL_USER, WORLD_SWEEP_EFFECT_TYPE, worldDay]
+  );
+  const claim = await dbRun(
+    db,
+    `UPDATE roomEffectCooldowns
+     SET lastAppliedTick = ?
+     WHERE username = ?
+       AND roomRow = 0
+       AND roomCol = 0
+       AND effectType = ?
+       AND worldDay = ?
+       AND lastAppliedTick < ?`,
+    [tickValue, WORLD_SWEEP_SENTINEL_USER, WORLD_SWEEP_EFFECT_TYPE, worldDay, tickValue]
+  );
+  return changes(claim) > 0;
+}
+
+// adv-013: the deduped tick driver for the high-fan-out paths (the per-5s hostile-room
+// alarm; the cron pulse). Advances the tick cheaply, then runs the world sweeps ONLY if
+// this caller is the first in the window — so K alarms fire the sweeps once, not K×. Keeps
+// advanceGlobalTick's return shape so its callers are byte-identical.
+export async function advanceTickAndMaybeSweep(db) {
+  const tick = await advanceTickOnly(db);
+  if (await claimWorldSweep(db, tick.tick)) {
+    await runWorldSweeps(db, tick.tick);
+  }
+  return tick;
+}
+
+// adv-013: the deferred-sweep entry for the per-ACTION path. The action's advanceTick
+// callback now only bumps the tick (advanceTickOnly) so the five world scans leave the
+// synchronous request-latency path; the route then calls this from its existing
+// runAfterResponse/waitUntil tail. It claims-then-sweeps on the tick the action produced,
+// so a player acting in a calm room (no alarm) still gets the per-tick effects on their
+// action cadence — but deduped against the alarm and other concurrent actions, never K×.
+// `tickValue` may be null/undefined (a path that didn't advance) → no-op.
+export async function runDeferredWorldSweeps(db, tickValue) {
+  if (tickValue === null || tickValue === undefined) {
+    return false;
+  }
+  if (!(await claimWorldSweep(db, tickValue))) {
+    return false;
+  }
+  await runWorldSweeps(db, tickValue);
+  return true;
+}
+
+// Compatibility wrapper (kept for the existing callers/tests that drive the tick AND its
+// sweeps in one synchronous call — the cron pulse and the combat hostile alarm via
+// runHostileRoomAction, plus the suite's direct advanceGlobalTick callers). The increment
+// happens FIRST exactly as before (NPC parity tests read the bumped tick), then the sweeps
+// run UNCONDITIONALLY here — this wrapper is the un-deduped, run-everything path, so its
+// behavior is identical to the original. The dedup lives in the variants above.
+export async function advanceGlobalTick(db) {
+  const tick = await advanceTickOnly(db);
+  await runWorldSweeps(db, tick.tick);
+  return tick;
 }
 
 export async function runScheduledWorldPulse(db) {
   const worldDay = getWorldDay();
   await cleanupOldWorldDayData(db, worldDay);
-  const tick = await advanceGlobalTick(db);
+  // adv-013: the cron (every ~1 min) advances the tick and runs the global sweeps via the
+  // SAME deduped claim as the hostile alarm. As the dominant low-frequency driver it
+  // normally wins its own window; if a 5s alarm already swept this exact tick, the claim is
+  // a no-op and the cron skips a redundant world scan (the tick still advanced). The cron
+  // remains the safety net that drives the sweeps for rooms with no active alarm at all.
+  const tick = await advanceTickAndMaybeSweep(db);
   await ensureDailyWorldEvents(db, worldDay, tick.tick);
   const activeRooms = await getActivePlayerRooms(db);
 

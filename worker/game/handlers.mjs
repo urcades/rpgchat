@@ -61,7 +61,7 @@ import {
   upsertCooldown
 } from './progression.mjs';
 import {
-  advanceGlobalTick,
+  advanceTickOnly,
   getCurrentTickValue,
   getRoomAccessState,
   getUser,
@@ -193,7 +193,7 @@ export async function handleChatAction(db, username, row, col, message) {
       username,
       staminaCost: 1,
       perform: async () => handleStanceCommand(db, username, row, col, message),
-      advanceTick: () => advanceGlobalTick(db)
+      advanceTick: () => advanceTickOnly(db)
     });
   }
 
@@ -203,7 +203,7 @@ export async function handleChatAction(db, username, row, col, message) {
       staminaCost: 20,
       validate: async () => validateRegrowCommand(db, username, row, col, message),
       perform: async () => handleRegrowCommand(db, username, row, col, message),
-      advanceTick: () => advanceGlobalTick(db)
+      advanceTick: () => advanceTickOnly(db)
     });
   }
 
@@ -213,7 +213,7 @@ export async function handleChatAction(db, username, row, col, message) {
       staminaCost: 1,
       validate: async () => validateRollCommand(db, username, row, col, message),
       perform: async () => handleRollCommand(db, username, row, col, message),
-      advanceTick: () => advanceGlobalTick(db)
+      advanceTick: () => advanceTickOnly(db)
     });
   }
 
@@ -222,7 +222,7 @@ export async function handleChatAction(db, username, row, col, message) {
       username,
       staminaCost: 1,
       perform: async () => handleEquipCommand(db, username, row, col, message),
-      advanceTick: () => advanceGlobalTick(db)
+      advanceTick: () => advanceTickOnly(db)
     });
   }
 
@@ -231,7 +231,7 @@ export async function handleChatAction(db, username, row, col, message) {
       username,
       staminaCost: 1,
       perform: async () => handleUnequipCommand(db, username, row, col, message),
-      advanceTick: () => advanceGlobalTick(db)
+      advanceTick: () => advanceTickOnly(db)
     });
   }
 
@@ -240,7 +240,7 @@ export async function handleChatAction(db, username, row, col, message) {
       username,
       staminaCost: 1,
       perform: async () => handleTakeCommand(db, username, row, col, message),
-      advanceTick: () => advanceGlobalTick(db)
+      advanceTick: () => advanceTickOnly(db)
     });
   }
 
@@ -249,7 +249,7 @@ export async function handleChatAction(db, username, row, col, message) {
       username,
       staminaCost: 1,
       perform: async () => handleDropCommand(db, username, row, col, message),
-      advanceTick: () => advanceGlobalTick(db)
+      advanceTick: () => advanceTickOnly(db)
     });
   }
 
@@ -258,7 +258,7 @@ export async function handleChatAction(db, username, row, col, message) {
       username,
       staminaCost: 1,
       perform: async () => handleGiveCommand(db, username, row, col, message),
-      advanceTick: () => advanceGlobalTick(db)
+      advanceTick: () => advanceTickOnly(db)
     });
   }
 
@@ -267,7 +267,7 @@ export async function handleChatAction(db, username, row, col, message) {
       username,
       staminaCost: 1,
       perform: async () => handleUseCommand(db, username, row, col, message),
-      advanceTick: () => advanceGlobalTick(db)
+      advanceTick: () => advanceTickOnly(db)
     });
   }
 
@@ -276,7 +276,7 @@ export async function handleChatAction(db, username, row, col, message) {
       username,
       staminaCost: 1,
       perform: async () => handleCookCommand(db, username, row, col, message),
-      advanceTick: () => advanceGlobalTick(db)
+      advanceTick: () => advanceTickOnly(db)
     });
   }
 
@@ -285,7 +285,7 @@ export async function handleChatAction(db, username, row, col, message) {
       username,
       staminaCost: 1,
       perform: async () => handleBrewCommand(db, username, row, col, message),
-      advanceTick: () => advanceGlobalTick(db)
+      advanceTick: () => advanceTickOnly(db)
     });
   }
 
@@ -294,7 +294,7 @@ export async function handleChatAction(db, username, row, col, message) {
       username,
       staminaCost: 1,
       perform: async () => handleForgeCommand(db, username, row, col, message),
-      advanceTick: () => advanceGlobalTick(db)
+      advanceTick: () => advanceTickOnly(db)
     });
   }
 
@@ -303,7 +303,7 @@ export async function handleChatAction(db, username, row, col, message) {
       username,
       staminaCost: 1,
       perform: async () => handleEatCommand(db, username, row, col, message),
-      advanceTick: () => advanceGlobalTick(db)
+      advanceTick: () => advanceTickOnly(db)
     });
   }
 
@@ -318,7 +318,7 @@ export async function handleChatAction(db, username, row, col, message) {
       username,
       staminaCost: 1,
       perform: async () => handleUnsocketCommand(db, username, message),
-      advanceTick: () => advanceGlobalTick(db)
+      advanceTick: () => advanceTickOnly(db)
     });
   }
 
@@ -327,7 +327,7 @@ export async function handleChatAction(db, username, row, col, message) {
       username,
       staminaCost: 1,
       perform: async () => handleSocketCommand(db, username, message),
-      advanceTick: () => advanceGlobalTick(db)
+      advanceTick: () => advanceTickOnly(db)
     });
   }
 
@@ -337,7 +337,7 @@ export async function handleChatAction(db, username, row, col, message) {
       staminaCost: 1,
       validate: async () => validateBuyCommand(db, username, row, col, message),
       perform: async () => handleBuyCommand(db, username, row, col, message),
-      advanceTick: () => advanceGlobalTick(db)
+      advanceTick: () => advanceTickOnly(db)
     });
   }
 
@@ -359,7 +359,7 @@ export async function handleChatAction(db, username, row, col, message) {
       await updateLevel(db, username, row, col);
       return { message };
     },
-    advanceTick: () => advanceGlobalTick(db)
+    advanceTick: () => advanceTickOnly(db)
   });
 }
 
@@ -387,7 +387,7 @@ export async function handleAttackAction(db, username, row, col, message, target
       await updateLevel(db, username, row, col);
       return { updatedMessage };
     },
-    advanceTick: () => advanceGlobalTick(db)
+    advanceTick: () => advanceTickOnly(db)
   });
 }
 
@@ -449,7 +449,7 @@ export async function handleSkillAction(db, username, row, col, skillId, targetU
       incantation,
       rank
     }),
-    advanceTick: () => advanceGlobalTick(db)
+    advanceTick: () => advanceTickOnly(db)
   });
 }
 
@@ -495,6 +495,6 @@ export async function handleJobChangeAction(db, username, row, col, nextJob, roo
       }
     },
     perform: async () => switchJob(db, { username, nextJob, row, col }),
-    advanceTick: () => advanceGlobalTick(db)
+    advanceTick: () => advanceTickOnly(db)
   });
 }
