@@ -38,7 +38,6 @@ import {
 } from './body.mjs';
 import { insertSystemMessage } from './messages.mjs';
 import { logEvent } from '../observability.mjs';
-import { upsertCooldown } from './progression.mjs';
 import { getCurrentTickValue, getUser, roomHasEffect } from './world.mjs';
 
 
@@ -168,16 +167,36 @@ async function attachItemToBody(db, user, item) {
     );
   }
 
-  await dbRun(
-    db,
-    `UPDATE items SET equippedPartId = ?, roomRow = NULL, roomCol = NULL
-     WHERE id = ?`,
-    [target.id, item.id]
-  );
+  // adv-018: CLAIM the slot first, fold HP only on a won claim. The non-atomic
+  // read-decide-write above can hand two concurrent /equip the SAME empty target;
+  // the partial unique index idx_items_one_per_part (one item per equippedPartId)
+  // is the arbiter. By gating on changes()===1 BEFORE applyPartMaxHpDelta, a lost
+  // claim folds NO HP — so a failed equip can never corrupt users.maxHealth. The
+  // item-side guard equippedPartId IS NULL also makes a re-attach of an
+  // already-equipped row a no-op rather than a silent re-fold.
+  let claimed;
+  try {
+    claimed = await dbRun(
+      db,
+      `UPDATE items SET equippedPartId = ?, roomRow = NULL, roomCol = NULL
+       WHERE id = ? AND equippedPartId IS NULL`,
+      [target.id, item.id]
+    );
+  } catch (err) {
+    // The unique index rejected a colliding claim (the part was filled by a
+    // racing equip after our occupancy read). No HP was folded; surface a clean
+    // refusal instead of the raw SQLITE_CONSTRAINT.
+    throw new ActionError('You have nowhere to put that.');
+  }
+  if (changes(claimed) !== 1) {
+    // Lost the claim (the item was equipped/handed off concurrently). No fold.
+    throw new ActionError('You have nowhere to put that.');
+  }
 
   // Fold this item's HP gear into the worn part (structural, plan 015): raise
-  // the part's maxHp and users.maxHealth by the bonus. A positive bonus opens
-  // headroom but does NOT heal; a negative bonus clamps hp/health down.
+  // the part's maxHp and users.maxHealth by the bonus — ONLY now that the claim
+  // is won. A positive bonus opens headroom but does NOT heal; a negative bonus
+  // clamps hp/health down.
   await applyPartMaxHpDelta(db, user.username, target.id, itemMaxHealthBonus(item));
 
   return { partId: target.id, partLabel: target.label };
@@ -399,7 +418,7 @@ export async function handleDropCommand(db, username, row, col, message) {
 // NULL (it never touches a floor, unlike /drop). Conditional WHERE makes the move
 // race-safe: a second give of an item already gone (handed off, dropped, equipped) is
 // a no-op. Returns the resolved item row so the caller can announce its canonical name.
-export async function giveItem(db, fromUsername, itemName, toUsername) {
+export async function giveItem(db, fromUsername, itemName, toUsername, row, col) {
   const item = await findOwnedUnequippedItem(db, fromUsername, itemName);
   if (!item) {
     throw new ActionError("You aren't carrying that.");
@@ -413,6 +432,29 @@ export async function giveItem(db, fromUsername, itemName, toUsername) {
   if (changes(result) === 0) {
     throw new ActionError("You aren't carrying that.");
   }
+
+  // adv-018: orphan guard. The recipient was confirmed present/alive during
+  // resolution, but death (DELETE FROM users + dropPlayerItemsOnDeath) can land
+  // between that resolve and this ownership flip — leaving the item owned by a
+  // username with no users row: invisible, on no floor, unrecoverable. Re-check
+  // the recipient still exists; if they vanished, drop the item to the floor of
+  // the giver's room (ownerUsername NULL + roomRow/roomCol) so it stays in play.
+  // Conditional on the item still sitting where we just put it, so a concurrent
+  // take/equip by a (re-created) recipient isn't clobbered.
+  const recipientExists = await dbFirst(
+    db,
+    'SELECT 1 AS hit FROM users WHERE username = ?',
+    [toUsername]
+  );
+  if (!recipientExists && Number.isFinite(row) && Number.isFinite(col)) {
+    await dbRun(
+      db,
+      `UPDATE items SET ownerUsername = NULL, roomRow = ?, roomCol = ?
+       WHERE id = ? AND ownerUsername = ? AND equippedPartId IS NULL AND socketedInId IS NULL`,
+      [row, col, item.id, toUsername]
+    );
+  }
+
   return { id: item.id, name: item.name };
 }
 
@@ -512,7 +554,7 @@ export async function handleGiveCommand(db, username, row, col, message) {
     throw new ActionError("You aren't carrying that.");
   }
 
-  const item = await giveItem(db, username, itemName, target.username);
+  const item = await giveItem(db, username, itemName, target.username, row, col);
 
   // Public room line — everyone present sees the hand-off (kind 'support': a peaceful
   // exchange, not a blow). The recipient is named by what players SEE (displayName).
@@ -602,6 +644,8 @@ export async function craftRecipe(db, username, verb, outputName) {
   const recipe = findRecipeByOutputName(verb, outputName);
   assertAction(recipe, `No ${verb} recipe makes "${outputName}".`, 404);
 
+  // Pre-flight read so a clearly-impossible craft (missing inputs) is refused
+  // before any delete — preserves the "You need N ×" message and spends nothing.
   for (const input of recipe.inputs) {
     const have = await dbFirst(
       db,
@@ -613,17 +657,41 @@ export async function craftRecipe(db, username, verb, outputName) {
     assertAction((have.c || 0) >= input.qty, `You need ${input.qty} × ${getTemplate(input.templateId)?.name || input.templateId}.`, 400);
   }
 
+  // adv-018: consume each input as an ATOMIC claim. The old SELECT-ids-then-
+  // DELETE-each let two crafts (or a craft racing a /give or /drop) grab the SAME
+  // rows and double-consume one input set. Instead, delete exactly `qty` rows in
+  // ONE statement (DELETE ... WHERE id IN (subselect LIMIT qty)) and trust
+  // changes() for how many we actually claimed — a racing craft that took some
+  // rows leaves us short. If ANY input comes up short we must NOT partially
+  // consume: re-mint everything claimed so far (inputs are fungible by template)
+  // and bail with the same shortfall message, so the player is made whole.
+  const consumed = [];
+  const restore = async () => {
+    for (const { templateId, count } of consumed) {
+      for (let i = 0; i < count; i += 1) {
+        await createItemForOwner(db, templateId, username);
+      }
+    }
+  };
   for (const input of recipe.inputs) {
-    const rows = await dbAll(
+    const claim = await dbRun(
       db,
-      `SELECT id FROM items
-       WHERE ownerUsername = ? AND templateId = ?
-         AND equippedPartId IS NULL AND socketedInId IS NULL AND roomRow IS NULL AND roomCol IS NULL
-       ORDER BY id ASC LIMIT ?`,
+      `DELETE FROM items
+       WHERE id IN (
+         SELECT id FROM items
+         WHERE ownerUsername = ? AND templateId = ?
+           AND equippedPartId IS NULL AND socketedInId IS NULL AND roomRow IS NULL AND roomCol IS NULL
+         ORDER BY id ASC LIMIT ?
+       )`,
       [username, input.templateId, input.qty]
     );
-    for (const r of rows) {
-      await dbRun(db, 'DELETE FROM items WHERE id = ?', [r.id]);
+    const got = changes(claim);
+    if (got > 0) {
+      consumed.push({ templateId: input.templateId, count: got });
+    }
+    if (got < input.qty) {
+      await restore();
+      throw new ActionError(`You need ${input.qty} × ${getTemplate(input.templateId)?.name || input.templateId}.`, 400);
     }
   }
 
@@ -753,7 +821,29 @@ export async function socketMateria(db, username, materiaName, hostName) {
   const used = await dbFirst(db, 'SELECT COUNT(*) AS c FROM items WHERE socketedInId = ?', [host.id]);
   assertAction((used.c || 0) < sockets, `${host.name}'s sockets are full.`, 400);
 
-  await dbRun(db, 'UPDATE items SET socketedInId = ? WHERE id = ?', [host.id, materia.id]);
+  // adv-018: claim-then-recheck (mirrors unlockProgressionNode). The COUNT above
+  // and this attach aren't atomic — two concurrent sockets into the same last
+  // free slot both pass the count. CLAIM by attaching only while still loose
+  // (gate changes()===1), then re-count under the host: keep this materia only
+  // if it ranks within the host's socket capacity by id ASC; otherwise roll the
+  // attach back (unsocket) so over-capacity is rejected and exactly one racer wins.
+  const claim = await dbRun(
+    db,
+    'UPDATE items SET socketedInId = ? WHERE id = ? AND socketedInId IS NULL',
+    [host.id, materia.id]
+  );
+  assertAction(changes(claim) === 1, `${materia.name} is already socketed.`, 400);
+
+  const occupants = await dbAll(
+    db,
+    'SELECT id FROM items WHERE socketedInId = ? ORDER BY id ASC',
+    [host.id]
+  );
+  const rank = occupants.findIndex(o => o.id === materia.id);
+  if (rank < 0 || rank >= sockets) {
+    await dbRun(db, 'UPDATE items SET socketedInId = NULL WHERE id = ?', [materia.id]);
+    throw new ActionError(`${host.name}'s sockets are full.`, 400);
+  }
   return { socketed: materia.name, into: host.name };
 }
 
@@ -821,17 +911,40 @@ export async function validateBuyCommand(db, username, row, col, message) {
 export async function buyShopItem(db, username, row, col, itemName) {
   const { stockItem, effectType, worldDay, tickValue } = await resolveShopPurchase(db, username, row, col, itemName);
 
+  // adv-018: CLAIM the once-per-day slot FIRST so two concurrent /buy can't both
+  // pass the read-then-write cap and double-spend/double-mint. INSERT ... ON
+  // CONFLICT DO NOTHING against the cooldown PK; proceed only if changes()===1
+  // (we won the slot). Using upsertCooldown's DO UPDATE here would always
+  // "succeed" and couldn't arbitrate, which is the bug.
+  const claim = await dbRun(
+    db,
+    `INSERT INTO roomEffectCooldowns
+      (username, roomRow, roomCol, effectType, lastAppliedTick, worldDay)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(username, roomRow, roomCol, effectType, worldDay) DO NOTHING`,
+    [username, row, col, effectType, tickValue, worldDay]
+  );
+  assertAction(changes(claim) > 0, 'Sold out for you today.');
+
   // Atomic spend (plan 003): the conditional WHERE re-validates gold under
-  // concurrency. The cooldown is written only AFTER a successful spend, so a
-  // failed payment never burns the player's once-per-day slot for this item.
+  // concurrency. If payment fails, RELEASE the slot we just claimed so a failed
+  // payment never burns the player's once-per-day slot for this item (preserved
+  // from the prior cooldown-after-spend ordering).
   const spend = await dbRun(
     db,
     'UPDATE users SET gold = gold - ? WHERE username = ? AND gold >= ?',
     [stockItem.price, username, stockItem.price]
   );
-  assertAction(changes(spend) > 0, 'Not enough gold.', 402);
+  if (changes(spend) === 0) {
+    await dbRun(
+      db,
+      `DELETE FROM roomEffectCooldowns
+       WHERE username = ? AND roomRow = ? AND roomCol = ? AND effectType = ? AND worldDay = ?`,
+      [username, row, col, effectType, worldDay]
+    );
+    throw new ActionError('Not enough gold.', 402);
+  }
 
-  await upsertCooldown(db, username, row, col, effectType, tickValue, worldDay);
   await createItemForOwner(db, stockItem.templateId, username);
   await insertSystemMessage(db, row, col, `${username} buys ${stockItem.name} for ${stockItem.price} gold.`);
   return { bought: stockItem.name, price: stockItem.price };
