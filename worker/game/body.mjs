@@ -266,16 +266,33 @@ export async function applyPartMaxHpDelta(db, username, partId, delta) {
 // Element-wise sum of wound penalties and equipped-gear bonuses. Swapped in at
 // every site that previously fed getBodyConditionModifiers / bodyPenaltyModifiers
 // into getEffectiveUser, so wounds and gear ride one modifier channel.
-export async function getConditionAndGearModifiers(db, username) {
+//
+// adv-006 (perf, behavior-preserving): one handleAttack computes this for the attacker
+// AND each target, re-running getCurrentTickValue + the four sub-queries every time.
+// Two opt-in knobs let the attack path avoid that fan-out WITHOUT changing any result:
+//   - options.tickValue: the already-known current tick, threaded into the 'chill' read
+//     so getStatusStatModifiers skips its own getCurrentTickValue round-trip.
+//   - options.cache: a per-attack Map<username, modifiers>. The modifiers are a pure read
+//     of state that does not change between the attacker- and target-reads inside one
+//     attack, so memoizing by username returns the identical object (and consumes ZERO
+//     extra RNG draws — these are all plain DB reads). Absent options => prior behavior.
+export async function getConditionAndGearModifiers(db, username, options = {}) {
+  const { tickValue = null, cache = null } = options;
+  if (cache && cache.has(username)) {
+    return cache.get(username);
+  }
   const [condition, gear, progression, status] = await Promise.all([
     getBodyConditionModifiers(db, username),
     getEquippedModifiers(db, username),
     getProgressionModifiers(db, username),
-    getStatusStatModifiers(db, username)
+    getStatusStatModifiers(db, username, tickValue)
   ]);
   const combined = {};
   for (const key of MODIFIER_KEYS) {
     combined[key] = (Number(condition[key]) || 0) + (Number(gear[key]) || 0) + (Number(progression[key]) || 0) + (Number(status[key]) || 0);
+  }
+  if (cache) {
+    cache.set(username, combined);
   }
   return combined;
 }
@@ -612,8 +629,12 @@ export async function clearOneHarmfulEffect(db, username) {
 
 // Active 'chill' (cold) saps effective speed while it lasts — folded into the
 // effective layer via getConditionAndGearModifiers so it reaches the speed contest.
-async function getStatusStatModifiers(db, username) {
-  const tickValue = await getCurrentTickValue(db);
+// adv-006: an already-known current tick may be passed in (the attack path has it) to
+// skip the getCurrentTickValue round-trip; when omitted the tick is read as before.
+async function getStatusStatModifiers(db, username, knownTickValue = null) {
+  const tickValue = knownTickValue === null || knownTickValue === undefined
+    ? await getCurrentTickValue(db)
+    : knownTickValue;
   const rows = await dbAll(
     db,
     "SELECT magnitude FROM statusEffects WHERE username = ? AND effectType = 'chill' AND expiryTick > ?",

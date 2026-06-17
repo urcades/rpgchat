@@ -173,9 +173,20 @@ function creatureElementFor(npc) {
   return CREATURE_ELEMENT[baseCreatureName(npc.displayName)] || CREATURE_ELEMENT[npc.displayName] || null;
 }
 
-// The element of a player's equipped weapon (first equipped item carrying one).
-export async function getAttackElement(db, username) {
-  const rows = await dbAll(db, 'SELECT templateId FROM items WHERE ownerUsername = ? AND equippedPartId IS NOT NULL', [username]);
+// adv-006: ONE read of a user's equipped item rows (id, templateId), shared by the
+// attacker-side derivations below. getAttackElement and getWeaponClass each used to run
+// this exact SELECT, and handleAttack re-ran the element scan once per target — so an
+// attack on N targets scanned the attacker's items 1 (weaponClass) + N (element) times.
+// Fetching once and deriving element + weaponClass from the SAME rows collapses that to a
+// single scan, with byte-identical results (same query, same row order, same lookups).
+export async function getEquippedItems(db, username) {
+  return dbAll(db, 'SELECT id, templateId FROM items WHERE ownerUsername = ? AND equippedPartId IS NOT NULL', [username]);
+}
+
+// The element of a player's equipped weapon (first equipped item carrying one), derived
+// from pre-fetched equipped rows. Order-preserving: rows arrive in the SELECT's order, so
+// "first equipped item carrying an element" is unchanged from the per-query version.
+function deriveAttackElement(rows) {
   for (const row of rows) {
     const template = getTemplate(row.templateId);
     if (template && template.element) return template.element;
@@ -183,12 +194,10 @@ export async function getAttackElement(db, username) {
   return null;
 }
 
-// The equipped HAND weapon's flavor identity: its template weaponClass (the brutal
-// verb SET) plus its templateId (the per-weapon SIGNATURE pool, when one exists).
-// Mirrors getAttackElement but scoped to the 'hand' slot. Defaults to
-// { weaponClass: 'fist', weaponId: null } when nothing is wielded.
-export async function getWeaponClass(db, username) {
-  const rows = await dbAll(db, 'SELECT templateId FROM items WHERE ownerUsername = ? AND equippedPartId IS NOT NULL', [username]);
+// The equipped HAND weapon's flavor identity derived from pre-fetched equipped rows: its
+// template weaponClass (the brutal verb SET) plus its templateId (the per-weapon SIGNATURE
+// pool, when one exists). Defaults to { weaponClass: 'fist', weaponId: null } unarmed.
+function deriveWeaponClass(rows) {
   for (const row of rows) {
     const template = getTemplate(row.templateId);
     if (template && template.slotType === 'hand' && template.weaponClass) {
@@ -196,6 +205,20 @@ export async function getWeaponClass(db, username) {
     }
   }
   return { weaponClass: 'fist', weaponId: null };
+}
+
+// The element of a player's equipped weapon (first equipped item carrying one).
+// Thin wrapper over the shared fetch + derivation, kept for external callers/tests.
+export async function getAttackElement(db, username) {
+  return deriveAttackElement(await getEquippedItems(db, username));
+}
+
+// The equipped HAND weapon's flavor identity: its template weaponClass (the brutal
+// verb SET) plus its templateId (the per-weapon SIGNATURE pool, when one exists).
+// Mirrors getAttackElement but scoped to the 'hand' slot. Defaults to
+// { weaponClass: 'fist', weaponId: null } when nothing is wielded.
+export async function getWeaponClass(db, username) {
+  return deriveWeaponClass(await getEquippedItems(db, username));
 }
 
 // Net affinity to `element` on the struck part: armor worn there (resist − / weak +)
@@ -716,12 +739,23 @@ export async function handleAttack(db, username, message, row, col, options = {}
   const targets = await validateAttackTargets(db, message, row, col, username);
   const attackMessages = [];
 
-  const attackerMods = attacker.isNpc ? null : await getConditionAndGearModifiers(db, username);
+  // adv-006: condition/gear modifiers for the attacker AND every target are read through
+  // ONE per-attack cache keyed by username (a pure read that doesn't change mid-attack), and
+  // the current tick is threaded in so the 'chill' lookup skips its own getCurrentTickValue.
+  // Self-attacks (attacker === target) thus compute the modifiers once, not twice — same
+  // values, fewer queries. Zero RNG draws ride these reads, so the mocked sequence is intact.
+  const modifierCache = new Map();
+  const modifierOptions = { tickValue: currentTick, cache: modifierCache };
+  const attackerMods = attacker.isNpc ? null : await getConditionAndGearModifiers(db, username, modifierOptions);
   // Plan: the attacker's weapon class drives the brutal flavor verb set (blade/pierce/
   // blunt/fist) and its templateId selects a per-weapon SIGNATURE pool when one exists.
-  // Resolved ONCE before the targets loop, like the element is fetched. An unarmed
-  // attacker (or an NPC, who never wields a weaponClass item) → 'fist' / null id.
-  const { weaponClass: attackerWeaponClass, weaponId: attackerWeaponId } = await getWeaponClass(db, username);
+  // adv-006: the attacker's equipped items are fetched ONCE here; weaponClass AND the
+  // weapon element are derived from that single result (the element was previously
+  // re-queried once per target). An unarmed attacker (or an NPC, who never wields a
+  // weaponClass item) → 'fist' / null id / null element.
+  const attackerEquipped = await getEquippedItems(db, username);
+  const { weaponClass: attackerWeaponClass, weaponId: attackerWeaponId } = deriveWeaponClass(attackerEquipped);
+  const attackerElement = deriveAttackElement(attackerEquipped);
 
   // Stance and called shot are attacker-message-level (apply to every target in
   // this attack). NPCs have no parts, so a called shot only routes at player
@@ -737,7 +771,7 @@ export async function handleAttack(db, username, message, row, col, options = {}
 
   for (const user of targets) {
     const target = await getUser(db, user.username, 'Target');
-    const targetMods = target.isNpc ? null : await getConditionAndGearModifiers(db, target.username);
+    const targetMods = target.isNpc ? null : await getConditionAndGearModifiers(db, target.username, modifierOptions);
     // Plan 021 (BOLD): called shots now land on a BODIED NPC (creatureBodyPlan set) too —
     // the engine, not a name, decides: a player always has a body; an NPC has one only
     // when it carries a plan; a scalar NPC (null plan) still ignores aim (no parts to hit).
@@ -800,8 +834,12 @@ export async function handleAttack(db, username, message, row, col, options = {}
       displayLabel: target.displayName || null
     });
 
-    const attackedUser = await dbFirst(db, 'SELECT * FROM users WHERE username = ?', [user.username]);
-    const remainingHealth = attackedUser ? attackedUser.health : 0;
+    // adv-006: the post-damage health is already returned by applyBodyDamage
+    // (damageResult.healthAfter is exactly what a re-SELECT of users.health would yield,
+    // since the write is the same relative deduction). disposition/isNpc don't change
+    // when a body takes damage, so the pre-damage `target` row still carries them — the
+    // redundant `SELECT * FROM users` after the hit is dropped.
+    const remainingHealth = damageResult.healthAfter;
     const wasKilled = damageResult.died;
     const attackMessage = describeAttack({
       attacker: username,
@@ -826,7 +864,7 @@ export async function handleAttack(db, username, message, row, col, options = {}
     // affinity) or on an NPC (intrinsic creature affinity). No element → skipped →
     // combat is byte-identical.
     if (!wasKilled) {
-      const element = await getAttackElement(db, username);
+      const element = attackerElement;
       if (element) {
         const applied = await applyElementOnHit(db, {
           attacker: username,
@@ -877,8 +915,10 @@ export async function handleAttack(db, username, message, row, col, options = {}
 
     // Plan 013c: striking a non-hostile NPC turns it — and the rest of the room's social
     // cast — hostile. The attack route's startHostileLoopIfNeeded (after this resolves)
-    // then wakes the fight, so the whole pub comes for you.
-    if (attackedUser.isNpc && attackedUser.disposition && attackedUser.disposition !== 'hostile') {
+    // then wakes the fight, so the whole pub comes for you. adv-006: isNpc/disposition are
+    // read off the already-loaded `target` row — taking damage never alters them, and the
+    // disposition flip itself only happens here (after this read), so it's byte-identical.
+    if (target.isNpc && target.disposition && target.disposition !== 'hostile') {
       await provokeRoomNpcs(db, row, col, { deferredSystemMessages: options.deferredSystemMessages });
     }
   }
