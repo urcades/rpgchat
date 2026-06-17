@@ -334,3 +334,166 @@ test('Plan 021: eliteDisplayName / baseCreatureName round-trip the affix prefix'
   // Never strips the whole name away even if every word looks like an affix.
   assert.equal(baseCreatureName('Vicious'), 'Vicious');
 });
+
+// --- adv-018: BODY delta-writes — concurrent damage/heal compose, no lost update ---
+//
+// These exercise body.mjs against the real D1 shim. applyBodyDamage/applyBodyHeal now
+// persist RELATIVE deltas (`hp = MAX(hp - dealt, 0)` / `hp = MIN(hp + healed, maxHp)`,
+// and the same on users.health) instead of writing JS-computed ABSOLUTES. The root-cause
+// race: two handlers each read the row, compute a new hp, and write it back; with absolute
+// writes the second writer clobbers the first (a heal or a hit is silently lost). The
+// deltas commute, so both land. The `users.health == Σ bodyParts.hp` invariant, the
+// sever-at-0 and vital-death transitions, and the damage/heal amounts are all unchanged.
+
+const { createMigratedDb } = require('./.helpers/d1');
+
+async function assertBodyInvariant(db, username, where) {
+  const u = await db.prepare('SELECT health FROM users WHERE username = ?').bind(username).first();
+  const sum = await db.prepare('SELECT COALESCE(SUM(hp), 0) AS s FROM bodyParts WHERE username = ?').bind(username).first();
+  assert.equal(u.health, sum.s, `health == Σ bodyParts.hp ${where} (health=${u.health}, Σhp=${sum.s})`);
+}
+
+async function seedBodiedPlayer(db, username, { health, maxHealth }) {
+  await db.prepare(
+    `INSERT INTO users (username, password, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold)
+     VALUES (?, 'pw', 'Fighter', ?, ?, 100, 100, 5, 10, 5, 4, 0)`
+  ).bind(username, health, maxHealth).run();
+  const row = await db.prepare('SELECT * FROM users WHERE username = ?').bind(username).first();
+  const game = await import('../worker/game.mjs');
+  await game.ensureBody(db, row);
+  return row;
+}
+
+test('adv-018 (lost-update race): a heal and a hit applied from the SAME stale snapshot BOTH land — neither is clobbered', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  try {
+    // A full-health player, then wound the torso so there is real headroom to heal into AND
+    // hp to take off — and so the heal's worst-ratio fill and the called-shot hit both touch
+    // the torso (the part we reason about precisely).
+    await seedBodiedPlayer(db, 'racer', { health: 30, maxHealth: 30 });
+    // Wound the torso by 6 (called shot). After this, torso has 6 of headroom.
+    const woundSnap = await db.prepare('SELECT * FROM users WHERE username = ?').bind('racer').first();
+    await applyDamageNoMsg(game, db, woundSnap, 6, 'torso');
+    await assertBodyInvariant(db, 'racer', 'after the setup wound');
+
+    const torsoMid = (await game.getBodyParts(db, 'racer')).find(p => p.label === 'torso');
+    const healthMid = (await db.prepare("SELECT health FROM users WHERE username = 'racer'").first()).health;
+    assert.equal(healthMid, 24, 'health fell 30 -> 24 after the 6-damage setup wound');
+
+    // THE RACE. Two handlers each read the row HERE, at health 24, then both write back.
+    // Handler A reads `stale`, heals 4. Handler B ALSO acts on `stale` (a snapshot from
+    // before A committed), hitting the torso for 5. With the OLD absolute writes, B would
+    // write health = 24 - 5 = 19 and clobber A's heal (A wrote 28); the heal would vanish.
+    // With deltas, A does health += 4 and B does health -= 5, so the net is 24 + 4 - 5 = 23.
+    const stale = await db.prepare('SELECT * FROM users WHERE username = ?').bind('racer').first();
+
+    // Handler A: heal 4 (fills the torso worst-ratio-first; torso is the only wounded part).
+    await game.applyBodyHeal(db, stale, 4, {});
+    // Handler B: hit the torso for 5, acting on the SAME pre-heal snapshot `stale`.
+    await applyDamageNoMsg(game, db, stale, 5, 'torso');
+
+    const healthAfter = (await db.prepare("SELECT health FROM users WHERE username = 'racer'").first()).health;
+    assert.equal(healthAfter, 23, 'BOTH composed: 24 + 4 (heal) - 5 (hit) = 23 — neither operation lost');
+    const torsoAfter = (await game.getBodyParts(db, 'racer')).find(p => p.label === 'torso');
+    assert.equal(torsoAfter.hp, torsoMid.hp + 4 - 5, 'the torso part itself reflects BOTH the heal and the hit');
+    // The whole point of the fix: the invariant re-converges immediately, not on the daily sweep.
+    await assertBodyInvariant(db, 'racer', 'after the interleaved heal + hit');
+  } finally {
+    await db.close();
+  }
+});
+
+test('adv-018: two hits from the SAME stale snapshot both subtract (no lost second hit)', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  try {
+    // maxHealth 100 → torso pool 30, so both blows land fully on the torso with no overkill.
+    await seedBodiedPlayer(db, 'twohit', { health: 100, maxHealth: 100 });
+    // Both blows read the SAME health-100 snapshot. Old absolutes: the second writer wins and
+    // only 7 total comes off (the hp it computed from the stale 100); deltas take 4 then 7 = 11.
+    const stale = await db.prepare('SELECT * FROM users WHERE username = ?').bind('twohit').first();
+    await applyDamageNoMsg(game, db, stale, 4, 'torso');
+    await applyDamageNoMsg(game, db, stale, 7, 'torso');
+    const health = (await db.prepare("SELECT health FROM users WHERE username = 'twohit'").first()).health;
+    assert.equal(health, 89, '100 - 4 - 7 = 89 — the second hit was not overwritten by a stale absolute');
+    await assertBodyInvariant(db, 'twohit', 'after two interleaved hits');
+  } finally {
+    await db.close();
+  }
+});
+
+test('adv-018: applyBodyDamage still SEVERS a non-vital part driven to 0 (delta write floors at 0)', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  try {
+    // health 100 → a humanoid arm pool is 0.10 * 100 = 10. A 10-damage called shot to the
+    // left arm drives it 10 -> 0 with no spill, severing it; the player survives (arm is non-vital).
+    await seedBodiedPlayer(db, 'severee', { health: 100, maxHealth: 100 });
+    const armBefore = (await game.getBodyParts(db, 'severee')).find(p => p.label === 'left arm');
+    const maxBefore = (await db.prepare("SELECT maxHealth FROM users WHERE username = 'severee'").first()).maxHealth;
+    const target = await db.prepare('SELECT * FROM users WHERE username = ?').bind('severee').first();
+    const result = await game.applyBodyDamage(db, target, armBefore.maxHp, {
+      cause: 'test', targetLabel: 'left arm', random: () => 0
+    });
+
+    assert.equal(result.died, false, 'severing a non-vital arm does not kill');
+    assert.deepEqual(result.severedLabels, ['left arm'], 'the arm is reported severed');
+    const armAfter = (await game.getBodyParts(db, 'severee')).find(p => p.label === 'left arm');
+    assert.equal(armAfter.hp, 0, 'the delta write floored the part hp at 0');
+    assert.equal(armAfter.severed, 1, 'the part is severed at 0 — sever logic intact under delta writes');
+    const maxAfter = (await db.prepare("SELECT maxHealth FROM users WHERE username = 'severee'").first()).maxHealth;
+    assert.equal(maxBefore - maxAfter, armBefore.maxHp, 'maxHealth dropped by exactly the severed arm pool');
+    await assertBodyInvariant(db, 'severee', 'after a sever via delta write');
+  } finally {
+    await db.close();
+  }
+});
+
+test('adv-018: applyBodyDamage still KILLS when a vital part is driven to 0', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  try {
+    // The torso is vital. A called shot for the full torso pool drives it 0 -> vital death.
+    await seedBodiedPlayer(db, 'doomed', { health: 100, maxHealth: 100 });
+    const torso = (await game.getBodyParts(db, 'doomed')).find(p => p.label === 'torso');
+    assert.equal(torso.vital, 1, 'the torso is vital');
+    const target = await db.prepare('SELECT * FROM users WHERE username = ?').bind('doomed').first();
+    const result = await game.applyBodyDamage(db, target, torso.maxHp, {
+      cause: 'test', targetLabel: 'torso', random: () => 0
+    });
+    assert.equal(result.died, true, 'destroying the vital torso kills (vital-death logic intact under deltas)');
+    const torsoAfter = (await game.getBodyParts(db, 'doomed')).find(p => p.label === 'torso');
+    assert.equal(torsoAfter.hp, 0, 'the vital part is at 0');
+    await assertBodyInvariant(db, 'doomed', 'after a vital-part kill');
+  } finally {
+    await db.close();
+  }
+});
+
+test('adv-018: applyBodyHeal never lifts health above maxHealth even when applied from a stale low snapshot', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  try {
+    // Wound by 4, then heal 100 from a stale snapshot: the MIN(..., maxHealth) clamp must
+    // hold health at the cap (30), exactly as the old absolute clamp did — no overshoot.
+    await seedBodiedPlayer(db, 'capped', { health: 30, maxHealth: 30 });
+    const woundSnap = await db.prepare('SELECT * FROM users WHERE username = ?').bind('capped').first();
+    await applyDamageNoMsg(game, db, woundSnap, 4, 'torso');
+    const stale = await db.prepare('SELECT * FROM users WHERE username = ?').bind('capped').first();
+    await game.applyBodyHeal(db, stale, 100, {});
+    const health = (await db.prepare("SELECT health FROM users WHERE username = 'capped'").first()).health;
+    assert.equal(health, 30, 'a massive heal clamps at maxHealth (30), never overshoots');
+    await assertBodyInvariant(db, 'capped', 'after an over-heal');
+  } finally {
+    await db.close();
+  }
+});
+
+// A called-shot damage helper that injects the RNG via options.random (NOT the global
+// Math.random) so it can't leak into other test files that node:test runs concurrently in
+// the same process. The called shot overrides the draw anyway; `() => 0` just pins it. No
+// row/col → no room messages.
+async function applyDamageNoMsg(game, db, userRow, amount, label) {
+  return game.applyBodyDamage(db, userRow, amount, { cause: 'test', targetLabel: label, random: () => 0 });
+}

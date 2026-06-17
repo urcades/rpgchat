@@ -382,25 +382,38 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
     }
   }
 
-  // Persist part rows.
+  // Persist part rows. adv-018: the hp write is RELATIVE — `hp = MAX(hp - dealt, 0)`
+  // where `dealt` is the damage this part actually absorbed (its pre-damage hp minus
+  // its post-damage hp, both already floored at 0 in JS). A concurrent heal that
+  // committed between the read above and this write is therefore composed with, not
+  // clobbered by, the hit (the old `hp = <jsAbsolute>` lost that heal). `severed` is a
+  // derived boolean state, not an accumulator, so it stays an absolute write — exactly
+  // as before; the JS severance/vital-death logic is unchanged.
+  const partsBeforeByLabel = new Map(partsBefore.map(part => [part.label, part]));
   for (const part of working) {
+    const beforePart = partsBeforeByLabel.get(part.label);
+    const beforeHp = Math.max(0, beforePart ? beforePart.hp : part.hp);
+    const dealt = beforeHp - Math.max(0, part.hp); // >= 0; the hp this part shed.
     await dbRun(
       db,
-      'UPDATE bodyParts SET hp = ?, severed = ? WHERE username = ? AND label = ?',
-      [Math.max(0, part.hp), part.severed ? 1 : 0, user.username, part.label]
+      'UPDATE bodyParts SET hp = MAX(hp - ?, 0), severed = ? WHERE username = ? AND label = ?',
+      [dealt, part.severed ? 1 : 0, user.username, part.label]
     );
   }
 
-  // Mirror the same total deduction on users.health in a single UPDATE.
+  // Mirror the same total deduction on users.health. adv-018: RELATIVE delta
+  // (`health = MAX(health - totalDealt, 0)`) so a concurrent heal/second hit composes
+  // instead of being overwritten by a stale absolute. maxHealth already shrank by a
+  // relative delta; the severed-part reduction rides the same single UPDATE.
   const healthAfter = Math.max(0, (user.health || 0) - totalDealt);
   if (maxHealthReduction > 0) {
     await dbRun(
       db,
-      'UPDATE users SET health = ?, maxHealth = MAX(maxHealth - ?, 0) WHERE username = ?',
-      [healthAfter, maxHealthReduction, user.username]
+      'UPDATE users SET health = MAX(health - ?, 0), maxHealth = MAX(maxHealth - ?, 0) WHERE username = ?',
+      [totalDealt, maxHealthReduction, user.username]
     );
   } else {
-    await dbRun(db, 'UPDATE users SET health = ? WHERE username = ?', [healthAfter, user.username]);
+    await dbRun(db, 'UPDATE users SET health = MAX(health - ?, 0) WHERE username = ?', [totalDealt, user.username]);
   }
 
   // Loud states: condition-transition messages (non-severance), then severance.
@@ -488,16 +501,28 @@ export async function applyBodyHeal(db, user, amount, options = {}) {
 
   const totalHealed = working.reduce((sum, part) => sum + (part.severed ? 0 : part.hp), 0)
     - currentTotal;
+  // adv-018: RELATIVE per-part write — `hp = MIN(hp + healed, maxHp)` where `healed`
+  // is the points this part gained in the fill loop above (its post-heal hp minus its
+  // pre-heal hp; 0 for severed/untouched parts, which the loop skips). A concurrent hit
+  // that committed between the read and this write is composed with the heal, not lost
+  // (the old `hp = <jsAbsolute>` clobbered it). The MIN keeps the per-part cap exact.
+  const healPartsBeforeByLabel = new Map(partsBefore.map(part => [part.label, part]));
   for (const part of working) {
+    const beforePart = healPartsBeforeByLabel.get(part.label);
+    const healed = part.hp - (beforePart ? beforePart.hp : part.hp); // >= 0; gained hp.
     await dbRun(
       db,
-      'UPDATE bodyParts SET hp = ? WHERE username = ? AND label = ?',
-      [part.hp, user.username, part.label]
+      'UPDATE bodyParts SET hp = MIN(hp + ?, maxHp) WHERE username = ? AND label = ?',
+      [healed, user.username, part.label]
     );
   }
 
+  // adv-018: users.health rises by a RELATIVE delta (`health = MIN(health + healed,
+  // maxHealth)`) so a concurrent hit isn't overwritten by a stale absolute. maxHealth
+  // is the persisted cap (the same ceiling the JS budget used, modulo wound penalties
+  // that only ever lower the JS budget — never raise health above the row cap here).
   const healthAfter = Math.max(0, (user.health || 0) + totalHealed);
-  await dbRun(db, 'UPDATE users SET health = ? WHERE username = ?', [healthAfter, user.username]);
+  await dbRun(db, 'UPDATE users SET health = MIN(health + ?, maxHealth) WHERE username = ?', [totalHealed, user.username]);
   await emitConditionTransitions(db, user.username, partsBefore, working, row, col, displayLabel);
   // Plan 023b: a heal that lifts a downed player back above 0 stands them up.
   if (healthAfter > 0 && row !== undefined && row !== null && col !== undefined && col !== null) {
