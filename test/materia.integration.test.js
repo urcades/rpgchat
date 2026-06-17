@@ -162,3 +162,70 @@ test('Plan 020d: materia grows with AP — effect scales with level', async () =
     await db.close();
   }
 });
+
+// --- adv-020: residual socket coverage. The validation test above uses a 1-socket
+// host (socket one, reject the second). These cover the multi-socket host (fill BOTH,
+// reject the third, both stay filled) and the unsocket-of-a-never-socketed materia.
+
+test('adv-020: a 2-socket host accepts two materia, then rejects a third with both still filled', async () => {
+  const db = await createMigratedDb();
+  const { socketMateria, getUserState, updatePresence } = await import('../worker/game.mjs');
+  try {
+    const calm = findCalmRoom(getWorldDay());
+    await seedUser(db, 'q');
+    await updatePresence(db, 'q', calm.row, calm.col);
+    await getUserState(db, 'q');
+    await giveEquipped(db, 'q', 'frostbitten_fang', 'Frostbitten Fang', 'hand'); // rare → 2 sockets
+    await giveCarried(db, 'q', 'power_materia', 'Power Materia', 'materia');
+    await giveCarried(db, 'q', 'swift_materia', 'Swift Materia', 'materia');
+    await giveCarried(db, 'q', 'guard_materia', 'Guard Materia', 'materia');
+
+    // Both sockets fill cleanly.
+    await socketMateria(db, 'q', 'Power Materia', 'Frostbitten Fang');
+    await socketMateria(db, 'q', 'Swift Materia', 'Frostbitten Fang');
+
+    const host = await db.prepare("SELECT id FROM items WHERE ownerUsername = 'q' AND templateId = 'frostbitten_fang'").first();
+    const usedBefore = await db.prepare('SELECT COUNT(*) AS c FROM items WHERE socketedInId = ?').bind(host.id).first();
+    assert.equal(usedBefore.c, 2, 'both sockets are occupied');
+
+    // The third is rejected — sockets are full.
+    await assert.rejects(() => socketMateria(db, 'q', 'Guard Materia', 'Frostbitten Fang'), /sockets are full/);
+
+    // The two originals are STILL socketed; the rejected one is left loose.
+    const usedAfter = await db.prepare('SELECT COUNT(*) AS c FROM items WHERE socketedInId = ?').bind(host.id).first();
+    assert.equal(usedAfter.c, 2, 'the host still holds exactly its two materia after the rejection');
+    const loose = await db.prepare("SELECT socketedInId FROM items WHERE ownerUsername = 'q' AND templateId = 'guard_materia'").first();
+    assert.equal(loose.socketedInId, null, 'the rejected materia stays loose (never attached)');
+
+    // The socket summary reflects exactly the two that took.
+    const summary = (await getUserState(db, 'q')).socketSummary.find(s => s.host === 'Frostbitten Fang');
+    assert.ok(summary, 'the host appears in the socket summary');
+    assert.equal(summary.materia.length, 2, 'two materia listed');
+    assert.ok(summary.materia.includes('Power Materia') && summary.materia.includes('Swift Materia'), 'the two that took are listed');
+    assert.ok(!summary.materia.includes('Guard Materia'), 'the rejected materia is NOT listed');
+  } finally {
+    await db.close();
+  }
+});
+
+test('adv-020: unsocketing a never-socketed materia is rejected with "not socketed"', async () => {
+  const db = await createMigratedDb();
+  const { unsocketMateria, getUserState, updatePresence } = await import('../worker/game.mjs');
+  try {
+    const calm = findCalmRoom(getWorldDay());
+    await seedUser(db, 'q');
+    await updatePresence(db, 'q', calm.row, calm.col);
+    await getUserState(db, 'q');
+    // A loose materia the player carries but has never socketed into anything.
+    await giveCarried(db, 'q', 'power_materia', 'Power Materia', 'materia');
+
+    await assert.rejects(() => unsocketMateria(db, 'q', 'Power Materia'), /not socketed/i);
+
+    // It's untouched — still loose, still owned, still carried.
+    const row = await db.prepare("SELECT socketedInId, ownerUsername FROM items WHERE templateId = 'power_materia'").first();
+    assert.equal(row.socketedInId, null, 'the materia is still loose');
+    assert.equal(row.ownerUsername, 'q', 'still owned by the player');
+  } finally {
+    await db.close();
+  }
+});

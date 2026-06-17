@@ -149,3 +149,82 @@ test('Plan 022 (tail): brew/forge reject missing inputs and unknown recipes', as
     await db.close();
   }
 });
+
+// --- adv-020: residual coverage — the PER-VERB public support line. The tests above
+// assert the recipe resolves + the item is minted, but never that /brew posts a
+// "brews" line and /forge a "forges" line (distinct from /cook's "cooks"), kind
+// 'support'. The wording is the only thing distinguishing the three verbs in chat.
+
+test('adv-020: /brew posts a "brews" support line (not "cooks")', async () => {
+  const db = await createMigratedDb();
+  const { handleChatAction, getUserState, updatePresence } = await import('../worker/game.mjs');
+  try {
+    const calm = findCalmRoom(getWorldDay());
+    await seedUser(db, 'q', 'Novice');
+    await updatePresence(db, 'q', calm.row, calm.col);
+    await getUserState(db, 'q');
+    await giveCarried(db, 'q', 'monster_remains', 'Monster Remains');
+    await giveCarried(db, 'q', 'monster_remains', 'Monster Remains');
+
+    await handleChatAction(db, 'q', calm.row, calm.col, '/brew Crimson Tonic');
+
+    const line = await db.prepare(
+      "SELECT kind, message FROM messages WHERE roomRow = ? AND roomCol = ? AND message LIKE 'q %' ORDER BY id DESC LIMIT 1"
+    ).bind(calm.row, calm.col).first();
+    assert.ok(line, 'a public line was posted');
+    assert.equal(line.kind, 'support', "the brew line is kind 'support'");
+    assert.equal(line.message, 'q brews Crimson Tonic.', 'the verb is "brews"');
+    assert.doesNotMatch(line.message, /cooks|forges/, 'not the cook/forge verb');
+  } finally {
+    await db.close();
+  }
+});
+
+test('adv-020: /forge posts a "forges" support line (not "cooks")', async () => {
+  const db = await createMigratedDb();
+  const { handleChatAction, getUserState, updatePresence } = await import('../worker/game.mjs');
+  try {
+    const calm = findCalmRoom(getWorldDay());
+    await seedUser(db, 'q', 'Novice');
+    await updatePresence(db, 'q', calm.row, calm.col);
+    await getUserState(db, 'q');
+    await giveCarried(db, 'q', 'scrap_metal', 'Scrap Metal');
+    await giveCarried(db, 'q', 'scrap_metal', 'Scrap Metal');
+
+    await handleChatAction(db, 'q', calm.row, calm.col, '/forge Rusty Knife');
+
+    const line = await db.prepare(
+      "SELECT kind, message FROM messages WHERE roomRow = ? AND roomCol = ? AND message LIKE 'q %' ORDER BY id DESC LIMIT 1"
+    ).bind(calm.row, calm.col).first();
+    assert.ok(line, 'a public line was posted');
+    assert.equal(line.kind, 'support', "the forge line is kind 'support'");
+    assert.equal(line.message, 'q forges Rusty Knife.', 'the verb is "forges"');
+    assert.doesNotMatch(line.message, /cooks|brews/, 'not the cook/brew verb');
+  } finally {
+    await db.close();
+  }
+});
+
+test('adv-020: /cook still posts a "cooks" line — the three verbs stay distinct', async () => {
+  const db = await createMigratedDb();
+  const { handleChatAction, getUserState, updatePresence } = await import('../worker/game.mjs');
+  try {
+    const calm = findCalmRoom(getWorldDay());
+    await seedUser(db, 'q', 'Novice');
+    await updatePresence(db, 'q', calm.row, calm.col);
+    await getUserState(db, 'q');
+    // Cooked Remains is the lone /cook recipe (1× monster_remains); Crimson Tonic is brew-only.
+    await giveCarried(db, 'q', 'monster_remains', 'Monster Remains');
+
+    await handleChatAction(db, 'q', calm.row, calm.col, '/cook Cooked Remains');
+
+    const line = await db.prepare(
+      "SELECT kind, message FROM messages WHERE roomRow = ? AND roomCol = ? AND message LIKE 'q %' ORDER BY id DESC LIMIT 1"
+    ).bind(calm.row, calm.col).first();
+    assert.ok(line, 'a public line was posted');
+    assert.equal(line.kind, 'support', "the cook line is kind 'support'");
+    assert.equal(line.message, 'q cooks Cooked Remains.', 'the verb is "cooks"');
+  } finally {
+    await db.close();
+  }
+});
