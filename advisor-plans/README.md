@@ -28,21 +28,23 @@ findings you select. This index is the menu.
 
 ## Direction (options for the maintainer — not ranked against bugs)
 
-- **D1 — Expose kills/level on the leaderboard & death page.** ⟶ **PARTIALLY DONE (2026-06-14,
-  plan 023a):** the death/cemetery pages now show real kill counts + slayer (`grave-kills` is wired
-  to `grave.kills`; `/death-data` + `/cemetery-data` surface killHistory). **Still open:** the
-  leaderboard itself still returns gold only — adding kills/level there is the remaining slice. Effort S.
+- **D1 — Expose kills/level on the leaderboard & death page.** ⟶ **✅ DONE (death/cemetery 2026-06-14
+  plan 023a; leaderboard 2026-06-17, Campaign C).** The death/cemetery pages show kill counts + slayer;
+  the leaderboard now surfaces level + kills (derived from `killHistory` via a correlated COUNT — no
+  migration), sorted kills→level→gold, with the seeded `System` account excluded. `getLeaderboard()`
+  in `worker/game/world.mjs`, thin `/leaderboard-data` route, table in `leaderboard.html`.
 - **D2 — Do roadmap plan 008 (structured realtime events) next.** ⟶ **DONE (2026-06-14).** 008
   shipped; the `whisper`/`rite`/`npc` message kinds it unblocked are in use (012 rites + 013 NPC
   voices both shipped on top of it). No longer pending.
 - **D3 — Sequence plan 009 (movement) with 011 (revival) / a spawn grace lever.** ⟶ **DONE
   (2026-06-14).** Both 009 (adjacency movement) and 011 (cleric revival) shipped; a revived player
   with no presence row places freely on next entry, as planned. Resolved.
-- **D4 — Item give/trade/storage.** ⟶ **STILL OPEN — the only genuinely-missing core verb.** Items
-  can be carried/equipped/dropped/taken but there's no transfer or vault. (The original "visible once
-  parties land" rationale is moot — 010 is on ice — but a `/give` to a co-located player stands on its
-  own.) Schema is extensible (item state is row-based). Evidence: `migrations/0006_items.sql`,
-  `worker/game.mjs`. Effort M.
+- **D4 — Item give/trade/storage.** ⟶ **✅ `/give` DONE (2026-06-17, Campaign C); vault + two-way trade
+  deferred by owner.** `/give <item> @<co-located player>` — one-way, **public + logged** (a room-feed
+  announcement + an audit log line), with full validation (own it, not equipped, target present/alive/
+  not-self/not-NPC). `giveItem` + `handleGiveCommand` in `worker/game/inventory.mjs`, dispatched next to
+  `/drop`. The owner chose one-way+public over escrow trade to keep stakes public / limit collusion; a
+  storage vault and a confirmed two-way trade remain available as a later slice.
 
 ## Plans written — execution order & status
 
@@ -80,11 +82,12 @@ bug and is highest leverage (money path); 002 is a trivial win that 003 builds o
 004 is independent hardening; 005 touches the file the others edit, so it goes last
 to avoid rebase churn.
 
-**D1 (leaderboard kills/level)** is the obvious quick product win — still not written as a
-plan; say the word and it gets one. (It's a product direction for `plans/`, not part of the
-adv-006…adv-012 tech-debt sequence above — those slots are now taken.) The other direction
-items (D2 plan-008 sequencing, D3 movement/revival, D4 item trade/storage) are likewise
-roadmap calls for `plans/`, not improvement plans; D2/D3 shipped, **D4 remains open**.
+**Group C / product directions are now shipped.** D1 (leaderboard kills/level) and D4 (`/give`) both
+landed in **Campaign C (2026-06-17)**, alongside a combat flavor-tail (per-weapon SIGNATURE verbs —
+an Iron Cleaver *cleaves through* / *hacks a wedge from*, a knife *hooks/rips*, a fang *bites*). So
+D1–D4 are all done; the **bal-1** gang-up knob was considered and **dropped — the owner kept it brutal**
+(stakes are public). The remaining open work is the **adv-006…adv-012** tech-debt sequence above and the
+owner-gated security gate (`sec`).
 
 ## Campaign A — totalizing hardening pass (✅ COMPLETE 2026-06-16)
 
