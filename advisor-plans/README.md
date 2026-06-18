@@ -68,7 +68,7 @@ STOP conditions; update the row when done.
 | 012 | — | DX/docs/observability sweep | P3 | S–M | LOW | — | ✅ DONE & LIVE (2026-06-17, Campaign D W1; repo `CLAUDE.md`, post-adv-005 doc-drift fixes, frontend `.ok/.catch` + a11y + WS/timer teardown, dead-code, smoke `exit(0)`; `9230560`) |
 | 013 | audit | **Tick-loop COST decoupling (CRIT)** — global sweeps off the per-action path + K-room dedup, combat cadence preserved | P1 | L | MED | — | ✅ DONE & LIVE (2026-06-17, Campaign D 2b; `advanceTickOnly` + `claimWorldSweep`; cadence proven by 7 tests; `e972a72`) |
 | 014 | audit | Cross-room `/skill`+`/cast` co-location gate (HIGH) | P2 | M | LOW | — | ✅ DONE & LIVE (2026-06-17, Campaign D 2a; `assertTargetCoLocated`; `d655d33`) |
-| 015 | audit | **Stripe webhook fail-closed (HIGH)** | P1 | S | MED | — | ⏸ **HELD** — predicate + 18 tests shipped (`worker/validation.mjs`); webhook flip pending owner confirming `STRIPE_RESURRECTION_PAYMENT_LINK_ID` is set in prod (branch `feat/adv-015-016-index`, `763e299`) |
+| 015 | audit | **Stripe webhook fail-closed (HIGH)** | P1 | S | MED | — | ✅ DONE & LIVE (2026-06-17, Campaign D; owner set the prod secret `STRIPE_RESURRECTION_PAYMENT_LINK_ID`, then the webhook flipped to the `shouldFulfillResurrection` fail-closed predicate + a route test for the unset-link refusal) |
 | 016 | audit | Username validation at signup (MED) | P2 | S | LOW | — | ✅ DONE & LIVE (2026-06-17, Campaign D W1; `^[A-Za-z0-9_-]{3,20}$` + reserve `System`/NPC prefixes; `979e353`) |
 | 017/018 | audit | **Concurrency/atomicity (CRIT/HIGH)** — death double-kill/dup-grave, lost-heal delta-writes, ward/mark double-consume, inn/buy/craft/socket/XP/event-victory dup | P1 | L | MED | — | ✅ DONE & LIVE (2026-06-17, Campaign D 2c; claim-then-act + relative deltas, every fix race-tested via `Promise.all`; `2ee371f`) |
 | 019 | audit | `emitDeathReaction` deferred-param bug (HIGH) — mis-ordered death feed | P2 | S | LOW | — | ✅ DONE & LIVE (2026-06-17, Campaign D 2a; `d655d33`) |
@@ -82,11 +82,11 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (reason) | REJECTED (reason)
 > grave, lost-heal writes, economy double-charges), a cross-room skill exploit (014), a Stripe fail-open
 > (015), the death-feed ordering bug (019), username validation (016), and a test-hardening sweep (020).
 > All shipped & live in waves (W1 deps/DX/security · 2a fixes · 2b tick-loop · 2c atomicity · 2d perf ·
-> W3 entrypoint/consolidation/tests), each suite-gated + smoke/combat-smoke-verified on prod, **EXCEPT
-> adv-015 (Stripe fail-closed) — HELD** pending the owner confirming `STRIPE_RESURRECTION_PAYMENT_LINK_ID`
-> is set in prod (flipping it blind would refuse all paid revives). Campaign B's product tails live in
-> `plans/`. The **H1 session-cookie `Secure` flag** remains part of the pre-launch `sec` gate (with
-> password hashing + login rate-limiting), owner-gated, not executed mid-flight.
+> W3 entrypoint/consolidation/tests), each suite-gated + smoke/combat-smoke-verified on prod —
+> **including adv-015**, whose prod secret `STRIPE_RESURRECTION_PAYMENT_LINK_ID` the owner set on
+> 2026-06-17, after which the webhook flipped fail-closed. Campaign B's product tails live in `plans/`.
+> The **H1 session-cookie `Secure` flag** remains part of the pre-launch `sec` gate (with password
+> hashing + login rate-limiting), owner-gated, not executed mid-flight — the one piece of open work left.
 
 **Recommended order**: 001 → 002 → 003 → 004 → 005. Rationale: 001 is the only real
 bug and is highest leverage (money path); 002 is a trivial win that 003 builds on;
@@ -97,9 +97,9 @@ to avoid rebase churn.
 landed in **Campaign C (2026-06-17)**, alongside a combat flavor-tail (per-weapon SIGNATURE verbs —
 an Iron Cleaver *cleaves through* / *hacks a wedge from*, a knife *hooks/rips*, a fang *bites*). So
 D1–D4 are all done; the **bal-1** gang-up knob was considered and **dropped — the owner kept it brutal**
-(stakes are public). With **Campaign D** complete (adv-006…020), the only remaining open work is the
-owner-gated items: **adv-015** (Stripe fail-closed — needs the prod env-var confirm) and the pre-launch
-**`sec`** gate.
+(stakes are public). With **Campaign D** complete (adv-006…020, incl. adv-015 now that the prod Stripe
+secret is set), the only remaining open work is the owner-gated pre-launch **`sec`** gate (password
+hashing + login rate-limit + cookie `Secure`).
 
 ## Campaign A — totalizing hardening pass (✅ COMPLETE 2026-06-16)
 

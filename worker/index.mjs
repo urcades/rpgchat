@@ -55,9 +55,7 @@ import { verifyStripeWebhook } from './stripe.mjs';
 import { canonicalLocalRequestUrl } from './localHost.mjs';
 import { wantsHtmlResponse, wantsJsonResponse } from './http.mjs';
 import { elapsedMs, errorFields, guard, logEvent, measureAsync, nowMs } from './observability.mjs';
-// shouldFulfillResurrection is intentionally NOT imported yet — adv-015 (Stripe fail-closed)
-// is held pending prod env-var confirmation; the predicate lives + is tested in validation.mjs.
-import { isReservedUsername, isValidUsername } from './validation.mjs';
+import { isReservedUsername, isValidUsername, shouldFulfillResurrection } from './validation.mjs';
 
 // `app` is exported so the Hono routes + middleware can be driven end-to-end under
 // `node --test` (with `cloudflare:workers` stubbed via module.registerHooks — see
@@ -614,15 +612,30 @@ app.post('/stripe/webhook', async c => {
     }
 
     const session = event.data?.object || {};
-    // adv-015 (HELD pending prod env-var confirmation, Campaign D): the fail-CLOSED rewrite
-    // (shouldFulfillResurrection, in worker/validation.mjs + tested) is staged on branch
-    // feat/adv-015-016-index but NOT shipped until STRIPE_RESURRECTION_PAYMENT_LINK_ID is
-    // confirmed set in prod — flipping it blind would refuse all paid revives if it's unset.
-    // Current behavior (allowlist skipped when the link id is unset) is unchanged for now.
-    if (c.env.STRIPE_RESURRECTION_PAYMENT_LINK_ID && session.payment_link !== c.env.STRIPE_RESURRECTION_PAYMENT_LINK_ID) {
-      return c.json({ received: true, ignored: true });
-    }
-    if (session.payment_status && session.payment_status !== 'paid') {
+    // adv-015 (Campaign D, shipped 2026-06-17 once STRIPE_RESURRECTION_PAYMENT_LINK_ID was set
+    // in prod): FAIL CLOSED. The previous allowlist check was SKIPPED when the link id was
+    // unset, so any completed checkout fulfilled a resurrection. shouldFulfillResurrection
+    // refuses unless the expected link id is configured AND matches, the payment is 'paid', and
+    // (when a price is configured) the amount/currency line up. A refusal is acknowledged
+    // (received:true, no grant) so Stripe doesn't retry, and logged with the request id + reason.
+    const decision = shouldFulfillResurrection({
+      linkId: session.payment_link,
+      expectedLinkId: c.env.STRIPE_RESURRECTION_PAYMENT_LINK_ID,
+      paymentStatus: session.payment_status,
+      amountTotal: session.amount_total,
+      expectedAmount: c.env.STRIPE_RESURRECTION_PRICE_AMOUNT != null
+        ? Number(c.env.STRIPE_RESURRECTION_PRICE_AMOUNT)
+        : undefined,
+      currency: session.currency,
+      expectedCurrency: c.env.STRIPE_RESURRECTION_CURRENCY
+    });
+    if (!decision.fulfill) {
+      logEvent({
+        event: 'stripe.webhook.refused',
+        requestId: requestIdFromContext(c),
+        reason: decision.reason,
+        sessionId: session.id ?? null
+      });
       return c.json({ received: true, ignored: true });
     }
 

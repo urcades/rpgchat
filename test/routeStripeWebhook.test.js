@@ -209,6 +209,30 @@ test('stripe route: a MISMATCHED payment_link is ignored when the link id is con
 });
 
 // ---------------------------------------------------------------------------
+// Fail-closed (adv-015): an UNSET expected link id refuses (was fail-OPEN — granted any)
+// ---------------------------------------------------------------------------
+
+test('stripe route: a paid completed checkout is REFUSED when no link id is configured (fail-closed)', async () => {
+  const mod = await import('../worker/index.mjs');
+  const db = await createMigratedDb();
+  try {
+    const token = await seedPendingResurrection(db, 'ghost');
+    // No STRIPE_RESURRECTION_PAYMENT_LINK_ID in env — a paid checkout the old fail-OPEN code
+    // would have granted must now be refused (received, but ignored, no grant).
+    const res = await postWebhook(mod.app, envFor(db), {
+      type: 'checkout.session.completed',
+      data: { object: { id: 'cs_x', client_reference_id: token, payment_status: 'paid', payment_link: 'plink_anything' } }
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { received: true, ignored: true });
+    assert.equal(await liveUserExists(db, 'ghost'), false, 'fail-closed: no link id => no grant');
+    assert.equal(await requestStatus(db, token), 'pending', 'request untouched');
+  } finally {
+    await db.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Happy path: valid paid completed checkout -> grants exactly once
 // ---------------------------------------------------------------------------
 
