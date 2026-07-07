@@ -160,11 +160,56 @@ export async function getSession(env, request) {
 }
 
 export async function getLiveSessionUser(env, request) {
-  const session = await getSession(env, request);
-  if (!session?.username) {
+  // One round trip for the hottest read in the app (every authed request):
+  // resolve the session AND its live user row in a single LEFT JOIN instead of
+  // the sequential session read then user read. The `__`-prefixed aliases carry
+  // the session columns; `u.*` carries the user row (all NULLs when the session
+  // has no live user — detected via u.username, which is NOT NULL for real rows).
+  const cookieValues = getCookieValues(request.headers.get('Cookie') || '', COOKIE_NAME);
+  if (cookieValues.length === 0) {
+    return { session: null, user: null };
+  }
+  const secret = getSecret(env);
+  const sessionIds = [];
+  for (const value of cookieValues) {
+    const sessionId = await verifyCookieValue(value, secret);
+    if (sessionId && !sessionIds.includes(sessionId)) {
+      sessionIds.push(sessionId);
+    }
+  }
+  if (sessionIds.length === 0) {
+    return { session: null, user: null };
+  }
+  const placeholders = sessionIds.map(() => '?').join(', ');
+  const row = await dbFirst(
+    env.DB,
+    `SELECT s.id AS __sessionId, s.username AS __sessionUsername,
+            s.deadUsername AS __deadUsername, s.expiresAt AS __expiresAt,
+            u.*
+     FROM sessions s
+     LEFT JOIN users u ON u.username = s.username AND u.isNpc = 0
+     WHERE s.id IN (${placeholders})
+       AND s.expiresAt > CURRENT_TIMESTAMP
+     ORDER BY s.createdAt DESC`,
+    sessionIds
+  );
+  if (!row) {
+    return { session: null, user: null };
+  }
+  const session = {
+    id: row.__sessionId,
+    username: row.__sessionUsername,
+    deadUsername: row.__deadUsername,
+    expiresAt: row.__expiresAt
+  };
+  if (!row.username) {
     return { session, user: null };
   }
-  const user = await dbFirst(env.DB, 'SELECT * FROM users WHERE username = ? AND isNpc = 0', [session.username]);
+  const user = { ...row };
+  delete user.__sessionId;
+  delete user.__sessionUsername;
+  delete user.__deadUsername;
+  delete user.__expiresAt;
   return { session, user };
 }
 

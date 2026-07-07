@@ -41,7 +41,7 @@ import {
   shouldApplyEffect,
   summarizeTraces
 } from './shared.mjs';
-import { changes, dbAll, dbBatch, dbFirst, dbRun } from '../db.mjs';
+import { batchRows, changes, dbAll, dbBatch, dbFirst, dbRun } from '../db.mjs';
 import { elapsedMs, logEvent, measureAsync, nowMs } from '../observability.mjs';
 import {
   applyBodyDamage,
@@ -198,13 +198,28 @@ export async function requireRoomUse(db, username, row, col) {
   // couldn't have walked to is rejected too. The throw flows through the route
   // try/catch -> formError; the inn path below keeps returning its structured
   // object so the pay-to-enter flow still renders.
-  const movement = await validateMovement(db, username, row, col);
-  if (!movement.allowed) {
-    throw new ActionError(movement.incapacitated ? 'You are incapacitated — you cannot move.' : 'Too far to walk there.', 403);
+  //
+  // Position and tick are independent reads on every action, so they share one
+  // batched round trip; the incapacitation read only happens on an actual move
+  // (distance >= 1), exactly as validateMovement orders it.
+  const worldDay = getWorldDay();
+  const [positionResult, tickResult] = await dbBatch(db, [
+    ['SELECT roomRow AS row, roomCol AS col FROM roomPresence WHERE username = ? AND worldDay = ?', [username, worldDay]],
+    ['SELECT value FROM tick WHERE id = 1']
+  ]);
+  const position = batchRows(positionResult)[0] || null;
+  const tickValue = batchRows(tickResult)[0]?.value ?? 0;
+
+  if (position) {
+    const distance = Math.max(Math.abs(position.row - row), Math.abs(position.col - col));
+    if (distance >= 1 && await isIncapacitated(db, username)) {
+      throw new ActionError('You are incapacitated — you cannot move.', 403);
+    }
+    if (distance > 1) {
+      throw new ActionError('Too far to walk there.', 403);
+    }
   }
 
-  const worldDay = getWorldDay();
-  const tickValue = await getCurrentTickValue(db);
   const access = await getRoomAccessState(db, username, row, col, tickValue, worldDay);
 
   return {
@@ -1403,8 +1418,12 @@ export async function processCorpseDecay(db, tickValue = null) {
 // callback) and is the first thing every tick driver does. `staminaUpdated` mirrors the
 // every-3rd-tick stamina cadence the sweep applies, so a caller can still report it.
 export async function advanceTickOnly(db) {
-  await dbRun(db, 'UPDATE tick SET value = value + 1 WHERE id = 1');
-  const tickValue = await getCurrentTickValue(db);
+  // Bump + read back in ONE batched round trip — this runs on every action.
+  const [, tickResult] = await dbBatch(db, [
+    ['UPDATE tick SET value = value + 1 WHERE id = 1'],
+    ['SELECT value FROM tick WHERE id = 1']
+  ]);
+  const tickValue = batchRows(tickResult)[0]?.value ?? 0;
   return {
     tick: tickValue,
     staminaUpdated: tickValue % 3 === 0
