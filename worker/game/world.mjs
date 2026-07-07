@@ -950,10 +950,13 @@ export async function getUserState(db, username) {
     throw new ActionError('User Not Found', 404);
   }
 
-  await ensureBody(db, user);
-  const bodyParts = await getBodyParts(db, username);
+  // ensureBody already returns the (possibly just-created) parts — don't re-read
+  // them; and thread parts + gear into getConditionAndGearModifiers so the
+  // modifier bundle doesn't re-run the same two sub-queries (this endpoint is the
+  // hottest poll in the app).
+  const bodyParts = (await ensureBody(db, user)) || [];
   const gearBonuses = await getEquippedModifiers(db, username);
-  const combinedModifiers = await getConditionAndGearModifiers(db, username);
+  const combinedModifiers = await getConditionAndGearModifiers(db, username, { bodyParts, gear: gearBonuses });
   const effective = getEffectiveUser(user, combinedModifiers);
   const body = bodyParts.map(part => ({
     label: part.label,

@@ -276,14 +276,16 @@ export async function applyPartMaxHpDelta(db, username, partId, delta) {
 //     of state that does not change between the attacker- and target-reads inside one
 //     attack, so memoizing by username returns the identical object (and consumes ZERO
 //     extra RNG draws — these are all plain DB reads). Absent options => prior behavior.
+//   - options.bodyParts / options.gear: already-fetched body parts / equipped-gear
+//     modifiers (getUserState reads both anyway), so this doesn't re-query them.
 export async function getConditionAndGearModifiers(db, username, options = {}) {
   const { tickValue = null, cache = null } = options;
   if (cache && cache.has(username)) {
     return cache.get(username);
   }
   const [condition, gear, progression, status] = await Promise.all([
-    getBodyConditionModifiers(db, username),
-    getEquippedModifiers(db, username),
+    options.bodyParts ? bodyPenaltyModifiers(options.bodyParts) : getBodyConditionModifiers(db, username),
+    options.gear ? options.gear : getEquippedModifiers(db, username),
     getProgressionModifiers(db, username),
     getStatusStatModifiers(db, username, tickValue)
   ]);
