@@ -86,3 +86,26 @@ test('Plan 008: death writes kind=death and getMessages surfaces the kind field'
     await db.close();
   }
 });
+
+test('getMessages sinceId returns only rows newer than the watermark (delta path)', async () => {
+  const db = await createMigratedDb();
+  const { getMessages, insertMessage } = await import('../worker/game.mjs');
+  try {
+    await seedLiveUser(db, 'delta_talker');
+    await insertMessage(db, 3, 3, 'delta_talker', 'first line');
+    await insertMessage(db, 3, 3, 'delta_talker', 'second line');
+    const all = await getMessages(db, 3, 3);
+    assert.equal(all.length, 2, 'full fetch sees both');
+    const watermark = all[0].id;
+
+    const delta = await getMessages(db, 3, 3, null, watermark);
+    assert.equal(delta.length, 1, 'delta fetch sees only the newer row');
+    assert.equal(delta[0].message, 'second line');
+    assert.equal(delta[0].job, 'Novice', 'delta rows stay enriched');
+
+    const junk = await getMessages(db, 3, 3, null, 'not-a-number');
+    assert.equal(junk.length, 2, 'non-numeric since falls back to the full window');
+  } finally {
+    await db.close();
+  }
+});

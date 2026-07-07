@@ -64,6 +64,10 @@
     let currentSkill = null;
     let currentSkills = [];
     let currentJob = 'Novice';
+    let currentUsername = '';        // set from user-state payloads; used for the optimistic echo
+    let currentDisplayName = '';
+    let messagesRefreshTimer = null; // debounce for the delta (since-id) message fetch
+    let lastEcologyFetchAt = 0;      // throttle for message-event ecology refreshes
     let selectedTarget = '';
     let selectedTargetLabel = ''; // Plan 013e: display name for the hint/echo (selectedTarget stays the key)
     let selectedTargetIsNpc = false; // Plan 024: tracks NPC-ness; the aim bar now keys off aimParts, not this (a bodied NPC CAN be aimed at — plan 024-fix)
@@ -257,6 +261,9 @@
       const messagesDiv = document.getElementById('messages');
       const list = data || [];
       const fresh = list.filter(msg => Number(msg.id) > lastRenderedMessageId);
+      if (fresh.length > 0) {
+        clearPendingMessages(); // authoritative rows supersede the optimistic echo
+      }
       if (messagesDiv.childElementCount === 0 || fresh.length === list.length) {
         messagesDiv.innerHTML = '';
         list.forEach(msg => {
@@ -277,6 +284,90 @@
       if (fresh.length > 0 || messagesDiv.childElementCount === 0) {
         scrollToBottom();
       }
+    }
+
+    // ---- delta refresh + optimistic echo -----------------------------------
+
+    let pendingMessageNodes = [];
+    function clearPendingMessages() {
+      pendingMessageNodes.forEach(node => {
+        if (typeof node.remove === 'function') {
+          node.remove();
+        }
+      });
+      pendingMessageNodes = [];
+    }
+
+    // Append-only render for the ?since= delta path: only rows newer than the
+    // high-water mark, DOM trimmed to the server's history window.
+    function appendMessages(list) {
+      const messagesDiv = document.getElementById('messages');
+      const fresh = (Array.isArray(list) ? list : []).filter(msg => Number(msg.id) > lastRenderedMessageId);
+      if (fresh.length === 0) {
+        return;
+      }
+      clearPendingMessages();
+      fresh.forEach(msg => {
+        messagesDiv.appendChild(renderMessage(msg));
+      });
+      while (messagesDiv.childElementCount > 100) {
+        messagesDiv.removeChild(messagesDiv.firstChild);
+      }
+      lastRenderedMessageId = Math.max(lastRenderedMessageId, Number(fresh[fresh.length - 1].id) || 0);
+      scrollToBottom();
+    }
+
+    function loadNewMessages() {
+      fetch(`/messages/${row}/${col}?since=${lastRenderedMessageId}`)
+        .then(response => {
+          if (redirectIfDead(response)) {
+            throw new Error('You died');
+          }
+          if (!response.ok) {
+            throw new Error('Messages unavailable');
+          }
+          return response.json();
+        })
+        .then(appendMessages)
+        .catch(() => {
+          // Delta path failed — fall back to the authoritative full refresh.
+          scheduleRoomStateRefresh();
+        });
+    }
+
+    // Chat-only events need just the new lines (a couple of rows), not the ~20-query
+    // full room state. Ecology (floor items etc.) can shift via chat commands other
+    // players run, so it rides along at most once per 10s.
+    function scheduleNewMessagesRefresh() {
+      clearTimeout(messagesRefreshTimer);
+      messagesRefreshTimer = setTimeout(() => {
+        loadNewMessages();
+        if (Date.now() - lastEcologyFetchAt > 10000) {
+          lastEcologyFetchAt = Date.now();
+          loadRoomEcology();
+        }
+      }, 150);
+    }
+
+    // Instant local echo of the player's own plain chat line, styled pending until
+    // the authoritative row lands (any fresh fetch clears it). Commands and attacks
+    // are actions with server-computed results — they don't echo.
+    function echoPendingMessage(message) {
+      const node = renderMessage({
+        username: currentUsername || 'you',
+        displayName: currentDisplayName || currentUsername,
+        message,
+        timestamp: new Date().toISOString().slice(0, 19).replace('T', ' '),
+        kind: 'chat',
+        job: currentJob,
+        statusEffects: []
+      });
+      node.classList.add('pending-message');
+      node.style.opacity = '0.55';
+      document.getElementById('messages').appendChild(node);
+      pendingMessageNodes.push(node);
+      scrollToBottom();
+      return node;
     }
 
     function loadMessages() {
@@ -301,6 +392,8 @@
       const effective = data.effectiveStats || data;
       currentSkill = data.skill || null;
       currentJob = data.job || 'Novice';
+      currentUsername = data.username || currentUsername;
+      currentDisplayName = data.displayName || data.username || currentDisplayName;
       incapacitated = !!data.incapacitated; // Plan 023b/c
       document.getElementById('character-link').textContent = data.displayName || data.username || 'Status';
       // Plan 013e: while bleeding out, the Health stat itself goes negative — the death
@@ -615,6 +708,13 @@
           }
           return;
         }
+        // Chat lines (players and NPCs) only add message rows — fetch just the
+        // delta. Combat/skill/job/hostile events change stats and ecology, so
+        // they keep the full (debounced) room-state refresh.
+        if (payload && payload.type === 'message') {
+          scheduleNewMessagesRefresh();
+          return;
+        }
         scheduleRoomStateRefresh();
       };
 
@@ -699,7 +799,7 @@
       return trimmed ? `${trimmed} ${label}` : label;
     }
 
-    function postForm(endpoint, body, onSuccess) {
+    function postForm(endpoint, body, onSuccess, onError) {
       fetch(endpoint, {
         method: 'POST',
         headers: {
@@ -726,6 +826,9 @@
           updateAll();
         })
         .catch(error => {
+          if (onError) {
+            onError();
+          }
           window.alert(error.message);
         });
     }
@@ -750,9 +853,19 @@
       if (attack && selectedTargetPart) {
         body += `&targetPart=${encodeURIComponent(selectedTargetPart)}`;
       }
+      // Optimistic echo: a plain chat line renders instantly (pending style) and is
+      // replaced by the authoritative row when it arrives; rolled back on error.
+      const pendingNode = (!attack && !actionMessage.trim().startsWith('/'))
+        ? echoPendingMessage(actionMessage)
+        : null;
       postForm(endpoint, body, () => {
         messageInput.value = '';
         updateTargetHint();
+      }, () => {
+        if (pendingNode && typeof pendingNode.remove === 'function') {
+          pendingNode.remove();
+        }
+        pendingMessageNodes = pendingMessageNodes.filter(node => node !== pendingNode);
       });
     }
 

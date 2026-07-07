@@ -787,7 +787,10 @@ app.get('/messages/:row/:col', async c => {
   try {
     const { row, col } = parseCoordinates(c);
     const roomUse = await ensureRoomUse(c, auth.user, row, col);
-    return c.json(await getMessages(c.env.DB, row, col, roomUse.tickValue));
+    // ?since=<id>: delta fetch — only messages newer than the client's last
+    // rendered id (the socket-driven refresh path). Absent => full window.
+    const since = c.req.query('since') || null;
+    return c.json(await getMessages(c.env.DB, row, col, roomUse.tickValue, since));
   } catch (err) {
     return formError(c, err);
   }

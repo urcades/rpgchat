@@ -54,16 +54,23 @@ export async function createTrace(db, trace) {
   );
 }
 
-export async function getMessages(db, row, col, tickValue = null) {
+// sinceId (optional): only rows newer than this id — the delta path for
+// socket-driven refreshes, so a live client fetches the one or two new lines
+// instead of the full history window every event.
+export async function getMessages(db, row, col, tickValue = null, sinceId = null) {
+  const since = Number.isFinite(Number(sinceId)) && Number(sinceId) > 0 ? Number(sinceId) : null;
   const recent = await dbAll(
     db,
     `SELECT id, username, message, timestamp, kind
      FROM messages
      WHERE roomRow = ?
        AND roomCol = ?
+       ${since !== null ? 'AND id > ?' : ''}
      ORDER BY id DESC
      LIMIT ?`,
-    [row, col, ROOM_MESSAGE_HISTORY_LIMIT]
+    since !== null
+      ? [row, col, since, ROOM_MESSAGE_HISTORY_LIMIT]
+      : [row, col, ROOM_MESSAGE_HISTORY_LIMIT]
   );
   const rows = recent.reverse();
   const usernames = [...new Set(rows.map(row => row.username).filter(username => username && username !== 'System'))];

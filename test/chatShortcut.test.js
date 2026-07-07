@@ -355,6 +355,54 @@ test('room socket events refresh one full room state payload', async () => {
   assert.deepEqual(page.gets, ['/room-state/1/1']);
 });
 
+test('socket message events fetch only the message delta, not full room state', async () => {
+  let socket;
+  const page = loadChatPage({
+    WebSocket: function WebSocket() {
+      socket = {};
+      return socket;
+    }
+  });
+  await flushPromises();
+  page.gets.length = 0;
+
+  socket.onmessage({ data: JSON.stringify({ type: 'message', username: 'someone' }) });
+  await flushPromises();
+
+  assert.ok(page.gets.includes('/messages/1/1?since=0'), 'delta message fetch');
+  assert.equal(page.gets.includes('/room-state/1/1'), false, 'no full room-state refetch');
+});
+
+test('own plain chat line echoes instantly as a pending message', async () => {
+  const page = loadChatPage();
+  await flushPromises();
+
+  const messageInput = page.getElement('message');
+  messageInput.value = 'hello there';
+  page.getElement('chat-form').listeners.submit({ preventDefault() {} });
+
+  const pending = page.getElement('messages').children
+    .find(child => child.classList && child.classList.values.includes('pending-message'));
+  assert.ok(pending, 'pending echo rendered before the POST resolves');
+  assert.ok(pending.textContent.includes('hello there'), 'echo carries the typed line');
+
+  await flushPromises();
+  assert.ok(page.posts.some(post => post.endpoint === '/chat/1/1'), 'the real action still posts');
+});
+
+test('slash commands do not echo optimistically', async () => {
+  const page = loadChatPage();
+  await flushPromises();
+
+  const messageInput = page.getElement('message');
+  messageInput.value = '/stance guarding';
+  page.getElement('chat-form').listeners.submit({ preventDefault() {} });
+
+  const pending = page.getElement('messages').children
+    .find(child => child.classList && child.classList.values.includes('pending-message'));
+  assert.equal(pending, undefined, 'commands wait for the server result');
+});
+
 test('chat renderer colors support, death, attack, and speed result messages', () => {
   const page = loadChatPage();
 
