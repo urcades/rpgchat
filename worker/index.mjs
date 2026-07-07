@@ -288,7 +288,11 @@ async function wakeActiveRooms(env, pulse) {
   // Boundary: each room wake is independently guarded so one failure never aborts the
   // others. guard() resolves the action's value (true) on success and the fallback
   // (false) on a caught+logged throw, so the booleans below tally cleanly.
-  const outcomes = await Promise.all(rooms.map(room => guard('world-pulse.wake-room.error', async () => {
+  const outcomes = await Promise.all(rooms.map((room, index) => guard('world-pulse.wake-room.error', async () => {
+    // Stagger the wakes so every active room doesn't slam its DO (and, from
+    // there, D1) in the same second each minute. Deterministic per position,
+    // ~0.5s apart, capped well under the cron window.
+    await new Promise(resolve => setTimeout(resolve, Math.min(index * 500, 15000)));
     const stub = env.ROOMS.getByName(roomName(room.row, room.col));
     await stub.fetch(new Request(`https://room.local/world-pulse/${room.row}/${room.col}`, {
       method: 'POST',
