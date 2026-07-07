@@ -24,6 +24,7 @@ import {
   getRoomEcology,
   getProgressionGrid,
   getRoomState,
+  getUserOrNull,
   getUserState,
   handleAttackAction,
   handleChatAction,
@@ -323,6 +324,15 @@ async function runScheduledWorldPulseAndWakeRooms(env) {
   return pulse;
 }
 
+// Read-heavy GETs fetch through a D1 session with unconstrained reads so a
+// nearby read replica can serve them once replication is enabled on the
+// database; with no replicas (or an adapter without withSession, e.g. the test
+// shim) this resolves to the primary exactly as before. Writes and anything
+// order-sensitive (auth, room-use gating, actions) stay on env.DB.
+function readDb(env) {
+  return typeof env.DB.withSession === 'function' ? env.DB.withSession('first-unconstrained') : env.DB;
+}
+
 async function ensureRoomUse(c, user, row, col) {
   const roomUse = await requireRoomUse(c.env.DB, user.username, row, col);
   if (!roomUse.allowed) {
@@ -594,7 +604,7 @@ app.get('/cemetery-data', async c => {
 });
 
 app.get('/leaderboard-data', async c => {
-  const players = await getLeaderboard(c.env.DB);
+  const players = await getLeaderboard(readDb(c.env));
   return c.json(players);
 });
 
@@ -712,7 +722,7 @@ app.get('/user-attributes', async c => {
     return auth;
   }
   try {
-    return c.json(await getUserState(c.env.DB, auth.user.username));
+    return c.json(await getUserState(readDb(c.env), auth.user.username));
   } catch (err) {
     return formError(c, err);
   }
@@ -728,7 +738,7 @@ app.post('/allocate', async c => {
   try {
     const body = await parseForm(c);
     await allocateAttributePoint(c.env.DB, auth.user.username, String(body.stat || ''));
-    return c.json(await getUserState(c.env.DB, auth.user.username));
+    return c.json(await getUserState(readDb(c.env), auth.user.username));
   } catch (err) {
     return formError(c, err);
   }
@@ -780,7 +790,7 @@ app.post('/grid/respec', async c => {
   }
 });
 
-app.get('/tick', async c => c.json({ tick: await getCurrentTickValue(c.env.DB) }));
+app.get('/tick', async c => c.json({ tick: await getCurrentTickValue(readDb(c.env)) }));
 
 app.get('/messages/:row/:col', async c => {
   const auth = await currentUserOrResponse(c);
@@ -794,7 +804,7 @@ app.get('/messages/:row/:col', async c => {
     // ?since=<id>: delta fetch — only messages newer than the client's last
     // rendered id (the socket-driven refresh path). Absent => full window.
     const since = c.req.query('since') || null;
-    return c.json(await getMessages(c.env.DB, row, col, roomUse.tickValue, since));
+    return c.json(await getMessages(readDb(c.env), row, col, roomUse.tickValue, since));
   } catch (err) {
     return formError(c, err);
   }
@@ -808,7 +818,7 @@ app.get('/room-ecology/:row/:col', async c => {
 
   try {
     const { row, col } = parseCoordinates(c);
-    return c.json(await getRoomEcology(c.env.DB, auth.user.username, row, col));
+    return c.json(await getRoomEcology(readDb(c.env), auth.user.username, row, col));
   } catch (err) {
     return formError(c, err);
   }
@@ -826,7 +836,7 @@ app.get('/room-state/:row/:col', async c => {
     if (!roomUse.allowed) {
       throw new ActionError('Inn access required', 403);
     }
-    return c.json(await getRoomState(c.env.DB, auth.user.username, row, col, roomUse.tickValue));
+    return c.json(await getRoomState(readDb(c.env), auth.user.username, row, col, roomUse.tickValue));
   } catch (err) {
     return formError(c, err);
   }
@@ -919,7 +929,18 @@ app.post('/chat/:row/:col', async c => {
       // here, off the latency path, deduped by the tick-window claim so a calm-room action
       // still drives the per-tick effects on its own cadence without K-fold fan-out.
       await runDeferredWorldSweeps(c.env.DB, result.tick?.tick);
-      const broadcast = await measureAsync(() => broadcastRoom(c.env, row, col, { type: 'message', username: auth.user.username, result }));
+      // Self-describing frame: a plain chat line's fully-formed row (with the
+      // author's job/displayName from the already-fetched auth row) rides in the
+      // broadcast, so clients append it directly — zero follow-up fetch.
+      const enrichedRows = result.messageRow
+        ? [{ ...result.messageRow, job: auth.user.job || null, displayName: auth.user.displayName || null, statusEffects: [] }]
+        : undefined;
+      const broadcast = await measureAsync(() => broadcastRoom(c.env, row, col, {
+        type: 'message',
+        username: auth.user.username,
+        result,
+        ...(enrichedRows ? { messages: enrichedRows } : {})
+      }));
       const hostileLoop = await measureAsync(() => startHostileLoopIfNeeded(c.env, row, col));
       // Plan 013a: after the player's line lands, give a present NPC a chance to answer.
       // Plan 013d: a downed player's garbled plea still reaches the room — a present
@@ -1186,8 +1207,126 @@ export class RoomObject extends DurableObject {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     this.ctx.acceptWebSocket(server, [auth.user.username]);
+    // The socket carries its own identity + room so webSocketMessage() can
+    // dispatch actions without re-authing — auth happened at upgrade, and the
+    // attachment survives hibernation.
+    const wsCoordinates = url.pathname.match(/^\/ws\/(\d+)\/(\d+)$/);
+    server.serializeAttachment({
+      username: auth.user.username,
+      row: wsCoordinates ? Number.parseInt(wsCoordinates[1], 10) : null,
+      col: wsCoordinates ? Number.parseInt(wsCoordinates[2], 10) : null
+    });
     server.send(JSON.stringify({ type: 'connected', username: auth.user.username }));
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  sendSafe(socket, payload) {
+    try {
+      socket.send(JSON.stringify(payload));
+    } catch {
+      // The socket died mid-send; the lazy reap in broadcast() handles cleanup.
+    }
+  }
+
+  // Actions over the socket: the client sends {type:'chat'|'attack', message,
+  // targetPart?, seq} and gets an {type:'ack'|'action-error', seq} frame back.
+  // Auth rode the upgrade (attachment); the room-use gate and the full game
+  // logic are the SAME calls the HTTP routes make — only the transport differs.
+  // The ack is sent before the broadcast + post-turn tail so the sender's
+  // perceived latency is just the action itself.
+  async webSocketMessage(ws, raw) {
+    let frame = null;
+    try {
+      frame = JSON.parse(typeof raw === 'string' ? raw : new TextDecoder().decode(raw));
+    } catch {
+      return; // not ours — ignore
+    }
+    if (!frame || (frame.type !== 'chat' && frame.type !== 'attack')) {
+      return;
+    }
+    const seq = Number(frame.seq) || 0;
+    const attachment = (typeof ws.deserializeAttachment === 'function' ? ws.deserializeAttachment() : null) || {};
+    const { username, row, col } = attachment;
+    if (!username || !Number.isInteger(row) || !Number.isInteger(col)) {
+      this.sendSafe(ws, { type: 'action-error', seq, message: 'Reconnect required.', status: 401 });
+      return;
+    }
+
+    const db = this.env.DB;
+    try {
+      // The user row gates liveness AND supplies the enrichment fields below —
+      // one read, mirroring what the HTTP path's auth join provides.
+      const user = await getUserOrNull(db, username);
+      if (!user || user.isNpc) {
+        this.sendSafe(ws, { type: 'dead', seq });
+        return;
+      }
+      const roomUse = await requireRoomUse(db, username, row, col);
+      if (!roomUse.allowed) {
+        throw new ActionError('Inn access required', 403);
+      }
+      const message = String(frame.message || '');
+      if (!message.trim()) {
+        throw new ActionError('Message required.');
+      }
+
+      let broadcastType;
+      let result;
+      if (frame.type === 'attack') {
+        const targetPart = frame.targetPart ? String(frame.targetPart) : null;
+        result = await handleAttackAction(db, username, row, col, message, targetPart);
+        broadcastType = 'attack';
+      } else {
+        result = await handleChatAction(db, username, row, col, message);
+        broadcastType = 'message';
+      }
+
+      this.sendSafe(ws, { type: 'ack', seq, action: broadcastType, result });
+
+      const enrichedRows = result.messageRow
+        ? [{ ...result.messageRow, job: user.job || null, displayName: user.displayName || null, statusEffects: [] }]
+        : undefined;
+      await this.broadcast({
+        type: broadcastType,
+        room: { row, col },
+        username,
+        result,
+        ...(enrichedRows ? { messages: enrichedRows } : {})
+      });
+
+      // Post-turn tail — the same work the HTTP routes run in runAfterResponse:
+      // deferred world sweeps, the room loop wake, and (for chat) an NPC reply.
+      await guard('ws-action.tail.error', async () => {
+        await runDeferredWorldSweeps(db, result.tick?.tick);
+        if (await roomNeedsLoop(db, row, col)) {
+          await this.ctx.storage.put('hostileRoom', { row, col });
+          if (await this.ctx.storage.getAlarm() === null) {
+            await this.ctx.storage.setAlarm(Date.now() + 5000);
+          }
+        }
+        if (broadcastType === 'message') {
+          const reply = await runNpcReply(db, this.env.AI, row, col);
+          if (reply.spoke) {
+            await this.broadcast({ type: 'message', room: { row, col }, username: reply.npc });
+          }
+          if (reply.provoked > 0) {
+            await this.ctx.storage.put('hostileRoom', { row, col });
+            await this.ctx.storage.setAlarm(Date.now() + 5000);
+          }
+        }
+      }, { fields: { roomRow: row, roomCol: col, username } });
+    } catch (err) {
+      const status = (err && err.statusCode) || 500;
+      this.sendSafe(ws, {
+        type: 'action-error',
+        seq,
+        message: status >= 500 ? 'Internal Server Error' : err.message,
+        status
+      });
+      if (status >= 500) {
+        console.error('ws action failed', err);
+      }
+    }
   }
 
   async broadcast(payload) {

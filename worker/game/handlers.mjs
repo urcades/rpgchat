@@ -250,18 +250,27 @@ export async function handleChatAction(db, username, row, col, message) {
   // world). The banner + garbling carry the pathos.
   if (downed) {
     const garbled = garbleSpeech(message);
-    await insertMessage(db, row, col, username, garbled, 'rite');
-    return { message: garbled, garbled: true };
+    const inserted = await insertMessage(db, row, col, username, garbled, 'rite');
+    return {
+      message: garbled,
+      garbled: true,
+      messageRow: { id: inserted.id, username, message: garbled, timestamp: inserted.timestamp, kind: 'rite' }
+    };
   }
 
   return runPlayerAction(db, {
     username,
     staminaCost: 1,
     perform: async () => {
-      await insertMessage(db, row, col, username, message);
+      const inserted = await insertMessage(db, row, col, username, message);
       await awardGoldMaybe(db, username);
       await updateLevel(db, username, row, col);
-      return { message };
+      // The fully-formed row rides back so the broadcast can carry it — clients
+      // append it directly instead of fetching a delta.
+      return {
+        message,
+        messageRow: { id: inserted.id, username, message, timestamp: inserted.timestamp, kind: 'chat' }
+      };
     },
     advanceTick: () => advanceTickOnly(db)
   });

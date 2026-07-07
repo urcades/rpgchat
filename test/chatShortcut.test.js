@@ -403,6 +403,87 @@ test('slash commands do not echo optimistically', async () => {
   assert.equal(pending, undefined, 'commands wait for the server result');
 });
 
+test('with a live socket, chat goes as a WS frame — no HTTP POST', async () => {
+  let socket;
+  const wsSent = [];
+  const page = loadChatPage({
+    WebSocket: function WebSocket() {
+      socket = {
+        readyState: 1,
+        send(raw) {
+          wsSent.push(JSON.parse(raw));
+        }
+      };
+      return socket;
+    }
+  });
+  await flushPromises();
+  page.posts.length = 0;
+
+  const messageInput = page.getElement('message');
+  messageInput.value = 'over the wire';
+  page.getElement('chat-form').listeners.submit({ preventDefault() {} });
+  await flushPromises();
+
+  const frame = wsSent.find(sent => sent.type === 'chat');
+  assert.ok(frame, 'chat frame sent over the socket');
+  assert.equal(frame.message, 'over the wire');
+  assert.ok(frame.seq > 0, 'frame carries a seq');
+  assert.equal(page.posts.some(post => post.endpoint === '/chat/1/1'), false, 'no HTTP POST');
+  assert.equal(messageInput.value, '', 'input cleared optimistically');
+});
+
+test('an action-error frame restores the input and rolls back the echo', async () => {
+  let socket;
+  const page = loadChatPage({
+    WebSocket: function WebSocket() {
+      socket = { readyState: 1, send() {} };
+      return socket;
+    }
+  });
+  await flushPromises();
+
+  const messageInput = page.getElement('message');
+  messageInput.value = 'doomed line';
+  page.getElement('chat-form').listeners.submit({ preventDefault() {} });
+  assert.equal(messageInput.value, '', 'cleared on send');
+
+  socket.onmessage({ data: JSON.stringify({ type: 'action-error', seq: 1, message: 'Not enough stamina.' }) });
+  await flushPromises();
+
+  assert.equal(messageInput.value, 'doomed line', 'input restored for retry');
+  assert.ok(page.alerts.includes('Not enough stamina.'), 'error surfaced');
+});
+
+test('a self-describing message frame appends rows with no fetch at all', async () => {
+  let socket;
+  const page = loadChatPage({
+    WebSocket: function WebSocket() {
+      socket = {};
+      return socket;
+    }
+  });
+  // Let the startup fetch chain (heartbeat -> room-state -> render) fully settle
+  // so its empty-history render can't race the frame below.
+  for (let i = 0; i < 6; i += 1) {
+    await flushPromises();
+  }
+  page.gets.length = 0;
+
+  socket.onmessage({
+    data: JSON.stringify({
+      type: 'message',
+      username: 'someone',
+      messages: [{ id: 41, username: 'someone', message: 'carried in the frame', timestamp: '2026-07-07 10:00:00', kind: 'chat', job: 'Mage', statusEffects: [] }]
+    })
+  });
+  await flushPromises();
+
+  assert.equal(page.gets.length, 0, 'no follow-up fetch of any kind');
+  const line = page.getElement('messages').children.find(child => (child.textContent || '').includes('carried in the frame'));
+  assert.ok(line, 'the row rendered straight from the frame');
+});
+
 test('chat renderer colors support, death, attack, and speed result messages', () => {
   const page = loadChatPage();
 

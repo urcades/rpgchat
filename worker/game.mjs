@@ -48,6 +48,7 @@ export {
   getRoomFeaturesForTick,
   getRoomState,
   getUser,
+  getUserOrNull,
   getUserState,
   payInnAccess,
   processCorpseDecay,

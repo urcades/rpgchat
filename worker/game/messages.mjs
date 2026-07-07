@@ -6,16 +6,21 @@
 // dereferenced at module load).
 
 import { ROOM_MESSAGE_HISTORY_LIMIT } from './shared.mjs';
-import { dbAll, dbRun } from '../db.mjs';
+import { dbAll, dbRun, lastInsertId } from '../db.mjs';
 import { getCurrentTickValue } from './world.mjs';
 
 
+// The timestamp is written explicitly (same UTC 'YYYY-MM-DD HH:MM:SS' shape as the
+// column's CURRENT_TIMESTAMP default) and returned with the new row id, so a caller
+// can hand a fully-formed, render-ready row to the broadcast without re-reading it.
 export async function insertMessage(db, row, col, username, message, kind = 'chat') {
-  await dbRun(
+  const timestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const result = await dbRun(
     db,
-    'INSERT INTO messages (roomRow, roomCol, username, message, kind) VALUES (?, ?, ?, ?, ?)',
-    [row, col, username, message, kind]
+    'INSERT INTO messages (roomRow, roomCol, username, message, kind, timestamp) VALUES (?, ?, ?, ?, ?, ?)',
+    [row, col, username, message, kind, timestamp]
   );
+  return { id: lastInsertId(result), timestamp };
 }
 
 export async function insertSystemMessage(db, row, col, message, kind = 'system') {

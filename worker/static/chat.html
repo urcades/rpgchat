@@ -260,6 +260,11 @@
       // history window) falls back to the full rebuild.
       const messagesDiv = document.getElementById('messages');
       const list = data || [];
+      // A stale/slow fetch that resolves AFTER frames already rendered newer rows
+      // must not wipe them: an empty payload against a nonzero watermark is old news.
+      if (list.length === 0 && lastRenderedMessageId > 0) {
+        return;
+      }
       const fresh = list.filter(msg => Number(msg.id) > lastRenderedMessageId);
       if (fresh.length > 0) {
         clearPendingMessages(); // authoritative rows supersede the optimistic echo
@@ -289,6 +294,34 @@
     // ---- delta refresh + optimistic echo -----------------------------------
 
     let pendingMessageNodes = [];
+
+    // ---- actions over the socket -------------------------------------------
+    // With a live socket, chat/attack go as WS frames (no HTTP, no per-action
+    // auth); each carries a seq and resolves on the matching ack/action-error
+    // frame. A dying socket flushes every unresolved action to the HTTP path.
+    let wsActionSeq = 0;
+    const pendingActions = new Map();
+
+    function flushPendingActionsToHttp() {
+      const pending = Array.from(pendingActions.values());
+      pendingActions.clear();
+      pending.forEach(action => action.fallback());
+    }
+
+    function sendActionOverSocket(frame, handlers) {
+      if (!(socket && socket.readyState === 1)) {
+        return false;
+      }
+      const seq = ++wsActionSeq;
+      pendingActions.set(seq, handlers);
+      try {
+        socket.send(JSON.stringify({ ...frame, seq }));
+      } catch (error) {
+        pendingActions.delete(seq);
+        return false;
+      }
+      return true;
+    }
     function clearPendingMessages() {
       pendingMessageNodes.forEach(node => {
         if (typeof node.remove === 'function') {
@@ -697,6 +730,33 @@
         } catch (error) {
           payload = null;
         }
+        // Action frames addressed to this client resolve their pending action.
+        if (payload && payload.type === 'ack') {
+          const action = pendingActions.get(payload.seq);
+          if (action) {
+            pendingActions.delete(payload.seq);
+            if (action.onSuccess) {
+              action.onSuccess();
+            }
+          }
+          return;
+        }
+        if (payload && payload.type === 'action-error') {
+          const action = pendingActions.get(payload.seq);
+          if (action) {
+            pendingActions.delete(payload.seq);
+            if (action.onError) {
+              action.onError();
+            }
+          }
+          window.alert(payload.message || 'Action failed');
+          return;
+        }
+        if (payload && payload.type === 'dead') {
+          stopRealtime();
+          window.location.href = '/you-died';
+          return;
+        }
         // Presence heartbeats only change who is in the room — and an occupant we
         // already render is a no-op (this is the common case: every occupant
         // heartbeats every 15s, and refetching ecology for each was O(K²) per
@@ -712,6 +772,13 @@
         // delta. Combat/skill/job/hostile events change stats and ecology, so
         // they keep the full (debounced) room-state refresh.
         if (payload && payload.type === 'message') {
+          // Self-describing frame: the row(s) ride in the broadcast — append them
+          // directly, no fetch at all. Frames without rows (commands, NPC lines)
+          // fall back to the delta fetch.
+          if (Array.isArray(payload.messages) && payload.messages.length > 0) {
+            appendMessages(payload.messages);
+            return;
+          }
           scheduleNewMessagesRefresh();
           return;
         }
@@ -719,6 +786,8 @@
       };
 
       socket.onclose = function() {
+        // Any action still awaiting an ack rides the HTTP fallback.
+        flushPendingActionsToHttp();
         if (realtimeStopped) {
           return; // death / auth-expiry / teardown — stay closed, don't reconnect forever
         }
@@ -858,15 +927,37 @@
       const pendingNode = (!attack && !actionMessage.trim().startsWith('/'))
         ? echoPendingMessage(actionMessage)
         : null;
-      postForm(endpoint, body, () => {
+      const onSuccess = () => {
         messageInput.value = '';
         updateTargetHint();
-      }, () => {
+      };
+      const onError = () => {
         if (pendingNode && typeof pendingNode.remove === 'function') {
           pendingNode.remove();
         }
         pendingMessageNodes = pendingMessageNodes.filter(node => node !== pendingNode);
-      });
+      };
+      const sendHttp = () => postForm(endpoint, body, onSuccess, onError);
+      // Prefer the socket (no HTTP, no per-action auth); fall back to POST when
+      // it isn't live. The input clears optimistically on the WS path — the echo
+      // is already rendered, and a failed action restores it for a retry.
+      const wsFrame = {
+        type: attack ? 'attack' : 'chat',
+        message: actionMessage,
+        ...(attack && selectedTargetPart ? { targetPart: selectedTargetPart } : {})
+      };
+      if (sendActionOverSocket(wsFrame, {
+        onSuccess,
+        onError: () => {
+          onError();
+          messageInput.value = actionMessage;
+        },
+        fallback: sendHttp
+      })) {
+        onSuccess();
+        return;
+      }
+      sendHttp();
     }
 
     // Plan 017: the ability hotbar — one clickable button per available skill
