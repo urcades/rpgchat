@@ -1581,65 +1581,46 @@ export async function getActiveWorldEvents(db, worldDay = getWorldDay()) {
   );
 }
 
-export async function roomHasActiveHostiles(db, row, col) {
+// One scan of the room's presence rows answers all three loop-gating questions
+// the DO alarm / route tails used to ask with up to five separate probes:
+// is a live hostile NPC here, is a fresh live (or downed) human here, and is a
+// social NPC here. Each CASE reproduces its original probe's predicates exactly.
+export async function getRoomLoopState(db, row, col) {
   const worldDay = getWorldDay();
-  const hostiles = await dbFirst(
+  const state = await dbFirst(
     db,
-    `SELECT u.username
-     FROM users u
-     JOIN roomPresence rp ON rp.username = u.username
-     WHERE u.isNpc = 1
-       AND u.health > 0
-       AND (u.disposition IS NULL OR u.disposition = 'hostile')
-       AND rp.roomRow = ?
+    `SELECT
+       MAX(CASE WHEN u.isNpc = 1 AND u.health > 0
+                 AND (u.disposition IS NULL OR u.disposition = 'hostile')
+            THEN 1 ELSE 0 END) AS hostiles,
+       MAX(CASE WHEN u.isNpc = 0 AND (u.health > 0 OR u.incapacitated = 1)
+                 AND rp.lastSeenAt >= datetime('now', ?)
+            THEN 1 ELSE 0 END) AS humans,
+       MAX(CASE WHEN u.isNpc = 1 AND u.npcKind = 'social' THEN 1 ELSE 0 END) AS social
+     FROM roomPresence rp
+     JOIN users u ON u.username = rp.username
+     WHERE rp.roomRow = ?
        AND rp.roomCol = ?
-       AND rp.worldDay = ?
-     LIMIT 1`,
-    [row, col, worldDay]
+       AND rp.worldDay = ?`,
+    [`-${PRESENCE_MAX_AGE_SECONDS} seconds`, row, col, worldDay]
   );
-  const players = await dbFirst(
-    db,
-    `SELECT u.username
-     FROM users u
-     JOIN roomPresence rp ON rp.username = u.username
-     WHERE u.isNpc = 0
-       AND (u.health > 0 OR u.incapacitated = 1)
-       AND rp.roomRow = ?
-       AND rp.roomCol = ?
-       AND rp.worldDay = ?
-       AND rp.lastSeenAt >= datetime('now', ?)
-     LIMIT 1`,
-    [row, col, worldDay, `-${PRESENCE_MAX_AGE_SECONDS} seconds`]
-  );
-  return Boolean(hostiles && players);
+  const hostiles = Boolean(state?.hostiles);
+  const humans = Boolean(state?.humans);
+  const social = Boolean(state?.social);
+  return {
+    hasActiveHostiles: hostiles && humans,
+    needsLoop: (hostiles && humans) || (humans && social)
+  };
+}
+
+export async function roomHasActiveHostiles(db, row, col) {
+  return (await getRoomLoopState(db, row, col)).hasActiveHostiles;
 }
 
 // Plan 013f: the room's background loop should run when there's combat OR when a present
 // human shares the room with social NPCs (so they chatter proactively). Drives the DO alarm.
 export async function roomNeedsLoop(db, row, col) {
-  if (await roomHasActiveHostiles(db, row, col)) {
-    return true;
-  }
-  const worldDay = getWorldDay();
-  const human = await dbFirst(
-    db,
-    `SELECT 1 FROM users u JOIN roomPresence rp ON rp.username = u.username
-     WHERE u.isNpc = 0 AND (u.health > 0 OR u.incapacitated = 1)
-       AND rp.roomRow = ? AND rp.roomCol = ? AND rp.worldDay = ?
-       AND rp.lastSeenAt >= datetime('now', ?) LIMIT 1`,
-    [row, col, worldDay, `-${PRESENCE_MAX_AGE_SECONDS} seconds`]
-  );
-  if (!human) {
-    return false;
-  }
-  const social = await dbFirst(
-    db,
-    `SELECT 1 FROM users u JOIN roomPresence rp ON rp.username = u.username
-     WHERE u.isNpc = 1 AND u.npcKind = 'social'
-       AND rp.roomRow = ? AND rp.roomCol = ? AND rp.worldDay = ? LIMIT 1`,
-    [row, col, worldDay]
-  );
-  return Boolean(social);
+  return (await getRoomLoopState(db, row, col)).needsLoop;
 }
 
 // Plan 024: the living leaderboard. Kills DERIVE from killHistory — no kills
