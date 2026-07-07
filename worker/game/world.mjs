@@ -41,7 +41,7 @@ import {
   shouldApplyEffect,
   summarizeTraces
 } from './shared.mjs';
-import { changes, dbAll, dbFirst, dbRun } from '../db.mjs';
+import { changes, dbAll, dbBatch, dbFirst, dbRun } from '../db.mjs';
 import { elapsedMs, logEvent, measureAsync, nowMs } from '../observability.mjs';
 import {
   applyBodyDamage,
@@ -1311,23 +1311,20 @@ export async function resolveExpiredGamblingRounds(db, currentTick) {
     }
 
     const result = resolveGamblingRound(entries);
-    await dbRun(db, 'UPDATE users SET gold = gold + ? WHERE username = ?', [result.pool, result.winner]);
-    await dbRun(
-      db,
-      `UPDATE gamblingRounds
-       SET status = 'resolved',
-           pool = ?,
-           winner = ?,
-           winningRoll = ?
-       WHERE id = ?`,
-      [result.pool, result.winner, result.winningRoll, round.id]
-    );
-    await insertSystemMessage(
-      db,
-      round.roomRow,
-      round.roomCol,
-      `The dice round closes. ${result.winner} wins ${result.pool} gold with a roll of ${result.winningRoll}.`
-    );
+    // Payout, round close, and announcement land atomically in one round trip.
+    await dbBatch(db, [
+      ['UPDATE users SET gold = gold + ? WHERE username = ?', [result.pool, result.winner]],
+      [`UPDATE gamblingRounds
+        SET status = 'resolved',
+            pool = ?,
+            winner = ?,
+            winningRoll = ?
+        WHERE id = ?`, [result.pool, result.winner, result.winningRoll, round.id]],
+      [`INSERT INTO messages (roomRow, roomCol, username, message, kind)
+        VALUES (?, ?, 'System', ?, 'system')`,
+        [round.roomRow, round.roomCol,
+         `The dice round closes. ${result.winner} wins ${result.pool} gold with a roll of ${result.winningRoll}.`]]
+    ]);
   }
 }
 
@@ -1352,6 +1349,9 @@ export async function processCorpseDecay(db, tickValue = null) {
        AND templateId IN ('monster_remains', 'rotten_remains', 'bones', 'player_corpse')`
   );
 
+  // Collect every stage transition, then land them in one batched round trip
+  // instead of one await per aging item.
+  const writes = [];
   for (const item of decaying) {
     const age = tick - item.decayTick;
     if (age < CORPSE_FRESH_TICKS) {
@@ -1365,7 +1365,7 @@ export async function processCorpseDecay(db, tickValue = null) {
       if (item.corpseOf) {
         const skeletalName = `${item.corpseOf}'s Skeletal Remains`;
         if (item.name !== skeletalName) {
-          await dbRun(db, 'UPDATE items SET name = ? WHERE id = ?', [skeletalName, item.id]);
+          writes.push(['UPDATE items SET name = ? WHERE id = ?', [skeletalName, item.id]]);
         }
       }
       continue;
@@ -1373,19 +1373,22 @@ export async function processCorpseDecay(db, tickValue = null) {
 
     // Monster remains: cull at the bones-age cap, else advance the stage in place.
     if (age >= CORPSE_CULL_TICKS) {
-      await dbRun(db, 'DELETE FROM items WHERE id = ?', [item.id]);
+      writes.push(['DELETE FROM items WHERE id = ?', [item.id]]);
       continue;
     }
     if (age >= CORPSE_FRESH_TICKS + CORPSE_ROTTEN_TICKS) {
       if (item.templateId !== 'bones') {
-        await dbRun(db, "UPDATE items SET templateId = 'bones', name = 'Bones' WHERE id = ?", [item.id]);
+        writes.push(["UPDATE items SET templateId = 'bones', name = 'Bones' WHERE id = ?", [item.id]]);
       }
       continue;
     }
     // FRESH..(FRESH+ROTTEN): rotten.
     if (item.templateId !== 'rotten_remains') {
-      await dbRun(db, "UPDATE items SET templateId = 'rotten_remains', name = 'Rotten Remains' WHERE id = ?", [item.id]);
+      writes.push(["UPDATE items SET templateId = 'rotten_remains', name = 'Rotten Remains' WHERE id = ?", [item.id]]);
     }
+  }
+  if (writes.length > 0) {
+    await dbBatch(db, writes);
   }
 }
 

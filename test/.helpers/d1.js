@@ -16,8 +16,30 @@ function createSqliteD1() {
     raw,
     exec(sql) { return new Promise((resolve, reject) => raw.exec(sql, err => (err ? reject(err) : resolve()))); },
     close() { return new Promise((resolve, reject) => raw.close(err => (err ? reject(err) : resolve()))); },
+    // D1's batch(): run the prepared statements atomically, returning per-statement
+    // results in order (SELECTs carry rows in `.results`, like D1).
+    async batch(statements) {
+      await this.exec('BEGIN');
+      try {
+        const results = [];
+        for (const statement of statements) {
+          if (/^\s*SELECT/i.test(statement.sql)) {
+            const all = await statement.all();
+            results.push({ results: all.results, meta: { changes: 0, last_row_id: null } });
+          } else {
+            results.push(await statement.run());
+          }
+        }
+        await this.exec('COMMIT');
+        return results;
+      } catch (err) {
+        await this.exec('ROLLBACK').catch(() => {});
+        throw err;
+      }
+    },
     prepare(sql) {
       return {
+        sql,
         params: [],
         bind(...params) { this.params = params; return this; },
         first() { return new Promise((resolve, reject) => raw.get(sql, this.params, (err, row) => (err ? reject(err) : resolve(row || null)))); },

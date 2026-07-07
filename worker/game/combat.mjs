@@ -37,6 +37,7 @@ import {
 import {
   changes,
   dbAll,
+  dbBatch,
   dbFirst,
   dbRun
 } from '../db.mjs';
@@ -610,22 +611,22 @@ export async function handleRollCommand(db, username, row, col, message) {
   );
   assertAction(changes(goldUpdate) > 0, 'Not enough gold for that wager.');
 
+  const systemMessage = `${username} enters the dice round with ${wager} gold and rolls ${roll}. The round closes at tick ${round.endTick}.`;
   try {
-    await dbRun(
-      db,
-      `INSERT INTO gamblingEntries
-        (roundId, username, wager, roll, enteredTick)
-       VALUES (?, ?, ?, ?, ?)`,
-      [round.id, username, wager, roll, tickValue]
-    );
+    // One atomic round trip: the entry, the pool bump, and the table talk land (or
+    // fail) together, so the catch-refund below never leaves a half-recorded entry.
+    await dbBatch(db, [
+      [`INSERT INTO gamblingEntries
+         (roundId, username, wager, roll, enteredTick)
+        VALUES (?, ?, ?, ?, ?)`, [round.id, username, wager, roll, tickValue]],
+      ['UPDATE gamblingRounds SET pool = pool + ? WHERE id = ?', [wager, round.id]],
+      [`INSERT INTO messages (roomRow, roomCol, username, message, kind)
+        VALUES (?, ?, 'System', ?, 'dice')`, [row, col, systemMessage]]
+    ]);
   } catch (err) {
     await dbRun(db, 'UPDATE users SET gold = gold + ? WHERE username = ?', [wager, username]);
     throw err;
   }
-
-  await dbRun(db, 'UPDATE gamblingRounds SET pool = pool + ? WHERE id = ?', [wager, round.id]);
-  const systemMessage = `${username} enters the dice round with ${wager} gold and rolls ${roll}. The round closes at tick ${round.endTick}.`;
-  await insertSystemMessage(db, row, col, systemMessage, 'dice');
 
   return {
     wager,

@@ -17,7 +17,7 @@ import {
   partCondition,
   pickTargetPart
 } from './shared.mjs';
-import { dbAll, dbFirst, dbRun } from '../db.mjs';
+import { dbAll, dbBatch, dbFirst, dbRun } from '../db.mjs';
 import { descendTowardDeath, reviveFromIncapacitation } from './death.mjs';
 import { getEquippedModifiers } from './inventory.mjs';
 import { insertSystemMessage } from './messages.mjs';
@@ -406,16 +406,24 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
   // clobbered by, the hit (the old `hp = <jsAbsolute>` lost that heal). `severed` is a
   // derived boolean state, not an accumulator, so it stays an absolute write — exactly
   // as before; the JS severance/vital-death logic is unchanged.
+  // Only parts that actually shed hp or changed severed state get a write (a miss on a
+  // part is a no-op UPDATE we can skip), and all part writes land with the users.health
+  // mirror in ONE atomic dbBatch round trip instead of one await per limb.
   const partsBeforeByLabel = new Map(partsBefore.map(part => [part.label, part]));
+  const writes = [];
   for (const part of working) {
     const beforePart = partsBeforeByLabel.get(part.label);
     const beforeHp = Math.max(0, beforePart ? beforePart.hp : part.hp);
     const dealt = beforeHp - Math.max(0, part.hp); // >= 0; the hp this part shed.
-    await dbRun(
-      db,
+    const severedNow = part.severed ? 1 : 0;
+    const severedBefore = beforePart && beforePart.severed ? 1 : 0;
+    if (dealt === 0 && severedNow === severedBefore) {
+      continue;
+    }
+    writes.push([
       'UPDATE bodyParts SET hp = MAX(hp - ?, 0), severed = ? WHERE username = ? AND label = ?',
-      [dealt, part.severed ? 1 : 0, user.username, part.label]
-    );
+      [dealt, severedNow, user.username, part.label]
+    ]);
   }
 
   // Mirror the same total deduction on users.health. adv-018: RELATIVE delta
@@ -424,14 +432,14 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
   // relative delta; the severed-part reduction rides the same single UPDATE.
   const healthAfter = Math.max(0, (user.health || 0) - totalDealt);
   if (maxHealthReduction > 0) {
-    await dbRun(
-      db,
+    writes.push([
       'UPDATE users SET health = MAX(health - ?, 0), maxHealth = MAX(maxHealth - ?, 0) WHERE username = ?',
       [totalDealt, maxHealthReduction, user.username]
-    );
+    ]);
   } else {
-    await dbRun(db, 'UPDATE users SET health = MAX(health - ?, 0) WHERE username = ?', [totalDealt, user.username]);
+    writes.push(['UPDATE users SET health = MAX(health - ?, 0) WHERE username = ?', [totalDealt, user.username]]);
   }
+  await dbBatch(db, writes);
 
   // Loud states: condition-transition messages (non-severance), then severance.
   await emitConditionTransitions(db, user.username, partsBefore, working, row, col, displayLabel);
