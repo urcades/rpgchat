@@ -1107,11 +1107,14 @@ export async function getRoomState(db, username, row, col, tickValue = null, acc
   const messages = messagesResult.value;
   const user = userResult.value;
 
-  logEvent({
+  // Sampled: this fires on every poll/broadcast-driven refetch, so the steady
+  // state stream is noise. Slow requests always log; the rest log at 10%.
+  const durationMs = elapsedMs(stateStart);
+  if (durationMs > 250 || Math.random() < 0.1) logEvent({
     event: 'room_state.complete',
     roomRow: row,
     roomCol: col,
-    durationMs: elapsedMs(stateStart),
+    durationMs,
     roomMs: roomResult.durationMs,
     messagesMs: messagesResult.durationMs,
     userMs: userResult.durationMs,
