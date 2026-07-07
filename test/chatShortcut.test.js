@@ -305,8 +305,28 @@ test('chat startup fetches one room state payload', async () => {
   assert.equal(page.gets.includes('/tick'), false);
 });
 
-test('idle heartbeat refreshes the full room state', async () => {
+test('idle heartbeat refreshes the full room state only when the socket is down', async () => {
   const page = loadChatPage();
+  await flushPromises();
+  page.posts.length = 0;
+  page.gets.length = 0;
+
+  // No live socket (the stub never reaches readyState OPEN): heartbeat + full refetch.
+  page.intervals[0]();
+  await flushPromises();
+
+  assert.ok(page.posts.some(post => post.endpoint === '/room-presence/1/1'));
+  assert.ok(page.gets.includes('/room-state/1/1'));
+});
+
+test('idle heartbeat skips the room-state refetch while the socket is live', async () => {
+  let socket;
+  const page = loadChatPage({
+    WebSocket: function WebSocket() {
+      socket = { readyState: 1 }; // OPEN — broadcasts drive refreshes
+      return socket;
+    }
+  });
   await flushPromises();
   page.posts.length = 0;
   page.gets.length = 0;
@@ -314,8 +334,8 @@ test('idle heartbeat refreshes the full room state', async () => {
   page.intervals[0]();
   await flushPromises();
 
-  assert.ok(page.posts.some(post => post.endpoint === '/room-presence/1/1'));
-  assert.ok(page.gets.includes('/room-state/1/1'));
+  assert.ok(page.posts.some(post => post.endpoint === '/room-presence/1/1'), 'presence stays warm');
+  assert.equal(page.gets.includes('/room-state/1/1'), false, 'no poll-driven full refetch');
 });
 
 test('room socket events refresh one full room state payload', async () => {

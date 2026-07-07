@@ -60,6 +60,7 @@
     let socketRetryDelay = 1000;
     let realtimeStopped = false; // set on death / auth-expiry / page teardown so the socket stops reconnecting forever
     let roomStateRefreshTimer = null;
+    let lastRenderedMessageId = 0; // incremental message rendering high-water mark
     let currentSkill = null;
     let currentSkills = [];
     let currentJob = 'Novice';
@@ -249,12 +250,33 @@
     }
 
     function renderMessages(data) {
+      // Incremental append: only messages newer than the last rendered id get new
+      // DOM nodes, instead of wiping and rebuilding all ~100 lines per refresh.
+      // A fully-fresh list (first render, post-error, or a gap larger than the
+      // history window) falls back to the full rebuild.
       const messagesDiv = document.getElementById('messages');
-      messagesDiv.innerHTML = '';
-      data.forEach(msg => {
-        messagesDiv.appendChild(renderMessage(msg));
-      });
-      scrollToBottom();
+      const list = data || [];
+      const fresh = list.filter(msg => Number(msg.id) > lastRenderedMessageId);
+      if (messagesDiv.childElementCount === 0 || fresh.length === list.length) {
+        messagesDiv.innerHTML = '';
+        list.forEach(msg => {
+          messagesDiv.appendChild(renderMessage(msg));
+        });
+      } else {
+        fresh.forEach(msg => {
+          messagesDiv.appendChild(renderMessage(msg));
+        });
+        // Keep the DOM bounded to the server's history window.
+        while (messagesDiv.childElementCount > list.length) {
+          messagesDiv.removeChild(messagesDiv.firstChild);
+        }
+      }
+      if (list.length > 0) {
+        lastRenderedMessageId = Math.max(lastRenderedMessageId, Number(list[list.length - 1].id) || 0);
+      }
+      if (fresh.length > 0 || messagesDiv.childElementCount === 0) {
+        scrollToBottom();
+      }
     }
 
     function loadMessages() {
@@ -536,6 +558,18 @@
     }
 
     function updateAll() {
+      // With a live socket, broadcasts drive every refresh — the heartbeat only
+      // keeps the presence row warm. The full-state refetch is the degraded-mode
+      // fallback for a dead/reconnecting socket.
+      const socketLive = socket && socket.readyState === 1; // 1 === WebSocket.OPEN
+      heartbeatRoom().finally(() => {
+        if (!socketLive) {
+          loadRoomState();
+        }
+      });
+    }
+
+    function forceRefresh() {
       heartbeatRoom().finally(loadRoomState);
     }
 
@@ -570,11 +604,15 @@
         } catch (error) {
           payload = null;
         }
-        // Presence heartbeats only change who is in the room — refresh just the
-        // ecology panel (which carries the presence list). Real game events
-        // refetch the whole room state, debounced.
+        // Presence heartbeats only change who is in the room — and an occupant we
+        // already render is a no-op (this is the common case: every occupant
+        // heartbeats every 15s, and refetching ecology for each was O(K²) per
+        // room). Only an unseen username warrants an ecology refresh. Real game
+        // events refetch the whole room state, debounced.
         if (payload && payload.type === 'presence') {
-          loadRoomEcology();
+          if (!latestPresence.some(p => p.username === payload.username)) {
+            loadRoomEcology();
+          }
           return;
         }
         scheduleRoomStateRefresh();
@@ -885,7 +923,9 @@
       // for the next heartbeat.
       document.addEventListener('visibilitychange', function() {
         if (!document.hidden) {
-          updateAll();
+          // Full resync on return: a slept laptop can hold a socket that still
+          // reports OPEN, so don't trust it here.
+          forceRefresh();
         }
       });
 
