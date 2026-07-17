@@ -23,7 +23,11 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "hono": "^4.12.25"
+    "hono": "^4.12.25",
+    "paperchain": "^0.1.0",
+    "paperdoll": "^0.8.2",
+    "paperfold": "^0.2.0",
+    "papermold": "^0.2.0"
   },
   "devDependencies": {
     "sqlite3": "^5.1.7",
