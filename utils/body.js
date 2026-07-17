@@ -1,13 +1,24 @@
 // A body plan is a template; a player's body is rows instantiated from it.
 // Every part owns a hidden HP pool; the sum of part HP IS the player's health.
+// Segmented anatomy (engine-overhaul, after paperdoll-viewer's Combatant): limbs
+// carry DISTAL children (`parent` names the proximal part). A sever cascades to
+// everything distal — cut the arm and the hand goes with it; the spine chain
+// torso -> neck -> head makes a neck sever a DECAPITATION (the head, a vital,
+// detaches -> death). Proximal labels/slots are unchanged from the 7-part plan,
+// so equips, called shots, and 120+ existing test sites keep working; the new
+// parts are additional aim targets with small hp shares shaved off their parents.
 const HUMANOID_PLAN = [
-  { partType: 'head', label: 'head', slotType: 'head', share: 0.15, vital: true },
+  { partType: 'head', label: 'head', slotType: 'head', share: 0.15, vital: true, parent: 'neck' },
   { partType: 'torso', label: 'torso', slotType: 'torso', share: 0.30, vital: true },
-  { partType: 'neck', label: 'neck', slotType: 'trinket', share: 0.04, vital: false },
-  { partType: 'arm', label: 'left arm', slotType: 'hand', share: 0.12, vital: false },
-  { partType: 'arm', label: 'right arm', slotType: 'hand', share: 0.12, vital: false },
-  { partType: 'leg', label: 'left leg', slotType: 'leg', share: 0.135, vital: false },
-  { partType: 'leg', label: 'right leg', slotType: 'leg', share: 0.135, vital: false }
+  { partType: 'neck', label: 'neck', slotType: 'trinket', share: 0.04, vital: false, parent: 'torso' },
+  { partType: 'arm', label: 'left arm', slotType: 'hand', share: 0.08, vital: false, parent: 'torso' },
+  { partType: 'hand', label: 'left hand', slotType: null, share: 0.04, vital: false, parent: 'left arm' },
+  { partType: 'arm', label: 'right arm', slotType: 'hand', share: 0.08, vital: false, parent: 'torso' },
+  { partType: 'hand', label: 'right hand', slotType: null, share: 0.04, vital: false, parent: 'right arm' },
+  { partType: 'leg', label: 'left leg', slotType: 'leg', share: 0.09, vital: false, parent: 'torso' },
+  { partType: 'foot', label: 'left foot', slotType: null, share: 0.045, vital: false, parent: 'left leg' },
+  { partType: 'leg', label: 'right leg', slotType: 'leg', share: 0.09, vital: false, parent: 'torso' },
+  { partType: 'foot', label: 'right foot', slotType: null, share: 0.045, vital: false, parent: 'right leg' }
 ]; // shares sum to 1.0
 
 // Plan 021 (BOLD): creature body plans. Same {partType,label,slotType,share,vital}
@@ -90,13 +101,41 @@ const MODIFIER_KEYS = ['maxHealth', 'maxStamina', 'speed', 'strength', 'intellig
 // off-balance beast), scaling worse when the part is gone entirely.
 const PART_PENALTIES = {
   arm: { mangled: { strength: -2 }, missing: { strength: -3 } },
+  hand: { mangled: { strength: -1 }, missing: { strength: -2 } },
   leg: { mangled: { speed: -1 }, missing: { speed: -2 } },
+  foot: { mangled: { speed: -1 }, missing: { speed: -1 } },
   head: { mangled: { intelligence: -2 } }, // missing head = you are dead
   neck: { mangled: { intelligence: -1 }, missing: { intelligence: -1 } },
   torso: { mangled: { maxStamina: -10 } },
   wing: { mangled: { speed: -1 }, missing: { speed: -2 } },
   tail: { mangled: { speed: -1 }, missing: { speed: -1 } }
 };
+
+
+// The joint a part separates at, for sever narration ("severed at the elbow").
+const SEVER_JOINT_BY_TYPE = {
+  arm: 'shoulder', hand: 'wrist', leg: 'hip', foot: 'ankle',
+  neck: 'spine', head: 'neck', wing: 'wing root', tail: 'tail base'
+};
+function severJointFor(partType) {
+  return SEVER_JOINT_BY_TYPE[partType] || 'joint';
+}
+
+// Every part distal to `label` in the plan (children, recursively). The sever
+// cascade uses this: destroying a proximal segment scatters the whole chain.
+function distalPartLabels(plan, label) {
+  const out = [];
+  const walk = parentLabel => {
+    for (const part of plan) {
+      if (part.parent === parentLabel) {
+        out.push(part.label);
+        walk(part.label);
+      }
+    }
+  };
+  walk(label);
+  return out;
+}
 
 function emptyModifiers() {
   const modifiers = {};
@@ -260,6 +299,8 @@ function pickTargetPart(parts, random = Math.random) {
 }
 
 module.exports = {
+  distalPartLabels,
+  severJointFor,
   HUMANOID_PLAN,
   WYRM_PLAN,
   QUADRUPED_PLAN,

@@ -463,7 +463,8 @@ export async function runHostileRoomAction(db, row, col) {
   const damageResult = await applyBodyDamage(db, player, damage, {
     cause: `attack by ${npc.displayName || npc.username}`,
     row,
-    col
+    col,
+    weaponClass: 'fist' // a creature's bite/claw crushes and tears, never severs clean
   });
   await insertSystemMessage(db, row, col, describeAttack({
     attacker: npc.displayName || npc.username,
@@ -825,6 +826,7 @@ export async function handleAttack(db, username, message, row, col, options = {}
       cause: `attack by ${username}`,
       row,
       col,
+      weaponClass: attackerWeaponClass, // edged severs clean at the joint; blunt tears off
       targetLabel: calledShot,
       // Plan 021: a bodied NPC's wound/sever lines read by its display name
       // ("Frost Wyrm's left wing is destroyed"). Players have no displayName, so this

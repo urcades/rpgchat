@@ -5,9 +5,14 @@
 // through ESM live bindings (every cross-seam reference is call-time, never
 // dereferenced at module load).
 
+// A vital distal part (the head) only cascades off under a blow this heavy.
+const DECAP_BLOW_MIN = 5;
+
 import {
   HARMFUL_EFFECTS,
   HUMANOID_PLAN,
+  distalPartLabels,
+  severJointFor,
   MODIFIER_KEYS,
   bodyPenaltyModifiers,
   buildAffixRoll,
@@ -407,6 +412,42 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
     }
   }
 
+  // Distal sever CASCADE (engine-overhaul, after paperdoll-viewer's Combatant):
+  // everything distal to a severed segment goes with it — cut the arm and the
+  // hand drops; sever the NECK and the head (a vital) comes away: decapitation,
+  // and death. Cascaded parts shed their remaining hp (mirrored into
+  // users.health via totalDealt) and their maxHp leaves the pool like any sever.
+  const plan = bodyPlanFor(user) || [];
+  let decapitated = false;
+  let hangingVital = null;
+  const cascadedLabels = [];
+  for (const severed of [...severedParts]) {
+    for (const distalLabel of distalPartLabels(plan, severed.label)) {
+      const distal = working.find(p => p.label === distalLabel);
+      if (!distal || distal.severed) {
+        continue;
+      }
+      // A VITAL distal (the head, past the neck) only comes away under a HEAVY
+      // blow — otherwise a 1-hp neck pool would make any neck graze an instant
+      // kill. A light neck sever leaves the head hanging by a thread instead.
+      if (distal.vital && amount < DECAP_BLOW_MIN) {
+        hangingVital = distal.label;
+        continue;
+      }
+      totalDealt += Math.max(0, distal.hp);
+      distal.hp = 0;
+      distal.severed = 1;
+      if (distal.vital) {
+        vitalDestroyed = true;
+        decapitated = true;
+      }
+      severedLabels.push(distal.label);
+      severedParts.push({ id: distal.id, label: distal.label, cascadedFrom: severed.label });
+      cascadedLabels.push(distal.label);
+      maxHealthReduction += distal.maxHp;
+    }
+  }
+
   // Persist part rows. adv-018: the hp write is RELATIVE — `hp = MAX(hp - dealt, 0)`
   // where `dealt` is the damage this part actually absorbed (its pre-damage hp minus
   // its post-damage hp, both already floored at 0 in JS). A concurrent heal that
@@ -452,8 +493,22 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
   // Loud states: condition-transition messages (non-severance), then severance.
   await emitConditionTransitions(db, user.username, partsBefore, working, row, col, displayLabel);
   if (row !== undefined && row !== null && col !== undefined && col !== null) {
+    // Edged weapons SEVER cleanly at the joint; blunt force crushes and tears.
+    const edged = options.weaponClass === 'blade' || options.weaponClass === 'pierce';
+    const partTypeByLabel = new Map(working.map(p => [p.label, p.partType]));
     for (const part of severedParts) {
-      await insertSystemMessage(db, row, col, `${displayLabel}'s ${part.label} is destroyed.`, 'combat');
+      const joint = severJointFor(partTypeByLabel.get(part.label));
+      let line;
+      if (part.cascadedFrom) {
+        line = `${displayLabel}'s ${part.label} goes with it, still attached at the ${joint}.`;
+      } else if (edged) {
+        line = `${displayLabel}'s ${part.label} is severed clean at the ${joint}!`;
+      } else if (options.weaponClass === 'blunt' || options.weaponClass === 'fist') {
+        line = `${displayLabel}'s ${part.label} is crushed and torn off at the ${joint}!`;
+      } else {
+        line = `${displayLabel}'s ${part.label} is destroyed.`;
+      }
+      await insertSystemMessage(db, row, col, line, 'combat');
       // Sever knock-off: whatever was equipped on this part clatters to the
       // floor for anyone to /take (plan 005). Fetch the name BEFORE the UPDATE.
       // (Creature parts carry slotType null and NPCs never wear gear, so this
@@ -477,6 +532,14 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
           `${equipped.name} falls to the floor with ${displayLabel}'s ${part.label}.`
         );
       }
+    }
+  }
+
+  if (row !== undefined && row !== null && col !== undefined && col !== null) {
+    if (decapitated) {
+      await insertSystemMessage(db, row, col, `${displayLabel} is DECAPITATED — the head comes away with the neck.`, 'death');
+    } else if (hangingVital) {
+      await insertSystemMessage(db, row, col, `${displayLabel}'s ${hangingVital} hangs by a thread of sinew.`, 'combat');
     }
   }
 

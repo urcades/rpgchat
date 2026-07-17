@@ -202,7 +202,11 @@ test('adv-018 race: a single mark double-counts at most ONCE across concurrent p
     }
 
     const after = (await db.prepare('SELECT health FROM users WHERE username = ?').bind('mark_victim').first()).health;
-    assert.equal(before - after, 13, 'total damage = 4 (unmarked) + 9 (marked once), not 18 (mark counted twice)');
+    // 11-part anatomy: the two strikes (4 + 9 = 13) drive the 0.5-picked left arm
+    // (pool 5 at health 60) to 0, severing it; the distal left hand (pool 2) is
+    // shed by the cascade, so users.health drops by 13 + 2 = 15 — never the 18+
+    // a double-counted mark would deal.
+    assert.equal(before - after, 15, 'total damage = 4 (unmarked) + 9 (marked once) + 2 cascaded hand hp, not 18+ (mark counted twice)');
     const marks = await db.prepare("SELECT COUNT(*) AS c FROM statusEffects WHERE username = 'mark_victim' AND effectType = 'marked'").first();
     assert.equal(marks.c, 0, 'the single mark was consumed exactly once');
   } finally {

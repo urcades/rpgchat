@@ -146,11 +146,12 @@ test('Plan 005: a severed limb drops its equipped item to the floor where anothe
     await insertCarriedItem(db, 'victim', { name: 'Heirloom Dagger', slotType: 'hand' });
     await handleChatAction(db, 'victim', calm.row, calm.col, '/equip Heirloom Dagger'); // left arm
 
-    // Sever the left arm (range [0.467,0.600); random 0.5; 4 damage 4->0).
+    // Sever the left arm (11-part range [0.500,0.600); random 0.5; 4 damage 3->0,
+    // 1 spills to torso; the distal left hand cascades off with the arm).
     const sever = await applyBodyDamage(db, await getUser(db, 'victim'), 4, {
       cause: 'a cleaver', row: calm.row, col: calm.col, random: () => 0.5
     });
-    assert.deepEqual(sever.severedLabels, ['left arm']);
+    assert.deepEqual(sever.severedLabels, ['left arm', 'left hand']);
 
     // The knocked-off item now surfaces in the room payload's groundItems.
     const ecology = await getRoomEcology(db, 'looter', calm.row, calm.col);
