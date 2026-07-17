@@ -23,6 +23,7 @@ import {
   getRoomAccessState,
   getRoomEcology,
   getProgressionGrid,
+  getRoomLoopState,
   getRoomState,
   getUserOrNull,
   getUserState,
@@ -1153,7 +1154,11 @@ export class RoomObject extends DurableObject {
       await this.broadcast({ room: { row, col }, ...payload });
       if (await roomHasActiveHostiles(this.env.DB, row, col)) {
         await this.ctx.storage.put('hostileRoom', { row, col });
-        await this.ctx.storage.setAlarm(Date.now() + 5000);
+        // Same guard as /hostiles/start: never reset (and thus starve) a pending
+        // combat alarm — the alarm handler owns re-arming.
+        if (await this.ctx.storage.getAlarm() === null) {
+          await this.ctx.storage.setAlarm(Date.now() + 5000);
+        }
       }
       return new Response('ok');
     }
@@ -1187,7 +1192,9 @@ export class RoomObject extends DurableObject {
         // they actually come for the player.
         if (result.provoked > 0) {
           await this.ctx.storage.put('hostileRoom', { row, col });
-          await this.ctx.storage.setAlarm(Date.now() + 5000);
+          if (await this.ctx.storage.getAlarm() === null) {
+            await this.ctx.storage.setAlarm(Date.now() + 5000);
+          }
         }
       } catch (err) {
         console.error('npc-react failed', err);
@@ -1311,7 +1318,9 @@ export class RoomObject extends DurableObject {
           }
           if (reply.provoked > 0) {
             await this.ctx.storage.put('hostileRoom', { row, col });
-            await this.ctx.storage.setAlarm(Date.now() + 5000);
+            if (await this.ctx.storage.getAlarm() === null) {
+              await this.ctx.storage.setAlarm(Date.now() + 5000);
+            }
           }
         }
       }, { fields: { roomRow: row, roomCol: col, username } });
@@ -1350,8 +1359,21 @@ export class RoomObject extends DurableObject {
     // run the hostile action (5s cadence). Otherwise a present-but-peaceful social room
     // gets a throttled NPC murmur (slower cadence; runNpcAmbient owns the real throttle).
     const fields = { roomRow: room.row, roomCol: room.col };
+    // adv PERF-06: ONE loop-state scan answers both the branch choice here and
+    // (for the peaceful branch, which cannot change the state) the re-arm
+    // decision below — previously two identical queries per wake.
+    const loopState = await guard('alarm.loop-state.error', () =>
+      getRoomLoopState(this.env.DB, room.row, room.col),
+    { fields, fallback: null });
+    if (!loopState) {
+      // Couldn't read the state; retry on the fast cadence rather than guessing.
+      await guard('alarm.rearm.retry-failed', async () => {
+        await this.ctx.storage.setAlarm(Date.now() + 5000);
+      }, { fields });
+      return;
+    }
     let peaceful = true;
-    if (await roomHasActiveHostiles(this.env.DB, room.row, room.col)) {
+    if (loopState.hasActiveHostiles) {
       // peaceful is fixed BEFORE the guarded action so a throwing hostile turn still
       // re-arms on the fast (5s) combat cadence below, not the slow peaceful one.
       peaceful = false;
@@ -1375,7 +1397,13 @@ export class RoomObject extends DurableObject {
     // proceeds. It is itself guarded so a transient DB hiccup while deciding whether to
     // continue still re-arms a retry instead of wedging the alarm permanently.
     const rearmed = await guard('alarm.rearm.error', async () => {
-      if (await roomNeedsLoop(this.env.DB, room.row, room.col)) {
+      // A hostile turn can end combat (deaths, flee), so that branch re-reads;
+      // the ambient branch mutates nothing loop-relevant, so its earlier read
+      // is still authoritative and the second query is skipped.
+      const needsLoop = peaceful
+        ? loopState.needsLoop
+        : await roomNeedsLoop(this.env.DB, room.row, room.col);
+      if (needsLoop) {
         await this.ctx.storage.setAlarm(Date.now() + (peaceful ? 12000 : 5000));
       } else {
         await this.ctx.storage.delete('hostileRoom');

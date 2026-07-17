@@ -47,6 +47,7 @@ export {
   getRoomEcology,
   getRoomFeaturesForTick,
   getRoomState,
+  getRoomLoopState,
   getUser,
   getUserOrNull,
   getUserState,

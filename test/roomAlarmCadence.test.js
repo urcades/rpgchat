@@ -229,6 +229,63 @@ test('alarm cadence: a throwing hostile turn STILL reaches setAlarm (boundary + 
   }
 });
 
+// ---------------------------------------------------------------------------
+// Alarm-reset starvation guard: a world-pulse into a hostile room must NOT
+// push back an already-pending combat alarm (the same guard /hostiles/start
+// has — an unguarded setAlarm would let steady cron/chat traffic starve turns).
+// ---------------------------------------------------------------------------
+
+test('world-pulse: does not reset a pending combat alarm', async () => {
+  const mod = await import('../worker/index.mjs');
+  const db = await createMigratedDb();
+  try {
+    const worldDay = getWorldDay();
+    await seedHuman(db, 'hero', 3, 4, worldDay);
+    await seedHostileNpc(db, 'brute', 3, 4, worldDay);
+
+    const storage = mockStorage({ row: 3, col: 4 });
+    storage.put = async () => {};
+    const pendingAlarm = Date.now() + 1000; // combat turn due in 1s
+    storage._alarm = pendingAlarm;
+    const room = new mod.RoomObject({ storage }, { DB: db, AI: {} });
+    room.broadcast = async () => {};
+
+    const res = await quiet(() => room.fetch(new Request('https://do/world-pulse/3/4', {
+      method: 'POST',
+      body: JSON.stringify({ type: 'world-pulse' })
+    })));
+
+    assert.equal(res.status, 200);
+    assert.equal(storage._alarm, pendingAlarm, 'the pending combat alarm was left untouched');
+  } finally {
+    await db.close();
+  }
+});
+
+test('world-pulse: arms the loop when no alarm is pending in a hostile room', async () => {
+  const mod = await import('../worker/index.mjs');
+  const db = await createMigratedDb();
+  try {
+    const worldDay = getWorldDay();
+    await seedHuman(db, 'hero', 3, 4, worldDay);
+    await seedHostileNpc(db, 'brute', 3, 4, worldDay);
+
+    const storage = mockStorage({ row: 3, col: 4 });
+    storage.put = async () => {};
+    const room = new mod.RoomObject({ storage }, { DB: db, AI: {} });
+    room.broadcast = async () => {};
+
+    await quiet(() => room.fetch(new Request('https://do/world-pulse/3/4', {
+      method: 'POST',
+      body: JSON.stringify({ type: 'world-pulse' })
+    })));
+
+    assert.notEqual(storage._alarm, null, 'the combat loop was armed');
+  } finally {
+    await db.close();
+  }
+});
+
 // Like quiet(), but captures the structured log records emitted during fn so a test can
 // assert on the boundary's error event.
 async function captureQuiet(fn) {

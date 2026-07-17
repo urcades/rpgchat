@@ -64,6 +64,11 @@ export async function createTrace(db, trace) {
 // instead of the full history window every event.
 export async function getMessages(db, row, col, tickValue = null, sinceId = null) {
   const since = Number.isFinite(Number(sinceId)) && Number(sinceId) > 0 ? Number(sinceId) : null;
+  // The delta branch reads ASCENDING from the cursor: if a burst since the last
+  // fetch exceeds the window, the client gets the OLDEST rows first and its next
+  // `since` continues from where this page ended — nothing in the gap is skipped.
+  // (DESC-from-the-top here would jump the cursor past the middle of the burst.)
+  // The full-history branch keeps DESC + reverse: the newest window, oldest-first.
   const recent = await dbAll(
     db,
     `SELECT id, username, message, timestamp, kind
@@ -71,13 +76,13 @@ export async function getMessages(db, row, col, tickValue = null, sinceId = null
      WHERE roomRow = ?
        AND roomCol = ?
        ${since !== null ? 'AND id > ?' : ''}
-     ORDER BY id DESC
+     ORDER BY id ${since !== null ? 'ASC' : 'DESC'}
      LIMIT ?`,
     since !== null
       ? [row, col, since, ROOM_MESSAGE_HISTORY_LIMIT]
       : [row, col, ROOM_MESSAGE_HISTORY_LIMIT]
   );
-  const rows = recent.reverse();
+  const rows = since !== null ? recent : recent.reverse();
   const usernames = [...new Set(rows.map(row => row.username).filter(username => username && username !== 'System'))];
 
   if (usernames.length === 0) {

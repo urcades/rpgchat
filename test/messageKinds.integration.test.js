@@ -109,3 +109,34 @@ test('getMessages sinceId returns only rows newer than the watermark (delta path
     await db.close();
   }
 });
+
+test('getMessages sinceId fills a >LIMIT gap oldest-first so no rows are skipped', async () => {
+  const db = await createMigratedDb();
+  const { getMessages, insertMessage } = await import('../worker/game.mjs');
+  const { ROOM_MESSAGE_HISTORY_LIMIT } = await import('../worker/game/shared.mjs');
+  try {
+    await seedLiveUser(db, 'burst_talker');
+    await insertMessage(db, 4, 4, 'burst_talker', 'cursor line');
+    const before = await getMessages(db, 4, 4);
+    const watermark = before[0].id;
+
+    // A burst bigger than the window lands after the cursor.
+    const burst = ROOM_MESSAGE_HISTORY_LIMIT + 20;
+    for (let i = 0; i < burst; i++) {
+      await insertMessage(db, 4, 4, 'burst_talker', `burst ${i}`);
+    }
+
+    // Page 1: the OLDEST rows of the gap, ascending — not the newest 100.
+    const page1 = await getMessages(db, 4, 4, null, watermark);
+    assert.equal(page1.length, ROOM_MESSAGE_HISTORY_LIMIT, 'delta page is capped at the window');
+    assert.equal(page1[0].message, 'burst 0', 'the page starts at the cursor, not the top');
+    assert.ok(page1.every((row, i) => i === 0 || row.id > page1[i - 1].id), 'rows ascend');
+
+    // Page 2 from the new watermark drains the remainder — nothing was skipped.
+    const page2 = await getMessages(db, 4, 4, null, page1[page1.length - 1].id);
+    assert.equal(page2.length, burst - ROOM_MESSAGE_HISTORY_LIMIT, 'the rest of the gap arrives');
+    assert.equal(page2[page2.length - 1].message, `burst ${burst - 1}`);
+  } finally {
+    await db.close();
+  }
+});

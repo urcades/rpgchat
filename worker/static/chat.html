@@ -361,7 +361,15 @@
           }
           return response.json();
         })
-        .then(appendMessages)
+        .then(list => {
+          appendMessages(list);
+          // A full page means the burst since our cursor exceeded the server's
+          // window (the server pages oldest-first) — drain the rest now instead
+          // of waiting for the next event.
+          if (Array.isArray(list) && list.length >= 100) {
+            loadNewMessages();
+          }
+        })
         .catch(() => {
           // Delta path failed — fall back to the authoritative full refresh.
           scheduleRoomStateRefresh();
