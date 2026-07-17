@@ -206,3 +206,45 @@ test('Phase B: death deletes the doc; the reconcile sweep repairs induced drift'
     await db.close();
   }
 });
+
+test('Phase C parity: doc-derived inventory/socketSummary deep-equal the row-derived projections', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  const { deriveProjectionsFromDoc } = await import('../worker/game/bodyDoc.mjs');
+  const { getItemCategory, getItemSockets } = await import('../worker/game/shared.mjs');
+  try {
+    const calm = findCalmRoom(getWorldDay());
+    await seedFighter(db, 'doc_parity');
+    await game.ensureBody(db, await game.getUser(db, 'doc_parity'));
+    await game.updatePresence(db, 'doc_parity', calm.row, calm.col);
+
+    // A battery of real mutations through the command dispatch: acquire gear,
+    // equip a socketed host, socket materia into it, keep loose items too.
+    await game.createItemForOwner(db, 'iron_cleaver', 'doc_parity');
+    await game.createItemForOwner(db, 'wyrm_scale', 'doc_parity'); // rare -> 2 sockets
+    await game.createItemForOwner(db, 'power_materia', 'doc_parity');
+    await game.createItemForOwner(db, 'heal_potion', 'doc_parity');
+    await game.handleChatAction(db, 'doc_parity', calm.row, calm.col, '/equip Iron Cleaver');
+    // Socket while the host is still carried (the socket rule), then equip it.
+    await game.handleChatAction(db, 'doc_parity', calm.row, calm.col, '/socket Power Materia into Wyrm Scale');
+    await game.handleChatAction(db, 'doc_parity', calm.row, calm.col, '/equip Wyrm Scale');
+
+    const rowState = await game.getUserState(db, 'doc_parity');
+    const stored = await game.getBodyDoc(db, 'doc_parity');
+    const derived = deriveProjectionsFromDoc(stored.doc, { getItemCategory, getItemSockets });
+
+    const sortByName = list => [...list].sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    assert.deepEqual(
+      sortByName(derived.inventory),
+      sortByName(rowState.inventory),
+      'carried inventory projection: doc-derived === row-derived'
+    );
+    assert.deepEqual(
+      derived.socketSummary,
+      rowState.socketSummary,
+      'socket summary projection: doc-derived === row-derived'
+    );
+  } finally {
+    await db.close();
+  }
+});

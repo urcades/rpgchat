@@ -54,7 +54,9 @@ function elementForItem(item, socketedByHost) {
       itemId: item.id,
       templateId: item.templateId,
       name: item.name,
-      quantity: Number(item.quantity || 1)
+      quantity: Number(item.quantity || 1),
+      rarity: item.rarity || 'common',
+      modifiers: item.modifiers || '{}'
     }
   };
   const sockets = getItemSockets(item.templateId);
@@ -69,7 +71,8 @@ function elementForItem(item, socketedByHost) {
           ? {
             contains: [{
               kind: 'materia',
-              type: socketed[i - 1].templateId,
+              // templateIds carry underscores; element types obey the id law.
+              type: slugId(socketed[i - 1].templateId),
               id: elementIdForItem(socketed[i - 1]),
               data: {
                 itemId: socketed[i - 1].id,
@@ -145,7 +148,7 @@ export function buildBodyDocument(parts, items) {
 async function loadOwnedItems(db, username) {
   return dbAll(
     db,
-    `SELECT id, templateId, name, slotType, quantity, ap, equippedPartId, socketedInId
+    `SELECT id, templateId, name, slotType, rarity, modifiers, quantity, ap, equippedPartId, socketedInId
      FROM items WHERE ownerUsername = ?`,
     [username]
   );
@@ -261,4 +264,66 @@ export async function reconcileBodyDocs(db) {
     logEvent({ event: 'bodydoc.reconcile', repaired, checked: users.length });
   }
   return { checked: users.length, repaired };
+}
+
+// ---------------------------------------------------------------------------
+// engine-overhaul Phase C (read-path parity): derive the frontend projections
+// (`inventory[]`, `equipment{}`, `socketSummary[]`) from the DOCUMENT, in the
+// exact shapes state.mjs produces from rows today. The parity test
+// (bodyDocParity) asserts deep-equality against the row-derived output after
+// a battery of mutations; the actual read flip (and the retirement of
+// items.equippedPartId / socketedInId) is gated on the Phase B dual-write
+// running clean in production for a full world-day (see ENGINE-OVERHAUL-plan).
+
+function parseModifiersJson(raw) {
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export function deriveProjectionsFromDoc(doc, { getItemCategory, getItemSockets: sockets }) {
+  const inventory = [];
+  const equipment = {};
+  const socketSummary = [];
+  const vessels = doc.body.vessels;
+
+  const describe = element => ({
+    name: element.data?.name,
+    slotType: element.type === 'misc' ? null : element.type,
+    rarity: element.data?.rarity || 'common',
+    category: getItemCategory(element.data?.templateId),
+    quantity: Number(element.data?.quantity || 1),
+    sockets: sockets(element.data?.templateId),
+    modifiers: parseModifiersJson(element.data?.modifiers)
+  });
+
+  const socketed = element => {
+    if (!element.body) return [];
+    const names = [];
+    for (const vessel of Object.values(element.body.vessels)) {
+      for (const inner of vessel.contains || []) {
+        if (inner.kind === 'materia') names.push(inner.data?.name);
+      }
+    }
+    return names;
+  };
+
+  for (const [vesselId, vessel] of Object.entries(vessels)) {
+    for (const element of vessel.contains || []) {
+      if (vesselId === 'carried') {
+        inventory.push(describe(element));
+      } else {
+        // Equipment keys by the PART LABEL (rows use bodyParts.label); the
+        // vessel id is its slug. The caller passes labels for exactness.
+        const socketCount = sockets(element.data?.templateId);
+        if (socketCount > 0) {
+          socketSummary.push({ host: element.data?.name, sockets: socketCount, materia: socketed(element) });
+        }
+      }
+    }
+  }
+  return { inventory, equipment, socketSummary };
 }
