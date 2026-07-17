@@ -21,7 +21,9 @@ import { applyBodyHeal } from './body.mjs';
 import { runAbility } from './combat.mjs';
 import { emitSystemMessage, getMessages, insertMessage, insertSystemMessage, toBroadcastMessageRow } from './messages.mjs';
 import { upsertCooldown } from './progression.mjs';
-import { getCurrentTickValue, getRoomDescription, getRoomPresence, getUserOrNull } from './world.mjs';
+import { getCurrentTickValue } from './clock.mjs';
+import { getUserOrNull } from './users.mjs';
+import { getRoomDescription, getRoomPresence } from './world.mjs';
 
 
 // Plan 013c: the model-absent floor for hostile speech. Overt threats/violence provoke

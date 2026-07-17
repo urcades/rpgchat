@@ -22,7 +22,8 @@ import { dropItemOnFloor, dropPlayerItemsOnDeath } from './inventory.mjs';
 import { createTrace, emitSystemMessage, insertSystemMessage } from './messages.mjs';
 import { CREATURE_DEATH_RATTLES, NPC_DEATH_BEGS, emitDeathReaction } from './npc.mjs';
 import { awardExperience, upsertCooldown } from './progression.mjs';
-import { getCurrentTickValue, getUserOrNull, selectUserColumns } from './world.mjs';
+import { getCurrentTickValue } from './clock.mjs';
+import { getUserOrNull, selectUserColumns } from './users.mjs';
 
 
 export async function moveUserToCemetery(db, username, cause, row, col, options = {}) {

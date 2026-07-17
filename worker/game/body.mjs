@@ -22,7 +22,8 @@ import { descendTowardDeath, reviveFromIncapacitation } from './death.mjs';
 import { getEquippedModifiers } from './inventory.mjs';
 import { insertSystemMessage } from './messages.mjs';
 import { getProgressionModifiers } from './progression.mjs';
-import { getCurrentTickValue, getUser, selectUserColumns } from './world.mjs';
+import { getCurrentTickValue } from './clock.mjs';
+import { getUser, selectUserColumns } from './users.mjs';
 
 
 // Plan 021 (BOLD): the body gate, generalized. A user's body plan decides whether it

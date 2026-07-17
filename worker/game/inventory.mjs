@@ -38,7 +38,9 @@ import {
 } from './body.mjs';
 import { insertSystemMessage } from './messages.mjs';
 import { logEvent } from '../observability.mjs';
-import { getCurrentTickValue, getUser, roomHasEffect } from './world.mjs';
+import { getCurrentTickValue } from './clock.mjs';
+import { getUser } from './users.mjs';
+import { roomHasEffect } from './ecology.mjs';
 
 
 // Owned items joined to the equipped part's label; equipped rows first.

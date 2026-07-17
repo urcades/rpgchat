@@ -26,7 +26,9 @@ import { batchRows, changes, dbAll, dbBatch, dbFirst, dbRun } from '../db.mjs';
 import { applyBodyDamage } from './body.mjs';
 import { getSocketedMateriaEffects } from './inventory.mjs';
 import { insertSystemMessage } from './messages.mjs';
-import { getCurrentTickValue, getUser, roomHasEffect, selectUserColumns } from './world.mjs';
+import { getCurrentTickValue } from './clock.mjs';
+import { getUser, selectUserColumns } from './users.mjs';
+import { roomHasEffect } from './ecology.mjs';
 
 
 export async function assertEnoughStamina(db, username, cost = 1) {

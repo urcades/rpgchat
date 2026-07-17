@@ -52,68 +52,22 @@ import {
   parseItemModifiers,
   processStatusEffects
 } from './body.mjs';
+import { getCurrentTickValue } from './clock.mjs';
+import { getUser, getUserOrNull, selectUserColumns } from './users.mjs';
+import { getActiveEffectsForRoom, getRoomFeaturesForTick, roomHasEffect } from './ecology.mjs';
 import { descendTowardDeath, isIncapacitated, processIncapacitationBleed } from './death.mjs';
 import { getEquippedModifiers, getFloorItems, getInventory } from './inventory.mjs';
 import { getMessages, insertSystemMessage } from './messages.mjs';
 import { getGrantedAbilityIds, recoverStaminaForAllUsers, upsertCooldown } from './progression.mjs';
 
 
-export async function getCurrentTickValue(db) {
-  const row = await dbFirst(db, 'SELECT value FROM tick WHERE id = 1');
-  return row ? row.value : 0;
-}
-
-export function getRoomFeaturesForTick(row, col, tickValue, worldDay = getWorldDay()) {
-  const phase = getPhaseFromTick(tickValue);
-  return applyPhaseToFeatures(generateRoomFeatures(row, col, worldDay), phase);
-}
-
-export function getActiveEffectsForRoom(row, col, tickValue, worldDay = getWorldDay()) {
-  return getRoomFeaturesForTick(row, col, tickValue, worldDay)
-    .filter(feature => feature.active !== false && feature.effect)
-    .map(feature => ({
-      ...feature.effect,
-      label: feature.label
-    }));
-}
-
-export function roomHasEffect(row, col, tickValue, effectType, worldDay = getWorldDay()) {
-  return getActiveEffectsForRoom(row, col, tickValue, worldDay)
-    .some(effect => effect.type === effectType);
-}
-
-export async function getUser(db, username, label = 'User') {
-  const user = await getUserOrNull(db, username);
-  if (!user) {
-    throw new ActionError(`${label} not found.`, 404);
-  }
-  return user;
-}
-
-// adv-009: the single definition of the full-row read `SELECT * FROM users
-// WHERE username = ?`. Returns the row, or null when no such user exists — the
-// non-throwing twin of getUser, for the call sites that branch on absence
-// themselves (a missing row means "gone", not an error). getUser layers the
-// 404 throw on top of this; every other full-row read routes through here so
-// the `SELECT *` shape lives in exactly one place.
-export async function getUserOrNull(db, username) {
-  return dbFirst(db, 'SELECT * FROM users WHERE username = ?', [username]);
-}
-
-// adv-009: one home for the deliberately-NARROW per-user reads (the adv-006
-// perf work selects only the columns a path needs, never `SELECT *`). Callers
-// pass the exact column list they require; this preserves that narrowness while
-// routing the `SELECT <cols> FROM users WHERE username = ?` shape through a
-// single helper. Returns the row (with only the requested columns) or null.
-// Columns are our own code-supplied identifiers — never user input — so they
-// are interpolated directly, exactly as the inline SELECTs did. NOTE: reads that
-// also filter on a predicate (e.g. `AND isNpc = 0`, `AND health > 0`) are a
-// different shape and intentionally stay inline — this helper is the plain
-// keyed-by-username read only.
-export async function selectUserColumns(db, username, columns) {
-  const cols = Array.isArray(columns) ? columns.join(', ') : columns;
-  return dbFirst(db, `SELECT ${cols} FROM users WHERE username = ?`, [username]);
-}
+// adv ARCH-03: the tick read, the plain user reads, and the pure room-feature
+// wrappers now live in LEAF modules (clock/users/ecology) so the other seams
+// can use them without importing world.mjs back. Re-exported here (and imported
+// above for our own use), so every existing `from './world.mjs'` keeps working.
+export { getCurrentTickValue } from './clock.mjs';
+export { getUser, getUserOrNull, selectUserColumns } from './users.mjs';
+export { getActiveEffectsForRoom, getRoomFeaturesForTick, roomHasEffect } from './ecology.mjs';
 
 export async function getRoomAccessState(db, username, row, col, tickValue = null, worldDay = getWorldDay()) {
   const currentTick = tickValue === null ? await getCurrentTickValue(db) : tickValue;

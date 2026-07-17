@@ -7,7 +7,7 @@
 
 import { ROOM_MESSAGE_HISTORY_LIMIT } from './shared.mjs';
 import { dbAll, dbRun, lastInsertId } from '../db.mjs';
-import { getCurrentTickValue } from './world.mjs';
+import { getCurrentTickValue } from './clock.mjs';
 
 
 // The timestamp is written explicitly (same UTC 'YYYY-MM-DD HH:MM:SS' shape as the
