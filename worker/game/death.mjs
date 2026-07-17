@@ -18,7 +18,7 @@ import {
 } from './shared.mjs';
 import { changes, dbAll, dbFirst, dbRun } from '../db.mjs';
 import { deleteBodyRows, getBodyParts, isBodylessUser, zeroBodyParts } from './body.mjs';
-import { syncBodyDoc } from './bodyDoc.mjs';
+import { getBodyDoc, syncBodyDoc } from './bodyDoc.mjs';
 import { createCorpseItem, dropItemOnFloor, dropPlayerItemsOnDeath } from './inventory.mjs';
 import { createTrace, emitSystemMessage, insertSystemMessage } from './messages.mjs';
 import { CREATURE_DEATH_RATTLES, NPC_DEATH_BEGS, emitDeathReaction } from './npc.mjs';
@@ -54,6 +54,9 @@ export async function moveUserToCemetery(db, username, cause, row, col, options 
   );
   await dbRun(db, 'DELETE FROM roomPresence WHERE username = ?', [username]);
   await dbRun(db, 'DELETE FROM statusEffects WHERE username = ?', [username]);
+  // Phase D: capture the final body document BEFORE the scatter/deletion —
+  // the corpse embeds the body exactly as it died.
+  const finalDoc = await getBodyDoc(db, username);
   const droppedCount = await dropPlayerItemsOnDeath(db, username, row, col);
   if (droppedCount > 0) {
     await emitSystemMessage(db, row, col, `${username}'s belongings scatter across the floor.`, options.deferredSystemMessages);
@@ -65,7 +68,7 @@ export async function moveUserToCemetery(db, username, cause, row, col, options 
   // Plan 022 (tail): stamp the decay clock so processCorpseDecay can RENAME the
   // corpse cosmetically as it ages — but a player corpse is NEVER culled and ALWAYS
   // keeps corpseOf, so decay can never cause permadeath.
-  await createCorpseItem(db, { username, row, col, decayTick: await getCurrentTickValue(db) });
+  await createCorpseItem(db, { username, row, col, decayTick: await getCurrentTickValue(db), bodyDoc: finalDoc ? finalDoc.doc : null });
   await emitSystemMessage(db, row, col, `${username}'s corpse lies here.`, options.deferredSystemMessages, 'death');
   await emitSystemMessage(db, row, col, `${username} has died from ${cause}.`, options.deferredSystemMessages, 'death');
   // Plan 013f: the room reacts — grim gloating if they'd turned on this player (a

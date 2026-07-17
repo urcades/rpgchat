@@ -78,6 +78,12 @@ export {
 } from './game/bodyDoc.mjs';
 
 export {
+  GAME_PROFILE_DOCUMENT,
+  judgeUserBody,
+  userBodyConforms
+} from './game/profiles.mjs';
+
+export {
   createCorpseItem,
   deleteCorpseAnchor,
   findCorpseAnchor,

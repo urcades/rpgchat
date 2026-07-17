@@ -248,3 +248,40 @@ test('Phase C parity: doc-derived inventory/socketSummary deep-equal the row-der
     await db.close();
   }
 });
+
+test('Phase D: the corpse embeds the final body document; profiles judge structure', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  try {
+    const calm = findCalmRoom(getWorldDay());
+    await seedFighter(db, 'doc_legacy');
+    await game.ensureBody(db, await game.getUser(db, 'doc_legacy'));
+    await game.updatePresence(db, 'doc_legacy', calm.row, calm.col);
+    await game.createItemForOwner(db, 'iron_cleaver', 'doc_legacy');
+    await game.handleChatAction(db, 'doc_legacy', calm.row, calm.col, '/equip Iron Cleaver');
+
+    // Profiles judge the LIVE document.
+    assert.equal(await game.userBodyConforms(db, 'doc_legacy', 'able-bodied'), true);
+    assert.equal(await game.userBodyConforms(db, 'doc_legacy', 'armed'), true, 'cleaver in hand');
+
+    // Death: the corpse's modifiers embed the final document — body, gear
+    // placement and all — even though the doc row itself is deleted.
+    await game.moveUserToCemetery(db, 'doc_legacy', 'a test guillotine', calm.row, calm.col);
+    const corpse = await db.prepare(
+      "SELECT modifiers FROM items WHERE corpseOf = 'doc_legacy'"
+    ).first();
+    const embedded = JSON.parse(corpse.modifiers).bodyDoc;
+    assert.ok(embedded, 'the corpse carries the final body document');
+    const paperdoll = await import('paperdoll');
+    assert.ok(paperdoll.parseDocument(embedded).ok, 'embedded doc is kernel-valid');
+    assert.ok(embedded.body.vessels.torso, 'the dead body kept its shape');
+
+    // An unarmed fresh body fails 'armed' but passes 'able-bodied'.
+    await seedFighter(db, 'doc_pacifist');
+    await game.ensureBody(db, await game.getUser(db, 'doc_pacifist'));
+    assert.equal(await game.userBodyConforms(db, 'doc_pacifist', 'able-bodied'), true);
+    assert.equal(await game.userBodyConforms(db, 'doc_pacifist', 'armed'), false, 'no weapon in either arm');
+  } finally {
+    await db.close();
+  }
+});

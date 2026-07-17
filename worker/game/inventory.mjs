@@ -1046,12 +1046,18 @@ export async function deleteCorpseAnchor(db, username) {
 
 // The corpse row a true death leaves behind (plan 022c). Decay renames it
 // cosmetically but NEVER deletes it or clears corpseOf.
-export async function createCorpseItem(db, { username, row, col, decayTick }) {
+// Phase D: the corpse may EMBED the player's final paperdoll document (their
+// body exactly as it was at death — parts, gear, sockets) in its modifiers
+// JSON under `bodyDoc`. parseItemModifiers reads only known stat keys, so the
+// embedded doc is invisible to every existing consumer; resurrection can read
+// it back for a structural restore.
+export async function createCorpseItem(db, { username, row, col, decayTick, bodyDoc = null }) {
+  const modifiers = bodyDoc ? JSON.stringify({ bodyDoc }) : '{}';
   await dbRun(
     db,
     `INSERT INTO items (templateId, name, slotType, rarity, modifiers, roomRow, roomCol, corpseOf, decayTick)
-     VALUES ('player_corpse', ?, 'corpse', 'common', '{}', ?, ?, ?, ?)`,
-    [`${username}'s Corpse`, row, col, username, decayTick]
+     VALUES ('player_corpse', ?, 'corpse', 'common', ?, ?, ?, ?, ?)`,
+    [`${username}'s Corpse`, modifiers, row, col, username, decayTick]
   );
 }
 
