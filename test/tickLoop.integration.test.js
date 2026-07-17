@@ -254,3 +254,39 @@ test('adv-013: advanceGlobalTick remains the run-everything wrapper (increment +
     await db.close();
   }
 });
+
+// --- adv DUR-03: a skipped tick's modulo-gated stamina pulse is made up -------------
+
+test('adv DUR-03: when a later tick claims first, the skipped %3 pulse still applies', async () => {
+  const db = await createMigratedDb();
+  const { runDeferredWorldSweeps, claimWorldSweepRange } = await import('../worker/game.mjs');
+  try {
+    const worldDay = getWorldDay();
+    const room = findCalmRoom(worldDay);
+    await seedPlayer(db, 'straggler', { health: 30, stamina: 50 });
+    await placeUser(db, 'straggler', room.row, room.col, worldDay);
+
+    // Two actions bump the tick to 2 then 3, but tick 4's sweep claims FIRST
+    // (the exact under-load interleave): the winner owns (−1, 4] and must apply
+    // the %3 pulse tick 3 carried.
+    assert.equal(await runDeferredWorldSweeps(db, 4), true, 'the later tick wins the window');
+    assert.equal(
+      (await db.prepare("SELECT stamina FROM users WHERE username = 'straggler'").first()).stamina,
+      51,
+      'the skipped tick-3 stamina pulse was made up, not dropped'
+    );
+    assert.equal(await runDeferredWorldSweeps(db, 3), false, 'the earlier tick then no-ops');
+    assert.equal(
+      (await db.prepare("SELECT stamina FROM users WHERE username = 'straggler'").first()).stamina,
+      51,
+      'and applies nothing twice'
+    );
+
+    // The range claim never double-owns a window.
+    assert.equal(await claimWorldSweepRange(db, 4), null, 'a re-claim of the same tick is refused');
+    const next = await claimWorldSweepRange(db, 6);
+    assert.deepEqual(next, { fromTick: 4 }, 'the next window picks up exactly where the last ended');
+  } finally {
+    await db.close();
+  }
+});

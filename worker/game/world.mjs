@@ -1486,8 +1486,20 @@ export async function advanceTickOnly(db) {
 // only WHERE/HOW-OFTEN this block runs changes (see claimWorldSweep). `tickValue` is passed
 // in (never re-read) so the sweep operates on the same tick the increment produced, even
 // when the claim runs slightly later (e.g. deferred after the response).
-export async function runWorldSweeps(db, tickValue) {
-  if (tickValue % 3 === 0) {
+// `fromTick` (adv DUR-03): the low edge of the claimed window — sweeps that key
+// on an exact tick modulo make up any hits inside (fromTick, tickValue] instead
+// of dropping them when a later tick claimed first. The default (tick-1) is the
+// single-tick window and reproduces the old `tickValue % 3 === 0` behavior
+// exactly. Catch-up is capped so a huge idle gap can't turn into a regen burst.
+export async function runWorldSweeps(db, tickValue, fromTick = tickValue - 1) {
+  // Clamp the low edge to 0: the sentinel seeds at -1 and tick 0 never carried
+  // a live pulse (ticks advance before any sweep runs), so the seed window must
+  // not back-fill one. Multiples of 3 in (from, to] = floor(to/3) - floor(from/3).
+  const staminaPulses = Math.min(
+    3,
+    Math.floor(tickValue / 3) - Math.floor(Math.max(fromTick, 0) / 3)
+  );
+  for (let i = 0; i < staminaPulses; i += 1) {
     await recoverStaminaForAllUsers(db);
   }
 
@@ -1564,14 +1576,64 @@ export async function claimWorldSweep(db, tickValue, worldDay = getWorldDay()) {
   return changes(claim) > 0;
 }
 
+// adv DUR-03: like claimWorldSweep, but the winner also learns WHICH ticks it
+// now owns: the half-open range (fromTick, tickValue]. Under load two actions
+// can advance the tick back-to-back and the LATER tick's deferred sweep can
+// claim first — the earlier tick's sweep then no-ops, and with the plain
+// boolean claim any modulo-gated effect that tick carried (the %3 stamina
+// pulse) was silently dropped for the whole world. Carrying fromTick lets
+// runWorldSweeps make up the skipped hits. Read-then-CAS with one retry: the
+// conditional UPDATE only wins against the exact prev it read, so the range is
+// never double-owned.
+export async function claimWorldSweepRange(db, tickValue, worldDay = getWorldDay()) {
+  await dbRun(
+    db,
+    `INSERT OR IGNORE INTO roomEffectCooldowns
+      (username, roomRow, roomCol, effectType, lastAppliedTick, worldDay)
+     VALUES (?, 0, 0, ?, -1, ?)`,
+    [WORLD_SWEEP_SENTINEL_USER, WORLD_SWEEP_EFFECT_TYPE, worldDay]
+  );
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const row = await dbFirst(
+      db,
+      `SELECT lastAppliedTick FROM roomEffectCooldowns
+       WHERE username = ? AND roomRow = 0 AND roomCol = 0 AND effectType = ? AND worldDay = ?`,
+      [WORLD_SWEEP_SENTINEL_USER, WORLD_SWEEP_EFFECT_TYPE, worldDay]
+    );
+    const prev = row ? Number(row.lastAppliedTick) : -1;
+    if (prev >= tickValue) {
+      return null; // window already swept (or being swept) by someone else
+    }
+    const claim = await dbRun(
+      db,
+      `UPDATE roomEffectCooldowns
+       SET lastAppliedTick = ?
+       WHERE username = ?
+         AND roomRow = 0
+         AND roomCol = 0
+         AND effectType = ?
+         AND worldDay = ?
+         AND lastAppliedTick = ?`,
+      [tickValue, WORLD_SWEEP_SENTINEL_USER, WORLD_SWEEP_EFFECT_TYPE, worldDay, prev]
+    );
+    if (changes(claim) > 0) {
+      return { fromTick: prev };
+    }
+    // Lost the CAS to a concurrent claimant; re-read once — if the winner's tick
+    // still trails ours we can claim the remainder, else we're done.
+  }
+  return null;
+}
+
 // adv-013: the deduped tick driver for the high-fan-out paths (the per-5s hostile-room
 // alarm; the cron pulse). Advances the tick cheaply, then runs the world sweeps ONLY if
 // this caller is the first in the window — so K alarms fire the sweeps once, not K×. Keeps
 // advanceGlobalTick's return shape so its callers are byte-identical.
 export async function advanceTickAndMaybeSweep(db) {
   const tick = await advanceTickOnly(db);
-  if (await claimWorldSweep(db, tick.tick)) {
-    await runWorldSweeps(db, tick.tick);
+  const range = await claimWorldSweepRange(db, tick.tick);
+  if (range) {
+    await runWorldSweeps(db, tick.tick, range.fromTick);
   }
   return tick;
 }
@@ -1587,10 +1649,11 @@ export async function runDeferredWorldSweeps(db, tickValue) {
   if (tickValue === null || tickValue === undefined) {
     return false;
   }
-  if (!(await claimWorldSweep(db, tickValue))) {
+  const range = await claimWorldSweepRange(db, tickValue);
+  if (!range) {
     return false;
   }
-  await runWorldSweeps(db, tickValue);
+  await runWorldSweeps(db, tickValue, range.fromTick);
   return true;
 }
 

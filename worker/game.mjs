@@ -32,6 +32,7 @@ export {
   advanceTickAndMaybeSweep,
   advanceTickOnly,
   claimWorldSweep,
+  claimWorldSweepRange,
   cleanupOldWorldDayData,
   createNpcForEvent,
   ensureDailyWorldEvents,
