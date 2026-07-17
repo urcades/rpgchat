@@ -70,6 +70,16 @@ export async function allocateAttributePoint(db, username, stat) {
   return { stat, step };
 }
 
+// adv DUR-07 (investigated 2026-07-17): the three phases below are separate D1
+// round trips — deliberately. ACCEPTED partial-write windows on a mid-action
+// crash: (a) stamina spent but perform() never ran — bounded at `staminaCost`
+// (usually 1) and self-limiting; (b) perform() applied but the tick didn't
+// advance — harmless, the counter is monotonic and the next action advances it.
+// The multi-write perform() bodies with real stakes (economy, inventory, death,
+// gambling) each batch/claim internally (Campaign D + adv DUR-06); folding ALL
+// of this into one dbBatch would require every perform() to return statement
+// lists instead of executing — a whole-engine inversion that buys only the two
+// windows above. If a new perform() body writes money or items, batch INSIDE it.
 export async function runPlayerAction(db, { username, staminaCost = 1, validate, perform, advanceTick }) {
   // With no validate step, spendStamina's conditional UPDATE is the stamina check
   // (same error, one fewer read). The pre-read only exists so a stamina failure
