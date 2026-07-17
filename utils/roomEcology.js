@@ -215,7 +215,26 @@ function validateRoomCoordinates(row, col) {
   return { row: parsedRow, col: parsedCol };
 }
 
+// Deterministic per (worldDay,row,col), so memoize like progressionGrid's daily
+// board: the hot paths (ecology builds, per-presence sweeps, roomHasEffect) call
+// this many times per request for identical output. 1024 entries ≈ 4 world-days
+// of the 16×16 grid. The cached array is shared — treat it as read-only.
+const roomFeatureCache = new Map();
+
 function generateRoomFeatures(row, col, worldDay = getWorldDay()) {
+  const cacheKey = `${worldDay}:${row}:${col}`;
+  if (roomFeatureCache.has(cacheKey)) {
+    return roomFeatureCache.get(cacheKey);
+  }
+  const features = computeRoomFeatures(row, col, worldDay);
+  roomFeatureCache.set(cacheKey, features);
+  if (roomFeatureCache.size > 1024) {
+    roomFeatureCache.delete(roomFeatureCache.keys().next().value);
+  }
+  return features;
+}
+
+function computeRoomFeatures(row, col, worldDay) {
   const seed = hashString(`${worldDay}:${row}:${col}`);
   const random = seededRandom(seed);
   const mechanicCatalog = [...MECHANIC_FEATURE_CATALOG];

@@ -604,29 +604,33 @@ export async function handleRollCommand(db, username, row, col, message) {
   }
 
   const roll = Math.floor(Math.random() * 20) + 1;
-  const goldUpdate = await dbRun(
-    db,
-    'UPDATE users SET gold = gold - ? WHERE username = ? AND gold >= ?',
-    [wager, username, wager]
-  );
-  assertAction(changes(goldUpdate) > 0, 'Not enough gold for that wager.');
-
   const systemMessage = `${username} enters the dice round with ${wager} gold and rolls ${roll}. The round closes at tick ${round.endTick}.`;
-  try {
-    // One atomic round trip: the entry, the pool bump, and the table talk land (or
-    // fail) together, so the catch-refund below never leaves a half-recorded entry.
-    await dbBatch(db, [
-      [`INSERT INTO gamblingEntries
-         (roundId, username, wager, roll, enteredTick)
-        VALUES (?, ?, ?, ?, ?)`, [round.id, username, wager, roll, tickValue]],
-      ['UPDATE gamblingRounds SET pool = pool + ? WHERE id = ?', [wager, round.id]],
-      [`INSERT INTO messages (roomRow, roomCol, username, message, kind)
-        VALUES (?, ?, 'System', ?, 'dice')`, [row, col, systemMessage]]
-    ]);
-  } catch (err) {
-    await dbRun(db, 'UPDATE users SET gold = gold + ? WHERE username = ?', [wager, username]);
-    throw err;
-  }
+  // adv DUR-06: the debit used to be a SEPARATE round trip before this batch — a
+  // crash between the two committed the debit with no entry, silently losing the
+  // stake (the catch-refund only covers throws, not eviction). Now all four
+  // statements share ONE transaction. There is no mid-batch branching in D1, so
+  // instead every dependent statement is guarded by the same pre-debit predicate
+  // (`gold >= wager`, unchanged until the debit runs LAST): either the wager was
+  // affordable and all four apply, or none do. The debit's changes() afterwards
+  // is the affordability verdict.
+  const results = await dbBatch(db, [
+    [`INSERT INTO gamblingEntries
+       (roundId, username, wager, roll, enteredTick)
+      SELECT ?, ?, ?, ?, ?
+      WHERE EXISTS (SELECT 1 FROM users WHERE username = ? AND gold >= ?)`,
+      [round.id, username, wager, roll, tickValue, username, wager]],
+    [`UPDATE gamblingRounds SET pool = pool + ?
+      WHERE id = ?
+        AND EXISTS (SELECT 1 FROM users WHERE username = ? AND gold >= ?)`,
+      [wager, round.id, username, wager]],
+    [`INSERT INTO messages (roomRow, roomCol, username, message, kind)
+      SELECT ?, ?, 'System', ?, 'dice'
+      WHERE EXISTS (SELECT 1 FROM users WHERE username = ? AND gold >= ?)`,
+      [row, col, systemMessage, username, wager]],
+    ['UPDATE users SET gold = gold - ? WHERE username = ? AND gold >= ?',
+      [wager, username, wager]]
+  ]);
+  assertAction(changes(results[3]) > 0, 'Not enough gold for that wager.');
 
   return {
     wager,

@@ -495,3 +495,69 @@ test('adv-018: a single uncontended XP award is byte-identical to the prior beha
     await db.close();
   }
 });
+
+// ===========================================================================
+// adv DUR-06 — the wager debit rides IN the entry batch (all-or-nothing). An
+// unaffordable wager must leave zero traces: no debit, no entry, no pool bump,
+// no table-talk message. (Pre-fix the debit was a separate round trip; a crash
+// between it and the batch lost the stake.)
+
+test('adv DUR-06: an unaffordable /roll leaves NO partial writes (debit/entry/pool/message)', async () => {
+  const db = await createMigratedDb();
+  const { handleRollCommand, updatePresence } = await import('../worker/game.mjs');
+  try {
+    const worldDay = getWorldDay();
+    const den = findRoomWithEffect(worldDay, 'gambling_den');
+    assert.ok(den, 'today has a gambling den');
+    await seedUser(db, 'pauper', { gold: 5 });
+    await updatePresence(db, 'pauper', den.row, den.col);
+
+    await assert.rejects(
+      handleRollCommand(db, 'pauper', den.row, den.col, '/roll 10'),
+      /Not enough gold/,
+      'the wager is refused'
+    );
+
+    const gold = (await db.prepare('SELECT gold FROM users WHERE username = ?').bind('pauper').first()).gold;
+    assert.equal(gold, 5, 'gold untouched');
+    const entries = await db.prepare("SELECT COUNT(*) AS c FROM gamblingEntries WHERE username = 'pauper'").first();
+    assert.equal(entries.c, 0, 'no gambling entry recorded');
+    const pools = await db.prepare(
+      'SELECT COALESCE(SUM(pool), 0) AS p FROM gamblingRounds WHERE roomRow = ? AND roomCol = ?'
+    ).bind(den.row, den.col).first();
+    assert.equal(pools.p, 0, 'no pool credit');
+    const chatter = await db.prepare(
+      "SELECT COUNT(*) AS c FROM messages WHERE kind = 'dice' AND message LIKE 'pauper%'"
+    ).first();
+    assert.equal(chatter.c, 0, 'no table-talk line for the refused wager');
+  } finally {
+    await db.close();
+  }
+});
+
+test('adv DUR-06: an affordable /roll lands debit + entry + pool + message together', async () => {
+  const db = await createMigratedDb();
+  const { handleRollCommand, updatePresence } = await import('../worker/game.mjs');
+  try {
+    const worldDay = getWorldDay();
+    const den = findRoomWithEffect(worldDay, 'gambling_den');
+    await seedUser(db, 'highroller', { gold: 50 });
+    await updatePresence(db, 'highroller', den.row, den.col);
+
+    const result = await handleRollCommand(db, 'highroller', den.row, den.col, '/roll 20');
+    assert.ok(result.roundId, 'joined a round');
+
+    const gold = (await db.prepare('SELECT gold FROM users WHERE username = ?').bind('highroller').first()).gold;
+    assert.equal(gold, 30, 'wager debited once');
+    const entry = await db.prepare("SELECT wager FROM gamblingEntries WHERE username = 'highroller'").first();
+    assert.equal(entry.wager, 20, 'entry recorded');
+    const round = await db.prepare('SELECT pool FROM gamblingRounds WHERE id = ?').bind(result.roundId).first();
+    assert.equal(round.pool, 20, 'pool credited');
+    const chatter = await db.prepare(
+      "SELECT COUNT(*) AS c FROM messages WHERE kind = 'dice' AND message LIKE 'highroller enters%'"
+    ).first();
+    assert.equal(chatter.c, 1, 'table talk landed');
+  } finally {
+    await db.close();
+  }
+});

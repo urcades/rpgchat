@@ -658,30 +658,41 @@ async function getStatusStatModifiers(db, username, knownTickValue = null) {
 }
 
 export async function processStatusEffects(db, currentTick) {
+  // adv PERF-05: the JOIN filters out effects whose bearer no longer exists —
+  // exactly what the old per-effect existence probe did, minus N round trips.
   const activeEffects = await dbAll(
     db,
-    `SELECT *
-     FROM statusEffects
-     WHERE expiryTick > ?
-       AND createdTick < ?
-       AND effectType IN ('poison', 'arcane_pin', 'bless', 'burn', 'shock')
-     ORDER BY id ASC`,
+    `SELECT se.*
+     FROM statusEffects se
+     JOIN users u ON u.username = se.username
+     WHERE se.expiryTick > ?
+       AND se.createdTick < ?
+       AND se.effectType IN ('poison', 'arcane_pin', 'bless', 'burn', 'shock')
+     ORDER BY se.id ASC`,
     [currentTick, currentTick]
   );
 
+  // An earlier DoT tick in this same loop can true-kill the bearer (deleting the
+  // user row), so later effects for that name must be skipped — tracked from
+  // damageUser's own return instead of a per-effect existence query.
+  const diedThisSweep = new Set();
   for (const effect of activeEffects) {
-    const stillExists = await selectUserColumns(db, effect.username, 'username');
-    if (!stillExists) {
+    if (diedThisSweep.has(effect.username)) {
       continue;
     }
-
     if (effect.effectType === 'poison') {
       const cause = effect.sourceUsername ? `dose by ${effect.sourceUsername}` : 'poison';
-      await damageUser(db, effect.username, effect.magnitude || 1, cause, effect.roomRow, effect.roomCol);
+      const outcome = await damageUser(db, effect.username, effect.magnitude || 1, cause, effect.roomRow, effect.roomCol);
+      if (outcome.killed) {
+        diedThisSweep.add(effect.username);
+      }
     } else if (effect.effectType === 'burn') {
       // Plan 020c: fire DoT (also holy/dark, per ELEMENT_STATUS).
       const cause = effect.sourceUsername ? `burn from ${effect.sourceUsername}` : 'burn';
-      await damageUser(db, effect.username, effect.magnitude || 1, cause, effect.roomRow, effect.roomCol);
+      const outcome = await damageUser(db, effect.username, effect.magnitude || 1, cause, effect.roomRow, effect.roomCol);
+      if (outcome.killed) {
+        diedThisSweep.add(effect.username);
+      }
     } else if (effect.effectType === 'arcane_pin' || effect.effectType === 'shock') {
       // Plan 020c: shock (lightning) saps stamina each tick, like arcane_pin.
       await drainStamina(db, effect.username, effect.magnitude || 1);
