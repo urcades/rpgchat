@@ -130,6 +130,31 @@ Security audit: **zero findings**. CORRECTNESS-001 (NPC-kill null-deref) vetted 
 | Command-handler boilerplate dedup (~10 `handle*Command`) | tech-debt | M | |
 | Repo `CLAUDE.md`; smoke.mjs explicit `exit(0)`; request-id correlation; troubleshooting/seed docs; doc-ref fixes | DX/docs | S–M | |
 
+## Campaign E — perf/architecture/durability sweep (✅ COMPLETE 2026-07-17)
+
+Fresh 3-domain `/improve` audit (perf, architecture, durability) against `7bf0ff1`, all 20
+findings executed in-session, each suite-gated (`npm test` 549→556) + `npm run check`:
+
+- **Durability**: DUR-01 exactly-once actions across WS+HTTP (idempotency tokens, migration
+  `0021_action_claims`); DUR-02 lossless delta paging (ASC from cursor + client drain);
+  DUR-03 lossless %3 sweep pulses (`claimWorldSweepRange`); DUR-04 guarded the 3 alarm-
+  resetting `setAlarm` sites; DUR-05 self-describing NPC broadcasts; DUR-06 wager debit
+  inside the entry batch. DUR-07 investigated → accepted windows documented at
+  `runPlayerAction`.
+- **Perf**: PERF-01 HUD-scoped `getUserState` on room-state; PERF-02 `idx_killHistory_defeated`
+  (migration `0020`) + cemetery LIMIT 200; PERF-03 memoized `generateRoomFeatures`;
+  PERF-04 staffed-room memo kills heartbeat population reads; PERF-05 status-sweep N+1 →
+  JOIN; PERF-06 one loop-state read per alarm wake.
+- **Architecture**: ARCH-01 unified action pipeline (`worker/actions.mjs`; 4 routes → 1
+  factory; WS gains skill/job); ARCH-02 `world.mjs` → 69-line barrel over access/presence/
+  population/state/sweeps; ARCH-03 leaf modules clock/users/ecology break the world↔seam
+  cycles; ARCH-05 `toBroadcastMessageRow`; ARCH-06 `roomObject.mjs` + `roomBus.mjs` out of
+  index.mjs; ARCH-07 `static/shared.js`. ARCH-04 investigated → invariant documented at
+  `descendTowardDeath` (interleaving is deliberate feed ordering; not worth forcing).
+
+⚠️ **Migrations `0020` + `0021` must be applied to remote D1 BEFORE the next deploy.**
+Not pushed — commits are local on `main` pending owner review.
+
 ## Considered and rejected (so they aren't re-audited)
 
 - **Rename the duplicate-`0002` migrations** (`0002_resurrection_requests.sql` + `0002_world_events.sql`): REJECTED. wrangler tracks applied migrations by filename; renaming files already applied to prod makes it treat them as new/unapplied and re-run non-idempotent statements (the HP ×3 rebase). The prefix collision is cosmetic and sorts deterministically. Leave applied migrations untouched; only avoid the pattern for *future* files.
