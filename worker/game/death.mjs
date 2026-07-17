@@ -223,6 +223,17 @@ async function claimForFinish(db, username) {
 
 // The single decision point every combat death site calls. `blowDamage` is the
 // blow's intended damage; `overkill` is damage that spilled past a live body.
+//
+// INVARIANT (adv ARCH-04, investigated 2026-07-17): this is the ONLY function
+// that may transition a combatant to incapacitated / dead / gibbed — no caller
+// writes those states directly. Callers deliberately interleave work between
+// applyBodyDamage and this call (attack description, status lines, traces) so
+// the room feed reads in order (see adv-019); that interleaving is why the
+// damage→descend pair is NOT folded into one wrapper. Paths with nothing to
+// interleave (DoT ticks, status effects, hazards) already route through
+// body.mjs damageUser, which is the canonical damage→descend composition.
+// If you add a new damage site: either call damageUser, or call
+// applyBodyDamage and then THIS — never a hand-rolled death write.
 export async function descendTowardDeath(db, username, { cause, row, col, blowDamage = 0, overkill = 0, currentTick = null, deferredSystemMessages = null } = {}) {
   // Plan 013g: players AND NPCs descend through the same band — load the full row so
   // finishOff/incapacitate can branch on isNpc.
