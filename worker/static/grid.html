@@ -37,13 +37,8 @@
     </div>
     <p id="grid-message" class="gear-hint"></p>
   </main>
+  <script src="/shared.js"></script>
   <script>
-    function escapeHtml(value) {
-      return String(value ?? '').replace(/[&<>"']/g, character => ({
-        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-      }[character]));
-    }
-
     function effectText(effect) {
       if (!effect) return '';
       if (effect.kind === 'stat') return `+${effect.amount} ${effect.stat}`;

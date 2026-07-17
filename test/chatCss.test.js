@@ -80,3 +80,14 @@ test('chat message colors distinguish support, attack, speed, and death text', (
   assert.match(css, /\.speed-message,\s*\.speed-result\s*\{[^}]*color:\s*#6f4aa5/s);
   assert.match(css, /\.death-message\s*\{[^}]*color:\s*#b00020/s);
 });
+
+test('adv ARCH-07: shared.js owns escapeHtml; pages include it instead of inlining copies', () => {
+  const sharedJs = fs.readFileSync(path.join(__dirname, '../worker/static/shared.js'), 'utf8');
+  assert.match(sharedJs, /function escapeHtml\(/, 'shared.js defines the one escaper');
+
+  for (const page of ['character.html', 'grid.html']) {
+    const html = fs.readFileSync(path.join(__dirname, `../worker/static/${page}`), 'utf8');
+    assert.match(html, /<script src="\/shared\.js"><\/script>/, `${page} includes shared.js`);
+    assert.doesNotMatch(html, /function escapeHtml\(/, `${page} has no inline escapeHtml copy`);
+  }
+});
