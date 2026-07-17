@@ -301,6 +301,14 @@
     // frame. A dying socket flushes every unresolved action to the HTTP path.
     let wsActionSeq = 0;
     const pendingActions = new Map();
+    // Idempotency: each action carries one token shared by its WS frame AND its
+    // HTTP fallback, so a replay after a lost ack is applied exactly once
+    // server-side. The nonce keeps tokens unique across tabs/reloads.
+    const actionNonce = Math.random().toString(36).slice(2, 10);
+    let actionTokenCounter = 0;
+    function nextActionToken() {
+      return `${actionNonce}:${++actionTokenCounter}`;
+    }
 
     function flushPendingActionsToHttp() {
       const pending = Array.from(pendingActions.values());
@@ -926,7 +934,8 @@
       // bar), and the server accepts a targetPart against any bodied target (a player,
       // or an NPC whose creatureBodyPlan is set), so the old !selectedTargetIsNpc
       // guard — which wrongly stripped aim from every NPC — is gone.
-      let body = `message=${encodeURIComponent(actionMessage)}`;
+      const actionToken = nextActionToken();
+      let body = `message=${encodeURIComponent(actionMessage)}&actionToken=${encodeURIComponent(actionToken)}`;
       if (attack && selectedTargetPart) {
         body += `&targetPart=${encodeURIComponent(selectedTargetPart)}`;
       }
@@ -952,6 +961,7 @@
       const wsFrame = {
         type: attack ? 'attack' : 'chat',
         message: actionMessage,
+        token: actionToken,
         ...(attack && selectedTargetPart ? { targetPart: selectedTargetPart } : {})
       };
       if (sendActionOverSocket(wsFrame, {

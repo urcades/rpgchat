@@ -1496,6 +1496,34 @@ export async function runWorldSweeps(db, tickValue) {
   await processCorpseDecay(db, tickValue);
   await processStatusEffects(db, tickValue);
   await resolveExpiredGamblingRounds(db, tickValue);
+  await pruneActionClaims(db, tickValue);
+}
+
+// adv DUR-01: idempotency claims. An action carrying a client token is applied
+// exactly once across transports (WS first try, HTTP fallback replay): the
+// INSERT is the claim — the first transport in wins, the replay conflicts and
+// is acked without re-applying. Tokenless calls (old clients, smoke scripts,
+// tests) skip claiming entirely and behave as before.
+export async function claimActionToken(db, username, token) {
+  const trimmed = typeof token === 'string' ? token.trim().slice(0, 64) : '';
+  if (!trimmed) {
+    return true;
+  }
+  const result = await dbRun(
+    db,
+    'INSERT OR IGNORE INTO actionClaims (claimKey, username) VALUES (?, ?)',
+    [`${username}:${trimmed}`, username]
+  );
+  return changes(result) > 0;
+}
+
+// Claims only matter for the seconds-wide ack window; prune on the same slow
+// cadence as stamina recovery so the table stays tiny.
+async function pruneActionClaims(db, tickValue) {
+  if (tickValue % 3 !== 0) {
+    return;
+  }
+  await dbRun(db, "DELETE FROM actionClaims WHERE createdAt < datetime('now', '-1 hour')");
 }
 
 // adv-013 (the DEDUP claim): only the FIRST caller in a given tick-window runs the global

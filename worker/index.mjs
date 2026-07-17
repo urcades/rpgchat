@@ -14,6 +14,7 @@ import {
   SIGNATURE_ITEMS_BY_JOB,
   allocateAttributePoint,
   buildStartingStats,
+  claimActionToken,
   createItemForOwner,
   getCurrentPosition,
   getCurrentTickValue,
@@ -924,6 +925,11 @@ app.post('/chat/:row/:col', async c => {
     if (!message.trim()) {
       throw new ActionError('Message required.');
     }
+    // adv DUR-01: the WS path may have already applied this action before its
+    // ack was lost; the token claim makes this HTTP replay a visible no-op.
+    if (!(await claimActionToken(c.env.DB, auth.user.username, body.actionToken))) {
+      return actionResponse(c, row, col, { action: 'chat', duplicate: true });
+    }
     const action = await measureAsync(() => handleChatAction(c.env.DB, auth.user.username, row, col, message));
     const result = action.value;
     runAfterResponse(c, { action: 'chat', roomRow: row, roomCol: col }, async () => {
@@ -989,6 +995,10 @@ app.post('/attack/:row/:col', async c => {
     // Plan 024: the targeting toolbar aims at a body part out-of-band, so the limb
     // stays out of the chat prose. Empty => no called shot (weighted-random hit).
     const targetPart = body.targetPart ? String(body.targetPart) : null;
+    // adv DUR-01: same replay guard as /chat — an attack must never land twice.
+    if (!(await claimActionToken(c.env.DB, auth.user.username, body.actionToken))) {
+      return actionResponse(c, row, col, { action: 'attack', duplicate: true });
+    }
     const action = await measureAsync(() => handleAttackAction(c.env.DB, auth.user.username, row, col, message, targetPart));
     const result = action.value;
     runAfterResponse(c, { action: 'attack', roomRow: row, roomCol: col }, async () => {
@@ -1276,6 +1286,13 @@ export class RoomObject extends DurableObject {
       const message = String(frame.message || '');
       if (!message.trim()) {
         throw new ActionError('Message required.');
+      }
+      // adv DUR-01: claim the client token BEFORE applying. If this frame is a
+      // retry of an action another transport already applied, ack it and stop —
+      // the first application's broadcast already reached the room.
+      if (!(await claimActionToken(db, username, frame.token))) {
+        this.sendSafe(ws, { type: 'ack', seq, action: frame.type === 'attack' ? 'attack' : 'message', duplicate: true });
+        return;
       }
 
       let broadcastType;
