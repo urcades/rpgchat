@@ -680,11 +680,33 @@ async function createSocialNpc(db, { username, displayName, role, job, dispositi
 // Lazily populate a social room when a human is present and it is under-staffed. Idempotent
 // (deterministic per-day usernames + INSERT OR IGNORE), cheap (runs only when a human enters
 // a social room), and self-clearing on the daily reset. Returns { spawned, archetype }.
+// adv PERF-04: once every roster slot for a (worldDay, room) is accounted for
+// (alive in D1, or dead-today — which must NOT respawn), later 15s heartbeats
+// have nothing to do; skip their presence-JOIN + cooldown reads entirely. The
+// memo is per-isolate AND per-db-handle (WeakMap): a fresh isolate re-runs the
+// check once and re-converges — the pre-memo behavior, not a correctness risk —
+// and independent databases (each test's in-memory D1) never see each other's
+// staffed marks.
+const staffedRoomsByDb = new WeakMap();
+
 export async function ensureSocialPopulation(db, row, col) {
   const worldDay = getWorldDay();
+  const staffedKey = `${worldDay}:${row}:${col}`;
+  let staffedRooms = staffedRoomsByDb.get(db);
+  if (!staffedRooms) {
+    staffedRooms = new Set();
+    staffedRoomsByDb.set(db, staffedRooms);
+  }
+  if (staffedRooms.has(staffedKey)) {
+    return { spawned: 0, archetype: null, staffed: true };
+  }
+  if (staffedRooms.size > 2048) staffedRooms.clear(); // day rollover hygiene
   const tick = await getCurrentTickValue(db);
   const archetype = socialArchetypeFor(row, col, tick, worldDay);
-  if (!archetype) return { spawned: 0, archetype: null };
+  if (!archetype) {
+    staffedRooms.add(staffedKey);
+    return { spawned: 0, archetype: null };
+  }
   const roster = SOCIAL_ROSTERS[archetype] || [];
 
   // Alive only when observed — never populate an empty room.
@@ -702,10 +724,12 @@ export async function ensureSocialPopulation(db, row, col) {
   const dead = new Set(deadRows.map(r => r.username));
 
   let spawned = 0;
+  const spawnedNames = new Set();
   for (let i = 0; i < roster.length; i += 1) {
     const entry = roster[i];
     const username = `soc:${worldDay}:${row}:${col}:${entry.role}:${i}`;
     if (present.has(username) || dead.has(username)) continue;
+    spawnedNames.add(username);
     await createSocialNpc(db, {
       username,
       displayName: socialNpcName(entry.role, row, col, i),
@@ -719,6 +743,15 @@ export async function ensureSocialPopulation(db, row, col) {
       tick
     });
     spawned += 1;
+  }
+  // Every slot now alive or dead-today: nothing left for this room this
+  // world-day, so heartbeats can skip the reads until the daily reset.
+  const accounted = roster.every((entry, i) => {
+    const username = `soc:${worldDay}:${row}:${col}:${entry.role}:${i}`;
+    return present.has(username) || dead.has(username) || spawnedNames.has(username);
+  });
+  if (accounted) {
+    staffedRooms.add(staffedKey);
   }
   return { spawned, archetype };
 }

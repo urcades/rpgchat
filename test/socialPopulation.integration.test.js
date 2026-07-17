@@ -66,6 +66,9 @@ test('Plan 013b: a player entering a tavern summons its cast — friendly, jobbe
     // Idempotent: re-entering does not duplicate the cast.
     const second = await game.ensureSocialPopulation(db, tavern.row, tavern.col);
     assert.equal(second.spawned, 0, 're-entry spawns nobody new');
+    // adv PERF-04: the first call fully staffed the room, so the re-entry took
+    // the memo fast-path — no presence/cooldown reads on later heartbeats.
+    assert.equal(second.staffed, true, 'the staffed memo short-circuits the heartbeat');
   } finally {
     await db.close();
   }
