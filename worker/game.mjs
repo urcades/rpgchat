@@ -70,6 +70,23 @@ export {
 } from './game/world.mjs';
 
 export {
+  createCorpseItem,
+  deleteCorpseAnchor,
+  findCorpseAnchor,
+  findCorpseAnchorInRoom,
+  getEquippedItemRefs,
+  getEquippedItemRefsForPart,
+  materiaApAccrualStatement
+} from './game/inventory.mjs';
+
+export {
+  deleteBodyRows,
+  reconcileBodyHealthInvariant,
+  restoreSeveredPart,
+  zeroBodyParts
+} from './game/body.mjs';
+
+export {
   createTrace,
   getMessages,
   insertMessage,

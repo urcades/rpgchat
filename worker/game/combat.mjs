@@ -53,7 +53,7 @@ import {
   healUser
 } from './body.mjs';
 import { descendTowardDeath } from './death.mjs';
-import { getSocketedMateriaEffects } from './inventory.mjs';
+import { findCorpseAnchorInRoom, getEquippedItemRefs, getEquippedItemRefsForPart, getSocketedMateriaEffects } from './inventory.mjs';
 import { createTrace, insertSystemMessage } from './messages.mjs';
 import { provokeRoomNpcs } from './npc.mjs';
 import { bumpRiteMastery, getUsableAbilityIds, upsertCooldown } from './progression.mjs';
@@ -181,7 +181,7 @@ function creatureElementFor(npc) {
 // Fetching once and deriving element + weaponClass from the SAME rows collapses that to a
 // single scan, with byte-identical results (same query, same row order, same lookups).
 export async function getEquippedItems(db, username) {
-  return dbAll(db, 'SELECT id, templateId FROM items WHERE ownerUsername = ? AND equippedPartId IS NOT NULL', [username]);
+  return getEquippedItemRefs(db, username);
 }
 
 // The element of a player's equipped weapon (first equipped item carrying one), derived
@@ -226,14 +226,7 @@ export async function getWeaponClass(db, username) {
 // plus the room's amplification (which affects everyone present). 0 = neutral.
 export async function getElementAffinity(db, username, element, partLabel, row, col, tickValue) {
   let affinity = 0;
-  const rows = await dbAll(
-    db,
-    `SELECT i.id, i.templateId FROM items i
-     LEFT JOIN bodyParts bp ON bp.id = i.equippedPartId
-     WHERE i.ownerUsername = ? AND i.equippedPartId IS NOT NULL
-       AND (? IS NULL OR bp.label = ?)`,
-    [username, partLabel || null, partLabel || null]
-  );
+  const rows = await getEquippedItemRefsForPart(db, username, partLabel);
   const partItemIds = [];
   for (const r of rows) {
     partItemIds.push(r.id);
@@ -1301,11 +1294,7 @@ export async function runAbility(db, abilityId, { username, effectiveActor, targ
       }
       // Plan 011: otherwise, raise a truly-dead ally whose corpse (the 022c anchor)
       // lies in this room; revivePlayer restores them from the grave and consumes it.
-      const corpse = await dbFirst(
-        db,
-        'SELECT id FROM items WHERE corpseOf = ? AND roomRow = ? AND roomCol = ?',
-        [target, row, col]
-      );
+      const corpse = await findCorpseAnchorInRoom(db, target, row, col);
       assertAction(corpse, `There is no corpse of ${target} here to revive.`, 404);
       const result = await revivePlayer(db, target, row, col);
       assertAction(result.revived, `${target} cannot be revived — their grave is gone.`, 400);

@@ -17,8 +17,8 @@ import {
   rollTrophyDrop
 } from './shared.mjs';
 import { changes, dbAll, dbFirst, dbRun } from '../db.mjs';
-import { getBodyParts, isBodylessUser } from './body.mjs';
-import { dropItemOnFloor, dropPlayerItemsOnDeath } from './inventory.mjs';
+import { deleteBodyRows, getBodyParts, isBodylessUser, zeroBodyParts } from './body.mjs';
+import { createCorpseItem, dropItemOnFloor, dropPlayerItemsOnDeath } from './inventory.mjs';
 import { createTrace, emitSystemMessage, insertSystemMessage } from './messages.mjs';
 import { CREATURE_DEATH_RATTLES, NPC_DEATH_BEGS, emitDeathReaction } from './npc.mjs';
 import { awardExperience, upsertCooldown } from './progression.mjs';
@@ -57,20 +57,14 @@ export async function moveUserToCemetery(db, username, cause, row, col, options 
   if (droppedCount > 0) {
     await emitSystemMessage(db, row, col, `${username}'s belongings scatter across the floor.`, options.deferredSystemMessages);
   }
-  await dbRun(db, 'DELETE FROM bodyParts WHERE username = ?', [username]);
+  await deleteBodyRows(db, username);
   // Plan 022c: the body drops as a corpse — the anchor of resurrection. While it
   // exists (on a floor or in someone's bag) the player can be revived (paid or
   // free); eat or destroy it and the tether snaps — true, permanent death.
   // Plan 022 (tail): stamp the decay clock so processCorpseDecay can RENAME the
   // corpse cosmetically as it ages — but a player corpse is NEVER culled and ALWAYS
   // keeps corpseOf, so decay can never cause permadeath.
-  const corpseDecayTick = await getCurrentTickValue(db);
-  await dbRun(
-    db,
-    `INSERT INTO items (templateId, name, slotType, rarity, modifiers, roomRow, roomCol, corpseOf, decayTick)
-     VALUES ('player_corpse', ?, 'corpse', 'common', '{}', ?, ?, ?, ?)`,
-    [`${username}'s Corpse`, row, col, username, corpseDecayTick]
-  );
+  await createCorpseItem(db, { username, row, col, decayTick: await getCurrentTickValue(db) });
   await emitSystemMessage(db, row, col, `${username}'s corpse lies here.`, options.deferredSystemMessages, 'death');
   await emitSystemMessage(db, row, col, `${username} has died from ${cause}.`, options.deferredSystemMessages, 'death');
   // Plan 013f: the room reacts — grim gloating if they'd turned on this player (a
@@ -116,7 +110,7 @@ async function incapacitate(db, user, cause, row, col, { currentTick = null, def
   // (the exact band 013g/023 assumed could never happen, because every NPC used to be
   // bodyless). A scalar NPC has no rows, so this no-ops for it.
   if (!isBodylessUser(user)) {
-    await dbRun(db, 'UPDATE bodyParts SET hp = 0 WHERE username = ?', [user.username]);
+    await zeroBodyParts(db, user.username);
   }
   if (user.isNpc) {
     // NPCs don't scatter player gear — they gasp a plea (social) or a broken rattle
@@ -513,7 +507,7 @@ export async function defeatNpc(db, npc, { killer, row, col, currentTick, deferr
   // hit). Mirror moveUserToCemetery and delete them on true death, or part rows leak on
   // every kill (and could collide with a respawn that reuses the deterministic username).
   // A scalar NPC has no rows, so this is a harmless no-op for it.
-  await dbRun(db, 'DELETE FROM bodyParts WHERE username = ?', [npc.username]);
+  await deleteBodyRows(db, npc.username);
   await dbRun(db, 'UPDATE worldEventEntities SET lastDefeatedTick = ? WHERE username = ?', [currentTick, npc.username]);
   await emitSystemMessage(db, row, col, `${npc.displayName || npc.username} is defeated by ${killer}.`, deferredSystemMessages, 'combat');
   // Plan 013f: the surviving room reacts to the kill.

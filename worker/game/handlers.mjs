@@ -23,7 +23,7 @@ import {
   shouldApplyEffect
 } from './shared.mjs';
 import { changes, dbBatch, dbFirst, dbRun, lastInsertId } from '../db.mjs';
-import { ensureBody } from './body.mjs';
+import { ensureBody, restoreSeveredPart } from './body.mjs';
 import {
   RITE_COOLDOWN_EFFECT_PREFIX,
   handleAttack,
@@ -122,25 +122,6 @@ export async function validateRegrowCommand(db, username, row, col, message) {
   // All failure paths fire here (before spendStamina): bad part, not an inn,
   // unpaid, short on gold, already regrown today.
   await resolveRegrow(db, username, row, col, message);
-}
-
-// Dedicated regrow restorer — NOT applyBodyHeal (which skips severed parts).
-// Restores the part to its BASE (un-fortified) maxHp, hp 1, un-severs it, and
-// folds baseMaxHp back into users.maxHealth and 1 into users.health, keeping
-// the invariant `users.maxHealth == Σ non-severed maxHp` exact. The limb
-// regrows bare; re-equipping armor re-applies its bonus via plan 015.
-async function restoreSeveredPart(db, username, part) {
-  const base = Math.max(0, Math.floor(part.baseMaxHp || 0));
-  await dbRun(
-    db,
-    'UPDATE bodyParts SET severed = 0, maxHp = ?, hp = 1 WHERE id = ?',
-    [base, part.id]
-  );
-  await dbRun(
-    db,
-    'UPDATE users SET maxHealth = maxHealth + ?, health = health + 1 WHERE username = ?',
-    [base, username]
-  );
 }
 
 export async function handleRegrowCommand(db, username, row, col, message) {

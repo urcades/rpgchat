@@ -18,6 +18,7 @@ import {
   pickTargetPart
 } from './shared.mjs';
 import { dbAll, dbBatch, dbFirst, dbRun } from '../db.mjs';
+import { logEvent } from '../observability.mjs';
 import { descendTowardDeath, reviveFromIncapacitation } from './death.mjs';
 import { getEquippedModifiers } from './inventory.mjs';
 import { insertSystemMessage } from './messages.mjs';
@@ -703,4 +704,65 @@ export async function processStatusEffects(db, currentTick) {
   }
 
   await dbRun(db, 'DELETE FROM statusEffects WHERE expiryTick <= ?', [currentTick]);
+}
+
+// ---------------------------------------------------------------------------
+// adv engine-overhaul Phase A: the body-row chokepoints. Every module that used
+// to write bodyParts with raw SQL now calls these — sealing the seam so the
+// paperdoll-document representation (Phase B+) has exactly one place to hook.
+
+// Dedicated regrow restorer — NOT applyBodyHeal (which skips severed parts).
+// Restores the part to its BASE (un-fortified) maxHp, hp 1, un-severs it, and
+// folds baseMaxHp back into users.maxHealth and 1 into users.health, keeping
+// the invariant `users.maxHealth == Σ non-severed maxHp` exact. The limb
+// regrows bare; re-equipping armor re-applies its bonus via plan 015.
+export async function restoreSeveredPart(db, username, part) {
+  const base = Math.max(0, Math.floor(part.baseMaxHp || 0));
+  await dbRun(
+    db,
+    'UPDATE bodyParts SET severed = 0, maxHp = ?, hp = 1 WHERE id = ?',
+    [base, part.id]
+  );
+  await dbRun(
+    db,
+    'UPDATE users SET maxHealth = maxHealth + ?, health = health + 1 WHERE username = ?',
+    [base, username]
+  );
+}
+
+// True death: the body rows are destroyed with the user (the corpse item is the
+// only remnant — created by the death seam via inventory's createCorpseItem).
+export async function deleteBodyRows(db, username) {
+  await dbRun(db, 'DELETE FROM bodyParts WHERE username = ?', [username]);
+}
+
+// Incapacitation zeroes every part so users.health == Σ bodyParts.hp holds at 0.
+export async function zeroBodyParts(db, username) {
+  await dbRun(db, 'UPDATE bodyParts SET hp = 0 WHERE username = ?', [username]);
+}
+
+// Self-healing reconcile: for any live non-NPC user with body rows where
+// users.health != Σ bodyParts.hp, set users.health to the sum. The invariant
+// is the contract; this only catches drift, never masks a bypassed chokepoint.
+export async function reconcileBodyHealthInvariant(db) {
+  const drifted = await dbAll(
+    db,
+    `SELECT u.username AS username, u.health AS health, SUM(bp.hp) AS bodySum
+     FROM users u
+     JOIN bodyParts bp ON bp.username = u.username
+     WHERE u.isNpc = 0
+       AND u.username != 'System'
+     GROUP BY u.username
+     HAVING u.health != SUM(bp.hp)`
+  );
+  for (const row of drifted) {
+    const bodySum = Math.max(0, Math.floor(row.bodySum || 0));
+    await dbRun(db, 'UPDATE users SET health = ? WHERE username = ?', [bodySum, row.username]);
+    logEvent({
+      event: 'body.reconcile',
+      username: row.username,
+      previousHealth: row.health,
+      reconciledHealth: bodySum
+    });
+  }
 }
