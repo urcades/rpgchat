@@ -22,7 +22,7 @@ import {
   riteRankFromCasts,
   shouldApplyEffect
 } from './shared.mjs';
-import { changes, dbFirst, dbRun } from '../db.mjs';
+import { changes, dbBatch, dbFirst, dbRun, lastInsertId } from '../db.mjs';
 import { ensureBody } from './body.mjs';
 import {
   RITE_COOLDOWN_EFFECT_PREFIX,
@@ -292,13 +292,34 @@ export async function handleAttackAction(db, username, row, col, message, target
     perform: async () => {
       const deferredSystemMessages = [];
       const updatedMessage = await handleAttack(db, username, message, row, col, { deferredSystemMessages, targetPart });
-      await insertMessage(db, row, col, username, updatedMessage);
-      for (const deferred of deferredSystemMessages) {
-        await insertSystemMessage(db, row, col, deferred.message, deferred.kind);
-      }
+      // Perf (attack-latency): the attack line + its deferred system lines used
+      // to land as 1+N sequential round trips on the ack path; one dbBatch
+      // writes them together. The formed rows (with real ids) are RETURNED so
+      // the broadcast can be self-describing — clients append them directly
+      // instead of debounced-refetching the whole room state to see an attack.
+      const timestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
+      const pending = [
+        { username, message: updatedMessage, kind: 'chat' },
+        ...deferredSystemMessages.map(deferred => ({
+          username: 'System',
+          message: deferred.message,
+          kind: deferred.kind || 'system'
+        }))
+      ];
+      const inserted = await dbBatch(db, pending.map(rowSpec => [
+        'INSERT INTO messages (roomRow, roomCol, username, message, kind, timestamp) VALUES (?, ?, ?, ?, ?, ?)',
+        [row, col, rowSpec.username, rowSpec.message, rowSpec.kind, timestamp]
+      ]));
+      const messageRows = pending.map((rowSpec, index) => ({
+        id: lastInsertId(inserted[index]),
+        username: rowSpec.username,
+        message: rowSpec.message,
+        timestamp,
+        kind: rowSpec.kind
+      }));
       await awardGoldMaybe(db, username);
       await updateLevel(db, username, row, col);
-      return { updatedMessage };
+      return { updatedMessage, messageRows };
     },
     advanceTick: () => advanceTickOnly(db)
   });

@@ -398,9 +398,10 @@
       }, 150);
     }
 
-    // Instant local echo of the player's own plain chat line, styled pending until
-    // the authoritative row lands (any fresh fetch clears it). Commands and attacks
-    // are actions with server-computed results — they don't echo.
+    // Instant local echo of the player's own line, styled pending until the
+    // authoritative row lands (any fresh append clears it). Plain chat echoes
+    // as-is; an attack echoes its ATTEMPT ("lunges at X…") and the server's
+    // combat lines replace it. Slash commands still don't echo.
     function echoPendingMessage(message) {
       const node = renderMessage({
         username: currentUsername || 'you',
@@ -784,17 +785,18 @@
           }
           return;
         }
-        // Chat lines (players and NPCs) only add message rows — fetch just the
-        // delta. Combat/skill/job/hostile events change stats and ecology, so
-        // they keep the full (debounced) room-state refresh.
-        if (payload && payload.type === 'message') {
-          // Self-describing frame: the row(s) ride in the broadcast — append them
-          // directly, no fetch at all. Frames without rows (commands, NPC lines)
-          // fall back to the delta fetch.
-          if (Array.isArray(payload.messages) && payload.messages.length > 0) {
-            appendMessages(payload.messages);
+        // Self-describing frames: ANY event whose row(s) ride in the broadcast
+        // (chat, NPC lines, attacks with their combat lines) appends them
+        // immediately — the text never waits on a fetch. Non-message events
+        // still fall through below for the debounced room-state refresh, which
+        // now only has to carry the STATS (HP bars, ecology), not the lines.
+        if (payload && Array.isArray(payload.messages) && payload.messages.length > 0) {
+          appendMessages(payload.messages);
+          if (payload.type === 'message') {
             return;
           }
+        } else if (payload && payload.type === 'message') {
+          // A message frame without rows (commands) — fetch just the delta.
           scheduleNewMessagesRefresh();
           return;
         }
@@ -941,9 +943,15 @@
       }
       // Optimistic echo: a plain chat line renders instantly (pending style) and is
       // replaced by the authoritative row when it arrives; rolled back on error.
-      const pendingNode = (!attack && !actionMessage.trim().startsWith('/'))
-        ? echoPendingMessage(actionMessage)
-        : null;
+      // Optimistic echo. A chat line ghosts as-is; an attack ghosts as the
+      // ATTEMPT ("Edouard lunges at the Room Lurker…") — the authoritative
+      // combat lines (hit, damage, severs) replace it the moment the broadcast
+      // lands, so the swing feels instant even though resolution is server-side.
+      const pendingNode = attack
+        ? echoPendingMessage(selectedTarget
+          ? `lunges at ${selectedTargetLabel || selectedTarget}…`
+          : `${actionMessage}…`)
+        : (!actionMessage.trim().startsWith('/') ? echoPendingMessage(actionMessage) : null);
       const onSuccess = () => {
         messageInput.value = '';
         updateTargetHint();

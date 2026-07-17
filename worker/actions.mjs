@@ -101,9 +101,17 @@ export async function performRoomAction(db, { type, user, row, col, payload, roo
     await releaseActionToken(db, user.username, token);
     throw err;
   }
-  const enrichedRows = result.messageRow
-    ? [toBroadcastMessageRow(result.messageRow, user)]
-    : undefined;
+  // Self-describing frames: `messageRows` (attack — the attack line plus its
+  // deferred system lines) or `messageRow` (chat) ride in the broadcast so
+  // clients append them directly — no debounced room-state refetch just to see
+  // the text. System rows get no author enrichment; the actor's rows get the
+  // already-fetched user row's job/displayName.
+  const enrichedRows = Array.isArray(result.messageRows) && result.messageRows.length > 0
+    ? result.messageRows.map(rowData =>
+      toBroadcastMessageRow(rowData, rowData.username === user.username ? user : {}))
+    : result.messageRow
+      ? [toBroadcastMessageRow(result.messageRow, user)]
+      : undefined;
   return {
     duplicate: false,
     type,

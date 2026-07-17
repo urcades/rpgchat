@@ -162,3 +162,43 @@ test('ws action errors (empty message / bad frame) answer action-error or are ig
     await db.close();
   }
 });
+
+test('ws attack action: broadcast is self-describing (attack line + system lines ride along)', async () => {
+  const mod = await import('../worker/index.mjs');
+  const db = await createMigratedDb();
+  try {
+    const worldDay = getWorldDay();
+    await seedPlayer(db, 'ws_striker', 6, 6, worldDay);
+    await seedPlayer(db, 'ws_dummy', 6, 6, worldDay);
+
+    const sender = mockSocket({ username: 'ws_striker', row: 6, col: 6 });
+    const peer = mockSocket({ username: 'ws_dummy', row: 6, col: 6 });
+    const room = new mod.RoomObject(mockCtx([sender, peer]), { DB: db, AI: {} });
+
+    await quiet(() => room.webSocketMessage(sender, JSON.stringify({
+      type: 'attack', message: 'attack ws_dummy', seq: 11
+    })));
+
+    const ack = sender.sent.find(frame => frame.type === 'ack');
+    assert.ok(ack, 'attacker got an ack');
+    assert.ok(Array.isArray(ack.result.messageRows) && ack.result.messageRows.length >= 1,
+      'the result carries the formed rows');
+
+    const broadcast = peer.sent.find(frame => frame.type === 'attack');
+    assert.ok(broadcast, 'the room got the attack broadcast');
+    assert.ok(Array.isArray(broadcast.messages) && broadcast.messages.length >= 1,
+      'the attack frame is self-describing — clients need no refetch to render the lines');
+    const attackRow = broadcast.messages[0];
+    assert.equal(attackRow.username, 'ws_striker', 'first row is the attack line, authored by the attacker');
+    assert.ok(attackRow.id > 0, 'real row ids ride along');
+    assert.equal(attackRow.job, 'Novice', 'attacker rows are enriched');
+    // Every broadcast row exists in the DB with a matching id (batch insert ids are real).
+    for (const rowData of broadcast.messages) {
+      const persisted = await db.prepare('SELECT username, message FROM messages WHERE id = ?').bind(rowData.id).first();
+      assert.ok(persisted, `row ${rowData.id} persisted`);
+      assert.equal(persisted.message, rowData.message, 'broadcast text matches the persisted row');
+    }
+  } finally {
+    await db.close();
+  }
+});
