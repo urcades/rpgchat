@@ -1,4 +1,5 @@
 import { changes, dbFirst, dbRun } from './db.mjs';
+import { deleteCorpseAnchor, findCorpseAnchor } from './game.mjs';
 
 function appendClientReferenceId(paymentLinkUrl, token) {
   const url = new URL(paymentLinkUrl);
@@ -22,7 +23,7 @@ async function latestGrave(db, username) {
 // or in someone's bag). If it has been eaten/destroyed, the tether is severed — no
 // resurrection is possible, even a paid one.
 async function hasCorpse(db, username) {
-  const row = await dbFirst(db, 'SELECT 1 AS present FROM items WHERE corpseOf = ? LIMIT 1', [username]);
+  const row = await findCorpseAnchor(db, username);
   return Boolean(row);
 }
 
@@ -65,7 +66,7 @@ export async function revivePlayer(db, username, row, col) {
   if (!liveUser) {
     await insertResurrectedUser(db, grave);
   }
-  await dbRun(db, 'DELETE FROM items WHERE corpseOf = ?', [username]);
+  await deleteCorpseAnchor(db, username);
   await dbRun(db, 'UPDATE sessions SET username = ?, deadUsername = NULL WHERE deadUsername = ?', [username, username]);
   return { revived: true, username };
 }
@@ -162,7 +163,7 @@ export async function fulfillResurrectionCheckout(db, token, stripeSessionId) {
 
   await dbRun(db, 'DELETE FROM cemetery WHERE id = ?', [grave.id]);
   // Plan 022c: the body returns to life — consume the corpse so it can't be reused.
-  await dbRun(db, 'DELETE FROM items WHERE corpseOf = ?', [grave.username]);
+  await deleteCorpseAnchor(db, grave.username);
   await dbRun(
     db,
     `UPDATE sessions

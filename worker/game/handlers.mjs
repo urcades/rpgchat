@@ -23,7 +23,8 @@ import {
   shouldApplyEffect
 } from './shared.mjs';
 import { changes, dbBatch, dbFirst, dbRun, lastInsertId } from '../db.mjs';
-import { ensureBody } from './body.mjs';
+import { ensureBody, restoreSeveredPart } from './body.mjs';
+import { syncBodyDoc } from './bodyDoc.mjs';
 import {
   RITE_COOLDOWN_EFFECT_PREFIX,
   handleAttack,
@@ -124,25 +125,6 @@ export async function validateRegrowCommand(db, username, row, col, message) {
   await resolveRegrow(db, username, row, col, message);
 }
 
-// Dedicated regrow restorer — NOT applyBodyHeal (which skips severed parts).
-// Restores the part to its BASE (un-fortified) maxHp, hp 1, un-severs it, and
-// folds baseMaxHp back into users.maxHealth and 1 into users.health, keeping
-// the invariant `users.maxHealth == Σ non-severed maxHp` exact. The limb
-// regrows bare; re-equipping armor re-applies its bonus via plan 015.
-async function restoreSeveredPart(db, username, part) {
-  const base = Math.max(0, Math.floor(part.baseMaxHp || 0));
-  await dbRun(
-    db,
-    'UPDATE bodyParts SET severed = 0, maxHp = ?, hp = 1 WHERE id = ?',
-    [base, part.id]
-  );
-  await dbRun(
-    db,
-    'UPDATE users SET maxHealth = maxHealth + ?, health = health + 1 WHERE username = ?',
-    [base, username]
-  );
-}
-
 export async function handleRegrowCommand(db, username, row, col, message) {
   const { part, worldDay, tickValue, label } = await resolveRegrow(db, username, row, col, message);
 
@@ -201,24 +183,24 @@ export async function handleStanceCommand(db, username, row, col, message) {
 //     ordered table at its original position rather than as a special case.
 const COMMAND_REGISTRY = [
   { prefix: '/stance', staminaCost: 1, perform: ({ db, username, row, col, message }) => handleStanceCommand(db, username, row, col, message) },
-  { prefix: '/regrow', staminaCost: 20, validate: ({ db, username, row, col, message }) => validateRegrowCommand(db, username, row, col, message), perform: ({ db, username, row, col, message }) => handleRegrowCommand(db, username, row, col, message) },
+  { prefix: '/regrow', syncBody: true, staminaCost: 20, validate: ({ db, username, row, col, message }) => validateRegrowCommand(db, username, row, col, message), perform: ({ db, username, row, col, message }) => handleRegrowCommand(db, username, row, col, message) },
   { prefix: '/roll', staminaCost: 1, validate: ({ db, username, row, col, message }) => validateRollCommand(db, username, row, col, message), perform: ({ db, username, row, col, message }) => handleRollCommand(db, username, row, col, message) },
-  { prefix: '/equip', staminaCost: 1, perform: ({ db, username, row, col, message }) => handleEquipCommand(db, username, row, col, message) },
-  { prefix: '/unequip', staminaCost: 1, perform: ({ db, username, row, col, message }) => handleUnequipCommand(db, username, row, col, message) },
-  { prefix: '/take', staminaCost: 1, perform: ({ db, username, row, col, message }) => handleTakeCommand(db, username, row, col, message) },
-  { prefix: '/drop', staminaCost: 1, perform: ({ db, username, row, col, message }) => handleDropCommand(db, username, row, col, message) },
-  { prefix: '/give', staminaCost: 1, perform: ({ db, username, row, col, message }) => handleGiveCommand(db, username, row, col, message) },
-  { prefix: '/use', staminaCost: 1, perform: ({ db, username, row, col, message }) => handleUseCommand(db, username, row, col, message) },
-  { prefix: '/cook', staminaCost: 1, perform: ({ db, username, row, col, message }) => handleCookCommand(db, username, row, col, message) },
-  { prefix: '/brew', staminaCost: 1, perform: ({ db, username, row, col, message }) => handleBrewCommand(db, username, row, col, message) },
-  { prefix: '/forge', staminaCost: 1, perform: ({ db, username, row, col, message }) => handleForgeCommand(db, username, row, col, message) },
-  { prefix: '/eat', staminaCost: 1, perform: ({ db, username, row, col, message }) => handleEatCommand(db, username, row, col, message) },
+  { prefix: '/equip', syncBody: true, staminaCost: 1, perform: ({ db, username, row, col, message }) => handleEquipCommand(db, username, row, col, message) },
+  { prefix: '/unequip', syncBody: true, staminaCost: 1, perform: ({ db, username, row, col, message }) => handleUnequipCommand(db, username, row, col, message) },
+  { prefix: '/take', syncBody: true, staminaCost: 1, perform: ({ db, username, row, col, message }) => handleTakeCommand(db, username, row, col, message) },
+  { prefix: '/drop', syncBody: true, staminaCost: 1, perform: ({ db, username, row, col, message }) => handleDropCommand(db, username, row, col, message) },
+  { prefix: '/give', syncBody: true, staminaCost: 1, perform: ({ db, username, row, col, message }) => handleGiveCommand(db, username, row, col, message) },
+  { prefix: '/use', syncBody: true, staminaCost: 1, perform: ({ db, username, row, col, message }) => handleUseCommand(db, username, row, col, message) },
+  { prefix: '/cook', syncBody: true, staminaCost: 1, perform: ({ db, username, row, col, message }) => handleCookCommand(db, username, row, col, message) },
+  { prefix: '/brew', syncBody: true, staminaCost: 1, perform: ({ db, username, row, col, message }) => handleBrewCommand(db, username, row, col, message) },
+  { prefix: '/forge', syncBody: true, staminaCost: 1, perform: ({ db, username, row, col, message }) => handleForgeCommand(db, username, row, col, message) },
+  { prefix: '/eat', syncBody: true, staminaCost: 1, perform: ({ db, username, row, col, message }) => handleEatCommand(db, username, row, col, message) },
   // handleCastAction routes through handleSkillAction, which owns the
   // runPlayerAction (stamina/tick), so it isn't wrapped again here.
   { prefix: '/cast', raw: true, dispatch: ({ db, username, row, col, message }) => handleCastAction(db, username, row, col, message) },
-  { prefix: '/unsocket', staminaCost: 1, perform: ({ db, username, message }) => handleUnsocketCommand(db, username, message) },
-  { prefix: '/socket', staminaCost: 1, perform: ({ db, username, message }) => handleSocketCommand(db, username, message) },
-  { prefix: '/buy', staminaCost: 1, validate: ({ db, username, row, col, message }) => validateBuyCommand(db, username, row, col, message), perform: ({ db, username, row, col, message }) => handleBuyCommand(db, username, row, col, message) }
+  { prefix: '/unsocket', syncBody: true, staminaCost: 1, perform: ({ db, username, message }) => handleUnsocketCommand(db, username, message) },
+  { prefix: '/socket', syncBody: true, staminaCost: 1, perform: ({ db, username, message }) => handleSocketCommand(db, username, message) },
+  { prefix: '/buy', syncBody: true, staminaCost: 1, validate: ({ db, username, row, col, message }) => validateBuyCommand(db, username, row, col, message), perform: ({ db, username, row, col, message }) => handleBuyCommand(db, username, row, col, message) }
 ];
 
 export async function handleChatAction(db, username, row, col, message) {
@@ -240,7 +222,15 @@ export async function handleChatAction(db, username, row, col, message) {
       username,
       staminaCost: command.staminaCost,
       ...(command.validate ? { validate: async () => command.validate(ctx) } : {}),
-      perform: async () => command.perform(ctx),
+      perform: async () => {
+        const result = await command.perform(ctx);
+        // engine-overhaul Phase B: item/body commands dual-write the paperdoll
+        // document after the row mutation (advisory — never throws).
+        if (command.syncBody) {
+          await syncBodyDoc(db, username, command.prefix.slice(1));
+        }
+        return result;
+      },
       advanceTick: () => advanceTickOnly(db)
     });
   }

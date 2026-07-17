@@ -7,6 +7,9 @@
 
 import {
   ActionError,
+  CORPSE_CULL_TICKS,
+  CORPSE_FRESH_TICKS,
+  CORPSE_ROTTEN_TICKS,
   MODIFIER_KEYS,
   assertAction,
   commandRest,
@@ -23,6 +26,7 @@ import {
 import {
   changes,
   dbAll,
+  dbBatch,
   dbFirst,
   dbRun,
   lastInsertId
@@ -38,6 +42,7 @@ import {
 } from './body.mjs';
 import { insertSystemMessage } from './messages.mjs';
 import { logEvent } from '../observability.mjs';
+import { syncBodyDoc } from './bodyDoc.mjs';
 import { getCurrentTickValue } from './clock.mjs';
 import { getUser } from './users.mjs';
 import { roomHasEffect } from './ecology.mjs';
@@ -457,6 +462,9 @@ export async function giveItem(db, fromUsername, itemName, toUsername, row, col)
     );
   }
 
+  // engine-overhaul Phase B: the RECEIVER's document changed too (the giver's
+  // syncs at the command dispatch).
+  await syncBodyDoc(db, toUsername, 'give-received');
   return { id: item.id, name: item.name };
 }
 
@@ -1010,4 +1018,138 @@ export async function handleBuyCommand(db, username, row, col, message) {
   const rest = commandRest(message, '/buy').trim();
   assertAction(rest, 'Usage: /buy <item name>');
   return buyShopItem(db, username, row, col, rest);
+}
+
+// ---------------------------------------------------------------------------
+// adv engine-overhaul Phase A: the item-table chokepoints. Every module that
+// used to touch `items` with raw SQL (resurrection, death, sweeps, combat,
+// progression) now calls these — sealing the seam so the paperdoll-document
+// representation (Phase B+) has exactly one place to hook.
+
+// The resurrection anchor. While a player_corpse row with corpseOf=username
+// exists anywhere, that player can be revived; delete it and the tether snaps.
+export async function findCorpseAnchor(db, username) {
+  return dbFirst(db, 'SELECT id, roomRow, roomCol FROM items WHERE corpseOf = ? LIMIT 1', [username]);
+}
+
+export async function findCorpseAnchorInRoom(db, username, row, col) {
+  return dbFirst(
+    db,
+    'SELECT id FROM items WHERE corpseOf = ? AND roomRow = ? AND roomCol = ?',
+    [username, row, col]
+  );
+}
+
+export async function deleteCorpseAnchor(db, username) {
+  await dbRun(db, 'DELETE FROM items WHERE corpseOf = ?', [username]);
+}
+
+// The corpse row a true death leaves behind (plan 022c). Decay renames it
+// cosmetically but NEVER deletes it or clears corpseOf.
+// Phase D: the corpse may EMBED the player's final paperdoll document (their
+// body exactly as it was at death — parts, gear, sockets) in its modifiers
+// JSON under `bodyDoc`. parseItemModifiers reads only known stat keys, so the
+// embedded doc is invisible to every existing consumer; resurrection can read
+// it back for a structural restore.
+export async function createCorpseItem(db, { username, row, col, decayTick, bodyDoc = null }) {
+  const modifiers = bodyDoc ? JSON.stringify({ bodyDoc }) : '{}';
+  await dbRun(
+    db,
+    `INSERT INTO items (templateId, name, slotType, rarity, modifiers, roomRow, roomCol, corpseOf, decayTick)
+     VALUES ('player_corpse', ?, 'corpse', 'common', ?, ?, ?, ?, ?)`,
+    [`${username}'s Corpse`, modifiers, row, col, username, decayTick]
+  );
+}
+
+// Narrow equipped-item refs (id + templateId) — the shape combat's element/
+// granted-ability paths and progression's ability scan read.
+export async function getEquippedItemRefs(db, username) {
+  return dbAll(db, 'SELECT id, templateId FROM items WHERE ownerUsername = ? AND equippedPartId IS NOT NULL', [username]);
+}
+
+// Same, filtered to gear worn on one named part (null partLabel = all parts) —
+// combat's per-part elemental affinity read.
+export async function getEquippedItemRefsForPart(db, username, partLabel) {
+  return dbAll(
+    db,
+    `SELECT i.id, i.templateId FROM items i
+     LEFT JOIN bodyParts bp ON bp.id = i.equippedPartId
+     WHERE i.ownerUsername = ? AND i.equippedPartId IS NOT NULL
+       AND (? IS NULL OR bp.label = ?)`,
+    [username, partLabel || null, partLabel || null]
+  );
+}
+
+// The materia-AP accrual as a STATEMENT BUILDER, not a call: progression's
+// awardExperience composes it into its one-round-trip dbBatch alongside the
+// XP bump, so re-homing the SQL must not add a round trip.
+export function materiaApAccrualStatement(username) {
+  return [
+    `UPDATE items SET ap = ap + 1
+      WHERE socketedInId IN (SELECT id FROM items WHERE ownerUsername = ? AND equippedPartId IS NOT NULL)
+        AND EXISTS (SELECT 1 FROM users WHERE username = ? AND isNpc = 0)`,
+    [username, username]
+  ];
+}
+
+//
+//   MONSTER remains (monster_remains → rotten_remains → bones): rewritten in place
+//   (templateId + name) at each stage, then CULLED (DELETE) at the bones-age cap so
+//   floors don't fill with bones. The rotten stage stays edible — a raw /eat poisons.
+//
+//   PLAYER corpses (player_corpse): COSMETIC ONLY (owner decision). Renamed to
+//   "<player>'s Skeletal Remains" once aged, but NEVER deleted and corpseOf is ALWAYS
+//   kept — the resurrection anchor must persist indefinitely. Decay must NOT
+//   permadeath; only a deliberate /eat or destroy (unchanged) severs the tether.
+export async function processCorpseDecay(db, tickValue = null) {
+  const tick = tickValue === null ? await getCurrentTickValue(db) : tickValue;
+  const decaying = await dbAll(
+    db,
+    `SELECT id, templateId, name, corpseOf, decayTick
+     FROM items
+     WHERE decayTick IS NOT NULL
+       AND templateId IN ('monster_remains', 'rotten_remains', 'bones', 'player_corpse')`
+  );
+
+  // Collect every stage transition, then land them in one batched round trip
+  // instead of one await per aging item.
+  const writes = [];
+  for (const item of decaying) {
+    const age = tick - item.decayTick;
+    if (age < CORPSE_FRESH_TICKS) {
+      continue; // still fresh — nothing to do
+    }
+
+    if (item.templateId === 'player_corpse') {
+      // Cosmetic-only: once aged, rename to skeletal remains. NEVER delete; NEVER
+      // touch corpseOf or templateId — the resurrection anchor is sacrosanct. Only
+      // rename once (idempotent) so we don't rewrite every pulse.
+      if (item.corpseOf) {
+        const skeletalName = `${item.corpseOf}'s Skeletal Remains`;
+        if (item.name !== skeletalName) {
+          writes.push(['UPDATE items SET name = ? WHERE id = ?', [skeletalName, item.id]]);
+        }
+      }
+      continue;
+    }
+
+    // Monster remains: cull at the bones-age cap, else advance the stage in place.
+    if (age >= CORPSE_CULL_TICKS) {
+      writes.push(['DELETE FROM items WHERE id = ?', [item.id]]);
+      continue;
+    }
+    if (age >= CORPSE_FRESH_TICKS + CORPSE_ROTTEN_TICKS) {
+      if (item.templateId !== 'bones') {
+        writes.push(["UPDATE items SET templateId = 'bones', name = 'Bones' WHERE id = ?", [item.id]]);
+      }
+      continue;
+    }
+    // FRESH..(FRESH+ROTTEN): rotten.
+    if (item.templateId !== 'rotten_remains') {
+      writes.push(["UPDATE items SET templateId = 'rotten_remains', name = 'Rotten Remains' WHERE id = ?", [item.id]]);
+    }
+  }
+  if (writes.length > 0) {
+    await dbBatch(db, writes);
+  }
 }

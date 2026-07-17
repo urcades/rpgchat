@@ -15,7 +15,8 @@ import {
 } from './shared.mjs';
 import { batchRows, changes, dbAll, dbBatch, dbFirst, dbRun } from '../db.mjs';
 import { logEvent } from '../observability.mjs';
-import { applyBodyDamage, applyBodyHeal, processStatusEffects } from './body.mjs';
+import { applyBodyDamage, applyBodyHeal, processStatusEffects, reconcileBodyHealthInvariant } from './body.mjs';
+import { reconcileBodyDocs } from './bodyDoc.mjs';
 import { getCurrentTickValue } from './clock.mjs';
 import { getActiveEffectsForRoom } from './ecology.mjs';
 import { descendTowardDeath, processIncapacitationBleed } from './death.mjs';
@@ -54,33 +55,9 @@ export async function cleanupOldWorldDayData(db, worldDay = getWorldDay()) {
   await dbRun(db, 'DELETE FROM sessions WHERE expiresAt <= CURRENT_TIMESTAMP');
   await dbRun(db, "DELETE FROM messages WHERE timestamp < datetime('now', '-7 days')");
   await reconcileBodyHealthInvariant(db);
+  await reconcileBodyDocs(db);
 }
 
-// Self-healing reconcile: for any live non-NPC user with body rows where
-// users.health != Σ bodyParts.hp, set users.health to the sum. The invariant
-// is the contract; this only catches drift, never masks a bypassed chokepoint.
-async function reconcileBodyHealthInvariant(db) {
-  const drifted = await dbAll(
-    db,
-    `SELECT u.username AS username, u.health AS health, SUM(bp.hp) AS bodySum
-     FROM users u
-     JOIN bodyParts bp ON bp.username = u.username
-     WHERE u.isNpc = 0
-       AND u.username != 'System'
-     GROUP BY u.username
-     HAVING u.health != SUM(bp.hp)`
-  );
-  for (const row of drifted) {
-    const bodySum = Math.max(0, Math.floor(row.bodySum || 0));
-    await dbRun(db, 'UPDATE users SET health = ? WHERE username = ?', [bodySum, row.username]);
-    logEvent({
-      event: 'body.reconcile',
-      username: row.username,
-      previousHealth: row.health,
-      reconciledHealth: bodySum
-    });
-  }
-}
 
 async function processUserEffect(db, presence, effect, currentTick, worldDay) {
   if (!PASSIVE_EFFECT_TYPES.has(effect.type)) {
@@ -302,67 +279,10 @@ export async function resolveExpiredGamblingRounds(db, currentTick) {
 
 // Plan 022 (tail): age corpses and remains by their decayTick each world pulse.
 // Two populations share the decayTick clock but decay VERY differently:
-//
-//   MONSTER remains (monster_remains → rotten_remains → bones): rewritten in place
-//   (templateId + name) at each stage, then CULLED (DELETE) at the bones-age cap so
-//   floors don't fill with bones. The rotten stage stays edible — a raw /eat poisons.
-//
-//   PLAYER corpses (player_corpse): COSMETIC ONLY (owner decision). Renamed to
-//   "<player>'s Skeletal Remains" once aged, but NEVER deleted and corpseOf is ALWAYS
-//   kept — the resurrection anchor must persist indefinitely. Decay must NOT
-//   permadeath; only a deliberate /eat or destroy (unchanged) severs the tether.
-export async function processCorpseDecay(db, tickValue = null) {
-  const tick = tickValue === null ? await getCurrentTickValue(db) : tickValue;
-  const decaying = await dbAll(
-    db,
-    `SELECT id, templateId, name, corpseOf, decayTick
-     FROM items
-     WHERE decayTick IS NOT NULL
-       AND templateId IN ('monster_remains', 'rotten_remains', 'bones', 'player_corpse')`
-  );
-
-  // Collect every stage transition, then land them in one batched round trip
-  // instead of one await per aging item.
-  const writes = [];
-  for (const item of decaying) {
-    const age = tick - item.decayTick;
-    if (age < CORPSE_FRESH_TICKS) {
-      continue; // still fresh — nothing to do
-    }
-
-    if (item.templateId === 'player_corpse') {
-      // Cosmetic-only: once aged, rename to skeletal remains. NEVER delete; NEVER
-      // touch corpseOf or templateId — the resurrection anchor is sacrosanct. Only
-      // rename once (idempotent) so we don't rewrite every pulse.
-      if (item.corpseOf) {
-        const skeletalName = `${item.corpseOf}'s Skeletal Remains`;
-        if (item.name !== skeletalName) {
-          writes.push(['UPDATE items SET name = ? WHERE id = ?', [skeletalName, item.id]]);
-        }
-      }
-      continue;
-    }
-
-    // Monster remains: cull at the bones-age cap, else advance the stage in place.
-    if (age >= CORPSE_CULL_TICKS) {
-      writes.push(['DELETE FROM items WHERE id = ?', [item.id]]);
-      continue;
-    }
-    if (age >= CORPSE_FRESH_TICKS + CORPSE_ROTTEN_TICKS) {
-      if (item.templateId !== 'bones') {
-        writes.push(["UPDATE items SET templateId = 'bones', name = 'Bones' WHERE id = ?", [item.id]]);
-      }
-      continue;
-    }
-    // FRESH..(FRESH+ROTTEN): rotten.
-    if (item.templateId !== 'rotten_remains') {
-      writes.push(["UPDATE items SET templateId = 'rotten_remains', name = 'Rotten Remains' WHERE id = ?", [item.id]]);
-    }
-  }
-  if (writes.length > 0) {
-    await dbBatch(db, writes);
-  }
-}
+// adv engine-overhaul Phase A: processCorpseDecay moved to inventory.mjs (it is
+// pure items-table work); re-exported here so the world barrel + callers are unchanged.
+import { processCorpseDecay } from './inventory.mjs';
+export { processCorpseDecay };
 
 // adv-013 (the COST split): advancing the tick and running the world sweeps are now
 // two separable steps. The increment is the cheap, always-synchronous part (it carries

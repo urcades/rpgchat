@@ -24,7 +24,7 @@ import {
 } from './shared.mjs';
 import { batchRows, changes, dbAll, dbBatch, dbFirst, dbRun } from '../db.mjs';
 import { applyBodyDamage } from './body.mjs';
-import { getSocketedMateriaEffects } from './inventory.mjs';
+import { getEquippedItemRefs, getSocketedMateriaEffects, materiaApAccrualStatement } from './inventory.mjs';
 import { insertSystemMessage } from './messages.mjs';
 import { getCurrentTickValue } from './clock.mjs';
 import { getUser, selectUserColumns } from './users.mjs';
@@ -372,9 +372,7 @@ export async function awardExperience(db, username, amount) {
   // the same cases the old pre-read short-circuited.
   const [award, , freshResult] = await dbBatch(db, [
     ['UPDATE users SET experience = experience + ? WHERE username = ? AND isNpc = 0', [amount, username]],
-    [`UPDATE items SET ap = ap + 1
-      WHERE socketedInId IN (SELECT id FROM items WHERE ownerUsername = ? AND equippedPartId IS NOT NULL)
-        AND EXISTS (SELECT 1 FROM users WHERE username = ? AND isNpc = 0)`, [username, username]],
+    materiaApAccrualStatement(username),
     ['SELECT experience, level FROM users WHERE username = ?', [username]]
   ]);
   if (changes(award) === 0) {
@@ -425,11 +423,7 @@ export async function awardExperience(db, username, amount) {
 // grantsAbility), deduped to ids that resolve to a registered ability. Unioned
 // into the usable set and the hotbar so gear can hand a class a verb.
 export async function getGrantedAbilityIds(db, username) {
-  const rows = await dbAll(
-    db,
-    'SELECT id, templateId FROM items WHERE ownerUsername = ? AND equippedPartId IS NOT NULL',
-    [username]
-  );
+  const rows = await getEquippedItemRefs(db, username);
   const granted = [];
   const equippedIds = [];
   for (const row of rows) {

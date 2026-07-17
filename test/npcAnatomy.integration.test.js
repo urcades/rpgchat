@@ -138,8 +138,9 @@ test('Plan 021 (1b): handleAttack honors a called shot vs a BODIED NPC end-to-en
     assert.match(out, /hunter .*Frost Wyrm.*\(\d+\)/, 'the wyrm was struck');
     const wing = (await game.getBodyParts(db, 'wyrm')).find(p => p.label === 'left wing');
     assert.equal(wing.severed, 1, 'the called shot severed the named wing on the bodied NPC');
-    const msg = await db.prepare("SELECT message FROM messages WHERE message = ?").bind("Frost Wyrm's left wing is destroyed.").first();
-    assert.ok(msg, 'the sever message reads by the NPC display name');
+    // Unarmed attacks carry weaponClass 'fist' → the blunt sever narration.
+    const msg = await db.prepare("SELECT message FROM messages WHERE message = ?").bind("Frost Wyrm's left wing is crushed and torn off at the wing root!").first();
+    assert.ok(msg, 'the sever message reads by the NPC display name with blunt-force narration');
     await assertNpcInvariant(db, 'wyrm', 'after a called-shot sever via handleAttack');
   } finally {
     await db.close();
@@ -644,8 +645,8 @@ test('Plan 024-fix (presence): getRoomEcology presence carries plan-derived aimP
     // A player/humanoid exposes the humanoid labels.
     assert.deepEqual(
       byName['aimer'].aimParts,
-      ['head', 'torso', 'neck', 'left arm', 'right arm', 'left leg', 'right leg'],
-      'a player lists the humanoid labels'
+      ['head', 'torso', 'neck', 'left arm', 'left hand', 'right arm', 'right hand', 'left leg', 'left foot', 'right leg', 'right foot'],
+      'a player lists the 11-part humanoid labels'
     );
 
     // A bodyless NPC exposes NO aimable parts.

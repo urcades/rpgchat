@@ -47,7 +47,7 @@ test('distributeAcrossPlan preserves template fields and largest-remainder order
   const torso = parts.find(part => part.partType === 'torso');
   const head = parts.find(part => part.partType === 'head');
   assert.equal(torso.amount, 9); // 0.30 * 30
-  assert.equal(head.amount, 4); // 0.15 * 30 = 4.5 -> floors to 4, gains remainder
+  assert.equal(head.amount, 5); // 0.15 * 30 = 4.5 -> floors to 4, remainder .5 wins a leftover unit -> 5
   assert.equal(torso.label, 'torso');
   assert.equal(torso.vital, true);
 });
@@ -427,10 +427,12 @@ test('adv-018: applyBodyDamage still SEVERS a non-vital part driven to 0 (delta 
   const db = await createMigratedDb();
   const game = await import('../worker/game.mjs');
   try {
-    // health 100 → a humanoid arm pool is 0.10 * 100 = 10. A 10-damage called shot to the
-    // left arm drives it 10 -> 0 with no spill, severing it; the player survives (arm is non-vital).
+    // health 100 → the 11-part humanoid arm pool is 0.08 * 100 = 8. A full-pool called
+    // shot to the left arm drives it -> 0 with no spill, severing it; the distal cascade
+    // takes the left hand with it. The player survives (arm and hand are non-vital).
     await seedBodiedPlayer(db, 'severee', { health: 100, maxHealth: 100 });
     const armBefore = (await game.getBodyParts(db, 'severee')).find(p => p.label === 'left arm');
+    const handBefore = (await game.getBodyParts(db, 'severee')).find(p => p.label === 'left hand');
     const maxBefore = (await db.prepare("SELECT maxHealth FROM users WHERE username = 'severee'").first()).maxHealth;
     const target = await db.prepare('SELECT * FROM users WHERE username = ?').bind('severee').first();
     const result = await game.applyBodyDamage(db, target, armBefore.maxHp, {
@@ -438,12 +440,14 @@ test('adv-018: applyBodyDamage still SEVERS a non-vital part driven to 0 (delta 
     });
 
     assert.equal(result.died, false, 'severing a non-vital arm does not kill');
-    assert.deepEqual(result.severedLabels, ['left arm'], 'the arm is reported severed');
+    assert.deepEqual(result.severedLabels, ['left arm', 'left hand'], 'the arm is severed and the hand cascades with it');
     const armAfter = (await game.getBodyParts(db, 'severee')).find(p => p.label === 'left arm');
     assert.equal(armAfter.hp, 0, 'the delta write floored the part hp at 0');
     assert.equal(armAfter.severed, 1, 'the part is severed at 0 — sever logic intact under delta writes');
+    const handAfter = (await game.getBodyParts(db, 'severee')).find(p => p.label === 'left hand');
+    assert.equal(handAfter.severed, 1, 'the distal hand is severed by the cascade');
     const maxAfter = (await db.prepare("SELECT maxHealth FROM users WHERE username = 'severee'").first()).maxHealth;
-    assert.equal(maxBefore - maxAfter, armBefore.maxHp, 'maxHealth dropped by exactly the severed arm pool');
+    assert.equal(maxBefore - maxAfter, armBefore.maxHp + handBefore.maxHp, 'maxHealth dropped by the severed arm + cascaded hand pools');
     await assertBodyInvariant(db, 'severee', 'after a sever via delta write');
   } finally {
     await db.close();

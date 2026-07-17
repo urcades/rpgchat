@@ -5,9 +5,14 @@
 // through ESM live bindings (every cross-seam reference is call-time, never
 // dereferenced at module load).
 
+// A vital distal part (the head) only cascades off under a blow this heavy.
+const DECAP_BLOW_MIN = 5;
+
 import {
   HARMFUL_EFFECTS,
   HUMANOID_PLAN,
+  distalPartLabels,
+  severJointFor,
   MODIFIER_KEYS,
   bodyPenaltyModifiers,
   buildAffixRoll,
@@ -18,10 +23,12 @@ import {
   pickTargetPart
 } from './shared.mjs';
 import { dbAll, dbBatch, dbFirst, dbRun } from '../db.mjs';
+import { logEvent } from '../observability.mjs';
 import { descendTowardDeath, reviveFromIncapacitation } from './death.mjs';
 import { getEquippedModifiers } from './inventory.mjs';
 import { insertSystemMessage } from './messages.mjs';
 import { getProgressionModifiers } from './progression.mjs';
+import { deleteBodyDoc, syncBodyDoc } from './bodyDoc.mjs';
 import { getCurrentTickValue } from './clock.mjs';
 import { getUser, selectUserColumns } from './users.mjs';
 
@@ -125,7 +132,10 @@ export async function ensureBody(db, user) {
   // column, so this is a no-op for them.
   await applyAffixBodyEffects(db, user);
 
-  return getBodyParts(db, user.username);
+  const created = await getBodyParts(db, user.username);
+  // engine-overhaul Phase B: a freshly-materialized body gets its document.
+  await syncBodyDoc(db, user.username, 'ensure-body');
+  return created;
 }
 
 // Parse a bodied NPC's stored `affixes` JSON and fold the spawn-time body effects in:
@@ -402,6 +412,42 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
     }
   }
 
+  // Distal sever CASCADE (engine-overhaul, after paperdoll-viewer's Combatant):
+  // everything distal to a severed segment goes with it — cut the arm and the
+  // hand drops; sever the NECK and the head (a vital) comes away: decapitation,
+  // and death. Cascaded parts shed their remaining hp (mirrored into
+  // users.health via totalDealt) and their maxHp leaves the pool like any sever.
+  const plan = bodyPlanFor(user) || [];
+  let decapitated = false;
+  let hangingVital = null;
+  const cascadedLabels = [];
+  for (const severed of [...severedParts]) {
+    for (const distalLabel of distalPartLabels(plan, severed.label)) {
+      const distal = working.find(p => p.label === distalLabel);
+      if (!distal || distal.severed) {
+        continue;
+      }
+      // A VITAL distal (the head, past the neck) only comes away under a HEAVY
+      // blow — otherwise a 1-hp neck pool would make any neck graze an instant
+      // kill. A light neck sever leaves the head hanging by a thread instead.
+      if (distal.vital && amount < DECAP_BLOW_MIN) {
+        hangingVital = distal.label;
+        continue;
+      }
+      totalDealt += Math.max(0, distal.hp);
+      distal.hp = 0;
+      distal.severed = 1;
+      if (distal.vital) {
+        vitalDestroyed = true;
+        decapitated = true;
+      }
+      severedLabels.push(distal.label);
+      severedParts.push({ id: distal.id, label: distal.label, cascadedFrom: severed.label });
+      cascadedLabels.push(distal.label);
+      maxHealthReduction += distal.maxHp;
+    }
+  }
+
   // Persist part rows. adv-018: the hp write is RELATIVE — `hp = MAX(hp - dealt, 0)`
   // where `dealt` is the damage this part actually absorbed (its pre-damage hp minus
   // its post-damage hp, both already floored at 0 in JS). A concurrent heal that
@@ -447,8 +493,22 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
   // Loud states: condition-transition messages (non-severance), then severance.
   await emitConditionTransitions(db, user.username, partsBefore, working, row, col, displayLabel);
   if (row !== undefined && row !== null && col !== undefined && col !== null) {
+    // Edged weapons SEVER cleanly at the joint; blunt force crushes and tears.
+    const edged = options.weaponClass === 'blade' || options.weaponClass === 'pierce';
+    const partTypeByLabel = new Map(working.map(p => [p.label, p.partType]));
     for (const part of severedParts) {
-      await insertSystemMessage(db, row, col, `${displayLabel}'s ${part.label} is destroyed.`, 'combat');
+      const joint = severJointFor(partTypeByLabel.get(part.label));
+      let line;
+      if (part.cascadedFrom) {
+        line = `${displayLabel}'s ${part.label} goes with it, still attached at the ${joint}.`;
+      } else if (edged) {
+        line = `${displayLabel}'s ${part.label} is severed clean at the ${joint}!`;
+      } else if (options.weaponClass === 'blunt' || options.weaponClass === 'fist') {
+        line = `${displayLabel}'s ${part.label} is crushed and torn off at the ${joint}!`;
+      } else {
+        line = `${displayLabel}'s ${part.label} is destroyed.`;
+      }
+      await insertSystemMessage(db, row, col, line, 'combat');
       // Sever knock-off: whatever was equipped on this part clatters to the
       // floor for anyone to /take (plan 005). Fetch the name BEFORE the UPDATE.
       // (Creature parts carry slotType null and NPCs never wear gear, so this
@@ -473,6 +533,21 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
         );
       }
     }
+  }
+
+  if (row !== undefined && row !== null && col !== undefined && col !== null) {
+    if (decapitated) {
+      await insertSystemMessage(db, row, col, `${displayLabel} is DECAPITATED — the head comes away with the neck.`, 'death');
+    } else if (hangingVital) {
+      await insertSystemMessage(db, row, col, `${displayLabel}'s ${hangingVital} hangs by a thread of sinew.`, 'combat');
+    }
+  }
+
+  // engine-overhaul Phase B: a sever is a STRUCTURAL change (a part left the
+  // body, its gear hit the floor) — dual-write the paperdoll document. Plain
+  // hp damage never touches the doc.
+  if (severedParts.length > 0) {
+    await syncBodyDoc(db, user.username, 'sever');
   }
 
   const died = vitalDestroyed || healthAfter <= 0;
@@ -703,4 +778,68 @@ export async function processStatusEffects(db, currentTick) {
   }
 
   await dbRun(db, 'DELETE FROM statusEffects WHERE expiryTick <= ?', [currentTick]);
+}
+
+// ---------------------------------------------------------------------------
+// adv engine-overhaul Phase A: the body-row chokepoints. Every module that used
+// to write bodyParts with raw SQL now calls these — sealing the seam so the
+// paperdoll-document representation (Phase B+) has exactly one place to hook.
+
+// Dedicated regrow restorer — NOT applyBodyHeal (which skips severed parts).
+// Restores the part to its BASE (un-fortified) maxHp, hp 1, un-severs it, and
+// folds baseMaxHp back into users.maxHealth and 1 into users.health, keeping
+// the invariant `users.maxHealth == Σ non-severed maxHp` exact. The limb
+// regrows bare; re-equipping armor re-applies its bonus via plan 015.
+export async function restoreSeveredPart(db, username, part) {
+  const base = Math.max(0, Math.floor(part.baseMaxHp || 0));
+  await dbRun(
+    db,
+    'UPDATE bodyParts SET severed = 0, maxHp = ?, hp = 1 WHERE id = ?',
+    [base, part.id]
+  );
+  await dbRun(
+    db,
+    'UPDATE users SET maxHealth = maxHealth + ?, health = health + 1 WHERE username = ?',
+    [base, username]
+  );
+}
+
+// True death: the body rows are destroyed with the user (the corpse item is the
+// only remnant — created by the death seam via inventory's createCorpseItem).
+export async function deleteBodyRows(db, username) {
+  await dbRun(db, 'DELETE FROM bodyParts WHERE username = ?', [username]);
+  // engine-overhaul Phase B: the document dies with the rows (the corpse item
+  // remains the resurrection anchor; Phase D embeds the final doc in it).
+  await deleteBodyDoc(db, username);
+}
+
+// Incapacitation zeroes every part so users.health == Σ bodyParts.hp holds at 0.
+export async function zeroBodyParts(db, username) {
+  await dbRun(db, 'UPDATE bodyParts SET hp = 0 WHERE username = ?', [username]);
+}
+
+// Self-healing reconcile: for any live non-NPC user with body rows where
+// users.health != Σ bodyParts.hp, set users.health to the sum. The invariant
+// is the contract; this only catches drift, never masks a bypassed chokepoint.
+export async function reconcileBodyHealthInvariant(db) {
+  const drifted = await dbAll(
+    db,
+    `SELECT u.username AS username, u.health AS health, SUM(bp.hp) AS bodySum
+     FROM users u
+     JOIN bodyParts bp ON bp.username = u.username
+     WHERE u.isNpc = 0
+       AND u.username != 'System'
+     GROUP BY u.username
+     HAVING u.health != SUM(bp.hp)`
+  );
+  for (const row of drifted) {
+    const bodySum = Math.max(0, Math.floor(row.bodySum || 0));
+    await dbRun(db, 'UPDATE users SET health = ? WHERE username = ?', [bodySum, row.username]);
+    logEvent({
+      event: 'body.reconcile',
+      username: row.username,
+      previousHealth: row.health,
+      reconciledHealth: bodySum
+    });
+  }
 }

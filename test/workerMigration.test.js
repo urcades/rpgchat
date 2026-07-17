@@ -1439,9 +1439,10 @@ test('Body damage severs a non-vital part driven to zero without killing the vic
     await seedLiveUser(db, 'amputee', { health: 30, maxHealth: 30 });
     const victim = await db.prepare("SELECT * FROM users WHERE username = 'amputee'").first();
 
-    // maxHealth 30 -> left arm has maxHp 4 and occupies roll range [0.467, 0.600).
-    // random = 0.5 lands pickTargetPart on the left arm; 4 damage drives it 4->0
-    // with no spill, severing it.
+    // maxHealth 30, 11-part plan -> left arm has maxHp 3 and occupies roll range
+    // [0.500, 0.600). random = 0.5 lands pickTargetPart on the left arm; 4 damage
+    // drives it 3->0 (1 spills to the torso), severing it — and the distal cascade
+    // takes the left hand (maxHp 1) with it.
     const result = await applyBodyDamage(db, victim, 4, {
       cause: 'a test blade',
       row: 1,
@@ -1450,16 +1451,19 @@ test('Body damage severs a non-vital part driven to zero without killing the vic
     });
 
     assert.equal(result.died, false);
-    assert.deepEqual(result.severedLabels, ['left arm']);
+    assert.deepEqual(result.severedLabels, ['left arm', 'left hand']);
 
     const parts = await getBodyParts(db, 'amputee');
     const leftArm = parts.find(part => part.label === 'left arm');
     assert.equal(leftArm.severed, 1);
     assert.equal(leftArm.hp, 0);
+    const leftHand = parts.find(part => part.label === 'left hand');
+    assert.equal(leftHand.severed, 1, 'the distal hand cascades off with the arm');
+    assert.equal(leftHand.hp, 0);
 
     const after = await db.prepare("SELECT health, maxHealth FROM users WHERE username = 'amputee'").first();
-    assert.equal(after.maxHealth, 26); // 30 - left arm maxHp (4)
-    assert.equal(after.health, 26); // 30 - 4 dealt
+    assert.equal(after.maxHealth, 26); // 30 - arm maxHp (3) - cascaded hand maxHp (1)
+    assert.equal(after.health, 25); // 30 - 4 dealt - 1 hand hp shed by the cascade
 
     const messages = await db.prepare("SELECT message FROM messages WHERE username = 'System' ORDER BY id").all();
     assert.ok(messages.results.some(row => row.message === "amputee's left arm is destroyed."));
@@ -1539,8 +1543,9 @@ test('Attrition death: total health reaching zero kills even when no vital part 
 
     assert.equal(result.died, true);
     assert.equal(result.healthAfter, 0);
-    // The fatal blow severed the non-vital arm rather than destroying a vital part.
-    assert.deepEqual(result.severedLabels, ['left arm']);
+    // The fatal blow severed the non-vital arm rather than destroying a vital part;
+    // the already-empty left hand cascades off with it (distal sever cascade).
+    assert.deepEqual(result.severedLabels, ['left arm', 'left hand']);
   } finally {
     await db.close();
   }
@@ -1564,12 +1569,12 @@ test('Instantiation never kills or severs a badly hurt player', async () => {
     assert.ok(live);
 
     const parts = await db.prepare('SELECT severed FROM bodyParts WHERE username = ?').bind('frail').all();
-    assert.equal(parts.results.length, 7);
+    assert.equal(parts.results.length, 11);
     assert.ok(parts.results.every(part => part.severed === 0));
 
     // Body payload is qualitative only — no numeric HP leaks.
     assert.ok(Array.isArray(state.body));
-    assert.equal(state.body.length, 7);
+    assert.equal(state.body.length, 11);
     for (const part of state.body) {
       assert.equal(part.hp, undefined);
       assert.equal(part.maxHp, undefined);
@@ -1591,12 +1596,13 @@ test('Body heal restores the worst-ratio part first and emits a recovery message
     await seedLiveUser(db, 'mender', { health: 30, maxHealth: 30 });
     let victim = await db.prepare("SELECT * FROM users WHERE username = 'mender'").first();
 
-    // Hurt the left arm (range [0.467, 0.600)) down to a low ratio.
-    await applyBodyDamage(db, victim, 3, { cause: 'a scratch', row: 1, col: 1, random: () => 0.5 });
+    // Hurt the left arm (11-part plan: maxHp 3, range [0.500, 0.600)) down to a
+    // low ratio without severing it.
+    await applyBodyDamage(db, victim, 2, { cause: 'a scratch', row: 1, col: 1, random: () => 0.5 });
 
     const beforeHeal = await getBodyParts(db, 'mender');
     const armBefore = beforeHeal.find(part => part.label === 'left arm');
-    assert.equal(armBefore.hp, 1); // 4 -> 1 (worst ratio in the body now)
+    assert.equal(armBefore.hp, 1); // 3 -> 1 (worst ratio in the body now)
 
     victim = await db.prepare("SELECT * FROM users WHERE username = 'mender'").first();
     await applyBodyHeal(db, victim, 2, { row: 1, col: 1 });
@@ -1622,10 +1628,12 @@ test('Condition penalties bite: a mangled arm reduces attack damage by the stren
   try {
     // Novice strikers (no job strength bonus) at strength 41 so the -2 arm
     // penalty crosses a floor(strength/4) boundary and the damage visibly drops.
-    await seedLiveUser(db, 'healthy_hand', { job: 'Novice', health: 30, maxHealth: 30, speed: 20, strength: 41 });
+    // health 100 so the left arm pool (0.08 * 100 = 8) is big enough that a
+    // 6-damage prep blow leaves it MANGLED (2/8 = 0.25) rather than severed.
+    await seedLiveUser(db, 'healthy_hand', { job: 'Novice', health: 100, maxHealth: 100, speed: 20, strength: 41 });
     await seedLiveUser(db, 'dummy_a', { health: 90, maxHealth: 90, speed: 1 });
     // Identical striker whose left arm we mangle (strength -2).
-    await seedLiveUser(db, 'hurt_hand', { job: 'Novice', health: 30, maxHealth: 30, speed: 20, strength: 41 });
+    await seedLiveUser(db, 'hurt_hand', { job: 'Novice', health: 100, maxHealth: 100, speed: 20, strength: 41 });
     await seedLiveUser(db, 'dummy_b', { health: 90, maxHealth: 90, speed: 1 });
 
     const calm = findCalmRoom(getWorldDay());
@@ -1633,9 +1641,9 @@ test('Condition penalties bite: a mangled arm reduces attack damage by the stren
       await updatePresence(db, name, calm.row, calm.col);
     }
 
-    // Mangle hurt_hand's left arm (range [0.467,0.600)) to ratio <= 0.25.
+    // Mangle hurt_hand's left arm (range [0.490,0.570) at health 100) to ratio 0.25.
     const hurtUser = await db.prepare("SELECT * FROM users WHERE username = 'hurt_hand'").first();
-    await applyBodyDamage(db, hurtUser, 3, { cause: 'prep', random: () => 0.5 });
+    await applyBodyDamage(db, hurtUser, 6, { cause: 'prep', random: () => 0.5 });
     const mods = await getBodyConditionModifiers(db, 'hurt_hand');
     assert.equal(mods.strength, -2);
 
@@ -1644,13 +1652,15 @@ test('Condition penalties bite: a mangled arm reduces attack damage by the stren
     const dummyHealth = async name =>
       (await db.prepare('SELECT health FROM users WHERE username = ?').bind(name).first()).health;
 
+    // Pick draw 0.2 lands the blow on the torso (27 hp at health 90): big enough
+    // that neither blow severs anything, so no cascade skews the health delta.
     const healthyBefore = await dummyHealth('dummy_a');
-    await withMockedRandom([0.1, 0.99, 0.5, 0.99], () =>
+    await withMockedRandom([0.1, 0.99, 0.2, 0.99], () =>
       handleAttack(db, 'healthy_hand', '@dummy_a', calm.row, calm.col));
     const healthyDamage = healthyBefore - (await dummyHealth('dummy_a'));
 
     const hurtBefore = await dummyHealth('dummy_b');
-    await withMockedRandom([0.1, 0.99, 0.5, 0.99], () =>
+    await withMockedRandom([0.1, 0.99, 0.2, 0.99], () =>
       handleAttack(db, 'hurt_hand', '@dummy_b', calm.row, calm.col));
     const hurtDamage = hurtBefore - (await dummyHealth('dummy_b'));
 
@@ -1839,11 +1849,11 @@ test('Severed mount is never chosen: equip swaps the surviving arm instead', asy
     await handleChatAction(db, 'maimed', 1, 1, '/equip Held B'); // right arm
     await handleChatAction(db, 'maimed', 1, 1, '/unequip left arm'); // free the left arm
 
-    // Sever the left arm. left arm roll range [0.467,0.600); random 0.5 lands it,
-    // 4 damage drives it 4->0 and severs it (matches plan 004's sever test).
+    // Sever the left arm. left arm roll range [0.500,0.600); random 0.5 lands it,
+    // 4 damage drives it 3->0 and severs it; the left hand cascades off with it.
     const victim = await db.prepare("SELECT * FROM users WHERE username = 'maimed'").first();
     const sever = await applyBodyDamage(db, victim, 4, { cause: 'a blade', row: 1, col: 1, random: () => 0.5 });
-    assert.deepEqual(sever.severedLabels, ['left arm']);
+    assert.deepEqual(sever.severedLabels, ['left arm', 'left hand']);
 
     // With the left arm severed and the right occupied by Held B, equipping a
     // new hand item must SWAP the right arm, never land on the severed left.
@@ -1870,7 +1880,9 @@ test('Gear flows into effective stats and combat, stacking with wound penalties'
 
   try {
     // Novice (no job strength) at strength 41 so +8 gear crosses floor(/4) bands.
-    await seedLiveUser(db, 'geared', { job: 'Novice', health: 30, maxHealth: 30, speed: 20, strength: 41 });
+    // health 100 so the left arm pool (8) can be MANGLED (6 damage -> 2/8 = 0.25)
+    // later without severing it (a sever would knock the axe off).
+    await seedLiveUser(db, 'geared', { job: 'Novice', health: 100, maxHealth: 100, speed: 20, strength: 41 });
     await seedLiveUser(db, 'dummy_g', { health: 90, maxHealth: 90, speed: 1 });
     const calm = findCalmRoom(getWorldDay());
     await updatePresence(db, 'geared', calm.row, calm.col);
@@ -1891,11 +1903,12 @@ test('Gear flows into effective stats and combat, stacking with wound penalties'
 
     // Gear feeds combat damage: strength 49 -> 1 + floor(49/4) = 13.
     // RNG order per attack: speed hit (0.1), crit roll (0.99 no crit),
-    // pickTargetPart (0.5 = left arm), torso-spill buffer (0.99).
+    // pickTargetPart (0.2 = torso, 27 hp at health 90 so no sever/cascade
+    // contaminates the health delta), torso-spill buffer (0.99).
     const dummyHealth = async name =>
       (await db.prepare('SELECT health FROM users WHERE username = ?').bind(name).first()).health;
     const gearedBefore = await dummyHealth('dummy_g');
-    await withMockedRandom([0.1, 0.99, 0.5, 0.99], () =>
+    await withMockedRandom([0.1, 0.99, 0.2, 0.99], () =>
       handleAttack(db, 'geared', '@dummy_g', calm.row, calm.col));
     const gearedDamage = gearedBefore - (await dummyHealth('dummy_g'));
     assert.equal(gearedDamage, 13);
@@ -1904,7 +1917,7 @@ test('Gear flows into effective stats and combat, stacking with wound penalties'
     // axe is on the left arm; mangling it leaves the item equipped (only sever
     // knocks gear off) so +8 gear and -2 wound stack to a net +6 over base 41.
     const self = await db.prepare("SELECT * FROM users WHERE username = 'geared'").first();
-    await applyBodyDamage(db, self, 3, { cause: 'prep', row: calm.row, col: calm.col, random: () => 0.5 });
+    await applyBodyDamage(db, self, 6, { cause: 'prep', row: calm.row, col: calm.col, random: () => 0.5 });
     const stacked = await getUserState(db, 'geared');
     assert.equal(stacked.bonusModifiers.strength, 6); // +8 gear - 2 wound
     assert.equal(stacked.effectiveStats.strength, 47); // 41 + 6
@@ -1924,10 +1937,11 @@ test('Sever knock-off drops the equipped item to the room floor', async () => {
     await insertCarriedItem(db, 'dropper', { name: 'Lost Dagger', slotType: 'hand' });
     await handleChatAction(db, 'dropper', 4, 5, '/equip Lost Dagger'); // left arm
 
-    // Sever the left arm (range [0.467,0.600); random 0.5; 4 damage 4->0).
+    // Sever the left arm (range [0.500,0.600); random 0.5; 4 damage 3->0, 1 spills
+    // to the torso; the left hand cascades off with the arm).
     const victim = await db.prepare("SELECT * FROM users WHERE username = 'dropper'").first();
     const sever = await applyBodyDamage(db, victim, 4, { cause: 'a cleaver', row: 4, col: 5, random: () => 0.5 });
-    assert.deepEqual(sever.severedLabels, ['left arm']);
+    assert.deepEqual(sever.severedLabels, ['left arm', 'left hand']);
 
     // The item is on the floor: owner NULL, part NULL, room set.
     const floored = await db.prepare("SELECT ownerUsername, equippedPartId, roomRow, roomCol FROM items WHERE name = 'Lost Dagger'").first();
@@ -2150,27 +2164,27 @@ test('Plan 015: severing an armored limb takes the fortified maxHp with it and d
 
     await insertCarriedItem(db, 'gallant', { name: 'Vambrace', slotType: 'hand', modifiers: { maxHealth: 9 } });
     await equipItem(db, await getUser(db, 'gallant'), 'Vambrace', 4, 5); // left arm
-    // Fill so the arm is at its fortified cap (base 4 + 9 = 13).
+    // Fill so the arm is at its fortified cap (11-part base 3 + 9 = 12).
     await applyBodyHeal(db, await getUser(db, 'gallant'), 9, {});
     const armFort = await partRow(db, 'gallant', 'left arm');
-    assert.equal(armFort.maxHp, 13, 'arm fortified to base 4 + gear 9');
-    assert.equal(armFort.hp, 13);
+    assert.equal(armFort.maxHp, 12, 'arm fortified to base 3 + gear 9');
+    assert.equal(armFort.hp, 12);
     await assertHpInvariant(db, 'gallant');
 
     const maxBeforeSever = (await db.prepare("SELECT maxHealth FROM users WHERE username = 'gallant'").first()).maxHealth;
-    // Sever the left arm. With the arm fortified to 13 the weight ranges shift,
-    // but cumulative torso[0,9) head[9,13) neck[13,14) left-arm[14,27) of total
-    // 39 still puts random 0.5 (roll 19.5) on the left arm. 13 damage drives it
-    // 13->0 and severs it.
-    const sever = await applyBodyDamage(db, await getUser(db, 'gallant'), 13, {
+    // Sever the left arm. With the arm fortified to 12 the weights become
+    // torso[0,9) head[9,14) neck[14,15) left-arm[15,27) of total 39: random 0.5
+    // (roll 19.5) lands the left arm. 12 damage drives it 12->0 and severs it;
+    // the left hand (maxHp 1) cascades off with it.
+    const sever = await applyBodyDamage(db, await getUser(db, 'gallant'), 12, {
       cause: 'a greataxe', row: 4, col: 5, random: () => 0.5
     });
-    assert.deepEqual(sever.severedLabels, ['left arm']);
+    assert.deepEqual(sever.severedLabels, ['left arm', 'left hand']);
 
     const armSevered = await partRow(db, 'gallant', 'left arm');
     assert.equal(armSevered.severed, 1);
     const maxAfter = (await db.prepare("SELECT maxHealth FROM users WHERE username = 'gallant'").first()).maxHealth;
-    assert.equal(maxAfter, maxBeforeSever - 13, 'maxHealth dropped by the FULL fortified maxHp (base + gear)');
+    assert.equal(maxAfter, maxBeforeSever - 13, 'maxHealth dropped by the FULL fortified maxHp (3 + 9) plus the cascaded hand pool (1)');
 
     // The armor clattered to the floor: no owner, no part, room set.
     const floored = await db.prepare("SELECT ownerUsername, equippedPartId, roomRow, roomCol FROM items WHERE name = 'Vambrace'").first();
@@ -2572,15 +2586,15 @@ test('Plan 006: a called shot lands on exactly the named part', async () => {
     await updatePresence(db, 'placer', calm.row, calm.col);
     await updatePresence(db, 'limb', calm.row, calm.col);
 
-    // base damage = 1 + floor(1/4) = 1; left arm has hp 4 so no sever/spill.
+    // base damage = 1 + floor(1/4) = 1; left arm has hp 3 so no sever/spill.
     await withMockedRandom([0.1, 0.99, 0.95], () =>
       handleAttack(db, 'placer', 'I cut @limb left_arm', calm.row, calm.col));
 
     const parts = await getBodyParts(db, 'limb');
     const leftArm = parts.find(p => p.label === 'left arm');
     const rightLeg = parts.find(p => p.label === 'right leg');
-    assert.equal(leftArm.hp, 3, 'left arm took the 1 damage');
-    assert.equal(rightLeg.hp, 4, 'the randomly-picked leg was untouched');
+    assert.equal(leftArm.hp, 2, 'left arm took the 1 damage (3 -> 2)');
+    assert.equal(rightLeg.hp, 3, 'the randomly-picked leg was untouched');
 
     // Invariant: users.health == Σ part hp.
     const user = await db.prepare("SELECT health FROM users WHERE username = 'limb'").first();
@@ -2595,10 +2609,10 @@ test('Plan 006: an aimed head hit does +1 damage versus an unaimed head hit', as
   const { handleAttack, getBodyParts, updatePresence } = await import('../worker/game.mjs');
 
   try {
-    // getBodyParts orders torso first, so the weighted roll ranges are:
-    // torso [0.0,0.30), head [0.30,0.4333). A pick draw of 0.35 lands
+    // getBodyParts orders torso first, so the 11-part weighted roll ranges are:
+    // torso [0.0,0.30), head [0.30,0.4667). A pick draw of 0.35 lands
     // pickTargetPart on the head, letting us compare the same part with and
-    // without aiming. head maxHp is 4.
+    // without aiming. head maxHp is 5 at maxHealth 30.
     await seedLiveUser(db, 'archer', { health: 30, maxHealth: 30, speed: 1, strength: 1 });
     await seedLiveUser(db, 'head_a', { health: 30, maxHealth: 30, speed: 1 });
     await seedLiveUser(db, 'head_b', { health: 30, maxHealth: 30, speed: 1 });
@@ -2609,18 +2623,18 @@ test('Plan 006: an aimed head hit does +1 damage versus an unaimed head hit', as
     await updatePresence(db, 'head_b', calm.row, calm.col);
 
     // Aimed head: hit (0.1 < 0.55), no crit (0.99), pick draw 0.35 (overridden by
-    // the called shot). base 1 + head bonus 1 = 2 damage -> head 4 -> 2.
+    // the called shot). base 1 + head bonus 1 = 2 damage -> head 5 -> 3.
     await withMockedRandom([0.1, 0.99, 0.35], () =>
       handleAttack(db, 'archer', 'arrow to the head @head_a', calm.row, calm.col));
     const headA = (await getBodyParts(db, 'head_a')).find(p => p.label === 'head');
-    assert.equal(headA.hp, 2, 'aimed head took 2 damage (base 1 + head bonus 1)');
+    assert.equal(headA.hp, 3, 'aimed head took 2 damage (base 1 + head bonus 1)');
 
     // Unaimed but forced to the head via the pick draw 0.35: hit (0.1 < 0.7),
-    // no crit (0.99), pick 0.35 -> head. base 1, no bonus -> head 4 -> 3.
+    // no crit (0.99), pick 0.35 -> head. base 1, no bonus -> head 5 -> 4.
     await withMockedRandom([0.1, 0.99, 0.35], () =>
       handleAttack(db, 'archer', 'I swing at @head_b', calm.row, calm.col));
     const headB = (await getBodyParts(db, 'head_b')).find(p => p.label === 'head');
-    assert.equal(headB.hp, 3, 'unaimed head took 1 damage');
+    assert.equal(headB.hp, 4, 'unaimed head took 1 damage');
 
     assert.equal((headB.hp - headA.hp), 1, 'aimed head dealt exactly 1 more');
   } finally {
@@ -2684,7 +2698,7 @@ test('Plan 006: /stance guarding cuts incoming damage by 1; /stance nonsense rej
   try {
     // Two identical defenders; one guards (damageTakenDelta -1). Same attacker,
     // same forced RNG. base damage = 1 + floor(8/4) = 3. Standing defender takes
-    // 3; guarding defender takes 3 - 1 = 2. Pick draw 0.5 -> left arm (hp 4) on
+    // 3; guarding defender takes 3 - 1 = 2. Pick draw 0.2 -> torso (hp 9) on
     // both, so neither severs and the comparison is clean.
     await seedLiveUser(db, 'basher', { health: 30, maxHealth: 30, speed: 1, strength: 8 });
     await seedLiveUser(db, 'plain', { health: 30, maxHealth: 30, speed: 1 });
@@ -2701,17 +2715,17 @@ test('Plan 006: /stance guarding cuts incoming damage by 1; /stance nonsense rej
     const turtleRow = await db.prepare("SELECT stance FROM users WHERE username = 'turtle'").first();
     assert.equal(turtleRow.stance, 'guarding');
 
-    // Standing defender: hit (0.1 < 0.7), no crit (0.99), pick 0.5 -> left arm.
-    await withMockedRandom([0.1, 0.99, 0.5], () =>
+    // Standing defender: hit (0.1 < 0.7), no crit (0.99), pick 0.2 -> torso.
+    await withMockedRandom([0.1, 0.99, 0.2], () =>
       handleAttack(db, 'basher', 'I clobber @plain', calm.row, calm.col));
-    const plainArm = (await getBodyParts(db, 'plain')).find(p => p.label === 'left arm');
-    assert.equal(plainArm.hp, 1, 'standing defender took 3 damage (4 -> 1)');
+    const plainTorso = (await getBodyParts(db, 'plain')).find(p => p.label === 'torso');
+    assert.equal(plainTorso.hp, 6, 'standing defender took 3 damage (9 -> 6)');
 
-    // Guarding defender: same rolls, damage 3 - 1 = 2 (4 -> 2).
-    await withMockedRandom([0.1, 0.99, 0.5], () =>
+    // Guarding defender: same rolls, damage 3 - 1 = 2 (9 -> 7).
+    await withMockedRandom([0.1, 0.99, 0.2], () =>
       handleAttack(db, 'basher', 'I clobber @turtle', calm.row, calm.col));
-    const turtleArm = (await getBodyParts(db, 'turtle')).find(p => p.label === 'left arm');
-    assert.equal(turtleArm.hp, 2, 'guarding defender took only 2 damage (4 -> 2)');
+    const turtleTorso = (await getBodyParts(db, 'turtle')).find(p => p.label === 'torso');
+    assert.equal(turtleTorso.hp, 7, 'guarding defender took only 2 damage (9 -> 7)');
 
     // An unknown stance is rejected with the option list and changes nothing.
     await assert.rejects(
@@ -2757,7 +2771,7 @@ test('Plan 006: an aggressive attacker hits harder and lands where standing woul
       handleAttack(db, 'raging_atk', 'I jab @dummy_b', calm.row, calm.col));
     assert.match(rageHit, /raging_atk .*dummy_b.*\(2\)/);
     const dummyArm = (await getBodyParts(db, 'dummy_b')).find(p => p.label === 'left arm');
-    assert.equal(dummyArm.hp, 2, 'aggressive attacker dealt 2 (base 1 + damageBonus 1)');
+    assert.equal(dummyArm.hp, 1, 'aggressive attacker dealt 2 (base 1 + damageBonus 1): arm 3 -> 1');
   } finally {
     await db.close();
   }

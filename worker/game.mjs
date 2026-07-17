@@ -70,6 +70,37 @@ export {
 } from './game/world.mjs';
 
 export {
+  buildBodyDocument,
+  deleteBodyDoc,
+  getBodyDoc,
+  reconcileBodyDocs,
+  syncBodyDoc
+} from './game/bodyDoc.mjs';
+
+export {
+  GAME_PROFILE_DOCUMENT,
+  judgeUserBody,
+  userBodyConforms
+} from './game/profiles.mjs';
+
+export {
+  createCorpseItem,
+  deleteCorpseAnchor,
+  findCorpseAnchor,
+  findCorpseAnchorInRoom,
+  getEquippedItemRefs,
+  getEquippedItemRefsForPart,
+  materiaApAccrualStatement
+} from './game/inventory.mjs';
+
+export {
+  deleteBodyRows,
+  reconcileBodyHealthInvariant,
+  restoreSeveredPart,
+  zeroBodyParts
+} from './game/body.mjs';
+
+export {
   createTrace,
   getMessages,
   insertMessage,

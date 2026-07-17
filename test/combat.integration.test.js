@@ -102,14 +102,14 @@ test('Plan 006: a crouched defender dodges a hit a standing defender would take'
       handleAttack(db, 'striker', 'I swing at @stander', calm.row, calm.col));
     assert.match(landed, /striker .*stander.*\(1\)/, 'standing defender is struck for 1');
     const standerArm = (await getBodyParts(db, 'stander')).find(p => p.label === 'left arm');
-    assert.equal(standerArm.hp, 3, 'standing defender took the 1 damage (4 -> 3)');
+    assert.equal(standerArm.hp, 2, 'standing defender took the 1 damage (3 -> 2)');
 
     // Crouched defender, SAME roll 0.65 -> miss (chance 0.60). Only one draw read.
     const dodged = await withMockedRandom([0.65], () =>
       handleAttack(db, 'striker', 'I swing at @ducker', calm.row, calm.col));
     assert.match(dodged, /ducker dodged/, 'crouched defender slips the same swing');
     const duckerArm = (await getBodyParts(db, 'ducker')).find(p => p.label === 'left arm');
-    assert.equal(duckerArm.hp, 4, 'crouched defender took no damage');
+    assert.equal(duckerArm.hp, 3, 'crouched defender took no damage');
   } finally {
     await db.close();
   }
