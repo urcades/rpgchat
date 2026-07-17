@@ -293,6 +293,19 @@ test('Room state combines room, messages, user, and tick without seeding world e
 
     const eventCount = await db.prepare('SELECT COUNT(*) AS count FROM worldEvents').first();
     assert.equal(eventCount.count, 0);
+
+    // adv PERF-01: the room-state path uses the lean HUD scope — kill/achievement
+    // history stays out of the hot poll even when it exists; the full-scope call
+    // (character page / user-attributes) still carries it.
+    await db.prepare(
+      `INSERT INTO killHistory (killerUsername, defeatedUsername, defeatedName, defeatedKind, defeatedLevel, experienceGained, goldGained, roomRow, roomCol, worldDay, tick)
+       VALUES ('state_player', 'some_brute', 'Some Brute', 'lesser_hostile', 2, 8, 2, 3, 3, '2026-01-01', 5)`
+    ).run();
+    const hudState = await getRoomState(db, 'state_player', 3, 3);
+    assert.deepEqual(hudState.user.kills, [], 'HUD scope skips the kill log');
+    const { getUserState } = await import('../worker/game.mjs');
+    const fullState = await getUserState(db, 'state_player');
+    assert.equal(fullState.kills.length, 1, 'full scope still surfaces kills');
   } finally {
     await db.close();
   }

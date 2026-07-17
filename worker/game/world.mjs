@@ -940,7 +940,12 @@ export async function getRoomDescription(db, row, col, worldDay = getWorldDay(),
   return composeRoomDescription({ row, col, phase, features, traceSummary });
 }
 
-export async function getUserState(db, username) {
+// adv PERF-01: `scope: 'hud'` skips the character-sheet extras (all
+// achievements, the 50-row kill log, the presence lookup) that the chat HUD
+// never renders — getRoomState refetches this on every non-message broadcast,
+// so combat rooms were paying 3 extra queries per event for discarded data.
+// The default stays 'full' for /user-attributes and the character page.
+export async function getUserState(db, username, { scope = 'full' } = {}) {
   const user = await dbFirst(
     db,
     'SELECT username, job, health, maxHealth, stamina, maxStamina, speed, strength, intelligence, level, gold, experience, attributePoints, skillPoints, displayName, stance, incapacitated, deathClock FROM users WHERE username = ? AND isNpc = 0',
@@ -1027,38 +1032,43 @@ export async function getUserState(db, username) {
       hotbarSkills.push(ability);
     }
   }
-  const [achievements, kills] = await Promise.all([
-    dbAll(
-      db,
-      `SELECT achievementType, eventId, worldDay, earnedTick, rewardExperience, rewardGold
-       FROM worldEventAchievements
-       WHERE username = ?
-       ORDER BY earnedTick DESC, id DESC`,
-      [username]
-    ),
-    dbAll(
-      db,
-      `SELECT defeatedUsername, defeatedName, defeatedKind, defeatedLevel, experienceGained, goldGained, roomRow, roomCol, worldDay, tick, createdAt
-       FROM killHistory
-       WHERE killerUsername = ?
-       ORDER BY id DESC
-       LIMIT 50`,
-      [username]
-    )
-  ]);
+  let achievements = [];
+  let kills = [];
+  let currentRoom = null;
+  if (scope === 'full') {
+    [achievements, kills] = await Promise.all([
+      dbAll(
+        db,
+        `SELECT achievementType, eventId, worldDay, earnedTick, rewardExperience, rewardGold
+         FROM worldEventAchievements
+         WHERE username = ?
+         ORDER BY earnedTick DESC, id DESC`,
+        [username]
+      ),
+      dbAll(
+        db,
+        `SELECT defeatedUsername, defeatedName, defeatedKind, defeatedLevel, experienceGained, goldGained, roomRow, roomCol, worldDay, tick, createdAt
+         FROM killHistory
+         WHERE killerUsername = ?
+         ORDER BY id DESC
+         LIMIT 50`,
+        [username]
+      )
+    ]);
 
-  // The player's current room (latest presence this world-day). The character
-  // page uses it to route /equip, /unequip, /drop — which are tick-advancing,
-  // stamina-costing chat commands, not silent endpoints — to the room the player
-  // is in. Null when they aren't in a room (e.g. viewing from the world map).
-  const presence = await dbFirst(
-    db,
-    `SELECT roomRow, roomCol FROM roomPresence
-     WHERE username = ? AND worldDay = ?
-     ORDER BY lastSeenAt DESC LIMIT 1`,
-    [username, getWorldDay()]
-  );
-  const currentRoom = presence ? { row: presence.roomRow, col: presence.roomCol } : null;
+    // The player's current room (latest presence this world-day). The character
+    // page uses it to route /equip, /unequip, /drop — which are tick-advancing,
+    // stamina-costing chat commands, not silent endpoints — to the room the player
+    // is in. Null when they aren't in a room (e.g. viewing from the world map).
+    const presence = await dbFirst(
+      db,
+      `SELECT roomRow, roomCol FROM roomPresence
+       WHERE username = ? AND worldDay = ?
+       ORDER BY lastSeenAt DESC LIMIT 1`,
+      [username, getWorldDay()]
+    );
+    currentRoom = presence ? { row: presence.roomRow, col: presence.roomCol } : null;
+  }
 
   return {
     ...user,
@@ -1101,7 +1111,7 @@ export async function getRoomState(db, username, row, col, tickValue = null, acc
   const [roomResult, messagesResult, userResult] = await Promise.all([
     measureAsync(() => getRoomEcology(db, username, row, col, worldDay, tick, access)),
     measureAsync(() => getMessages(db, row, col, tick)),
-    measureAsync(() => getUserState(db, username))
+    measureAsync(() => getUserState(db, username, { scope: 'hud' }))
   ]);
   const room = roomResult.value;
   const messages = messagesResult.value;
