@@ -72,7 +72,8 @@ export {
   createTrace,
   getMessages,
   insertMessage,
-  insertSystemMessage
+  insertSystemMessage,
+  toBroadcastMessageRow
 } from './game/messages.mjs';
 
 export {

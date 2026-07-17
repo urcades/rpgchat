@@ -19,7 +19,7 @@ import { logEvent } from '../observability.mjs';
 import { generateNpcResponse } from '../npcVoice.mjs';
 import { applyBodyHeal } from './body.mjs';
 import { runAbility } from './combat.mjs';
-import { emitSystemMessage, getMessages, insertMessage, insertSystemMessage } from './messages.mjs';
+import { emitSystemMessage, getMessages, insertMessage, insertSystemMessage, toBroadcastMessageRow } from './messages.mjs';
 import { upsertCooldown } from './progression.mjs';
 import { getCurrentTickValue, getRoomDescription, getRoomPresence, getUserOrNull } from './world.mjs';
 
@@ -196,16 +196,10 @@ export async function runNpcReply(db, ai, row, col) {
   // clients append it directly instead of a follow-up /messages fetch (which,
   // once D1 read replication is on, could hit a lagging replica and miss it).
   const inserted = await insertMessage(db, row, col, speaker.username, response.speech, 'npc');
-  const messageRow = {
-    id: inserted.id,
-    username: speaker.username,
-    message: response.speech,
-    timestamp: inserted.timestamp,
-    kind: 'npc',
-    job: speaker.job || null,
-    displayName: speaker.displayName || null,
-    statusEffects: []
-  };
+  const messageRow = toBroadcastMessageRow(
+    { id: inserted.id, username: speaker.username, message: response.speech, timestamp: inserted.timestamp, kind: 'npc' },
+    speaker
+  );
   await upsertCooldown(db, '__npc_voice', row, col, 'npc_voice', currentTick, worldDay);
 
   // Model-detected hostility (subtler than the keyword floor — aggressive "rizz", veiled
@@ -312,15 +306,9 @@ export async function runNpcAmbient(db, ai, row, col) {
     npc: speaker.username,
     speech: response.speech,
     // adv DUR-05: self-describing broadcast row (see runNpcReply).
-    messageRow: {
-      id: inserted.id,
-      username: speaker.username,
-      message: response.speech,
-      timestamp: inserted.timestamp,
-      kind: 'npc',
-      job: speaker.job || null,
-      displayName: speaker.displayName || null,
-      statusEffects: []
-    }
+    messageRow: toBroadcastMessageRow(
+      { id: inserted.id, username: speaker.username, message: response.speech, timestamp: inserted.timestamp, kind: 'npc' },
+      speaker
+    )
   };
 }

@@ -23,6 +23,24 @@ export async function insertMessage(db, row, col, username, message, kind = 'cha
   return { id: lastInsertId(result), timestamp };
 }
 
+// adv ARCH-05: the ONE place a broadcast-ready message row is shaped. Every
+// self-describing frame (player chat, WS actions, NPC reply/ambient) routes
+// through this, so a schema change to the wire shape is a one-file edit —
+// previously the enrichment object was hand-assembled at each transport site
+// and consumed untyped by chat.html.
+export function toBroadcastMessageRow(row, user = {}) {
+  return {
+    id: row.id,
+    username: row.username,
+    message: row.message,
+    timestamp: row.timestamp,
+    kind: row.kind || 'chat',
+    job: user.job || null,
+    displayName: user.displayName || null,
+    statusEffects: []
+  };
+}
+
 export async function insertSystemMessage(db, row, col, message, kind = 'system') {
   await insertMessage(db, row, col, 'System', message, kind);
 }

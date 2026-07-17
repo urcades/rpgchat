@@ -45,6 +45,7 @@ import {
   runNpcAmbient,
   runNpcReply,
   runScheduledWorldPulse,
+  toBroadcastMessageRow,
   updatePresence,
   validateMovement,
   validateRoomCoordinates,
@@ -941,7 +942,7 @@ app.post('/chat/:row/:col', async c => {
       // author's job/displayName from the already-fetched auth row) rides in the
       // broadcast, so clients append it directly — zero follow-up fetch.
       const enrichedRows = result.messageRow
-        ? [{ ...result.messageRow, job: auth.user.job || null, displayName: auth.user.displayName || null, statusEffects: [] }]
+        ? [toBroadcastMessageRow(result.messageRow, auth.user)]
         : undefined;
       const broadcast = await measureAsync(() => broadcastRoom(c.env, row, col, {
         type: 'message',
@@ -1316,7 +1317,7 @@ export class RoomObject extends DurableObject {
       this.sendSafe(ws, { type: 'ack', seq, action: broadcastType, result });
 
       const enrichedRows = result.messageRow
-        ? [{ ...result.messageRow, job: user.job || null, displayName: user.displayName || null, statusEffects: [] }]
+        ? [toBroadcastMessageRow(result.messageRow, user)]
         : undefined;
       await this.broadcast({
         type: broadcastType,
