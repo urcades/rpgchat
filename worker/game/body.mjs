@@ -23,6 +23,7 @@ import { descendTowardDeath, reviveFromIncapacitation } from './death.mjs';
 import { getEquippedModifiers } from './inventory.mjs';
 import { insertSystemMessage } from './messages.mjs';
 import { getProgressionModifiers } from './progression.mjs';
+import { deleteBodyDoc, syncBodyDoc } from './bodyDoc.mjs';
 import { getCurrentTickValue } from './clock.mjs';
 import { getUser, selectUserColumns } from './users.mjs';
 
@@ -126,7 +127,10 @@ export async function ensureBody(db, user) {
   // column, so this is a no-op for them.
   await applyAffixBodyEffects(db, user);
 
-  return getBodyParts(db, user.username);
+  const created = await getBodyParts(db, user.username);
+  // engine-overhaul Phase B: a freshly-materialized body gets its document.
+  await syncBodyDoc(db, user.username, 'ensure-body');
+  return created;
 }
 
 // Parse a bodied NPC's stored `affixes` JSON and fold the spawn-time body effects in:
@@ -476,6 +480,13 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
     }
   }
 
+  // engine-overhaul Phase B: a sever is a STRUCTURAL change (a part left the
+  // body, its gear hit the floor) — dual-write the paperdoll document. Plain
+  // hp damage never touches the doc.
+  if (severedParts.length > 0) {
+    await syncBodyDoc(db, user.username, 'sever');
+  }
+
   const died = vitalDestroyed || healthAfter <= 0;
   // Plan 023b: `remaining` is damage that found no HP to land on — the overkill that
   // separates a barely-lethal blow (incapacitate) from an obliterating one (gib).
@@ -734,6 +745,9 @@ export async function restoreSeveredPart(db, username, part) {
 // only remnant — created by the death seam via inventory's createCorpseItem).
 export async function deleteBodyRows(db, username) {
   await dbRun(db, 'DELETE FROM bodyParts WHERE username = ?', [username]);
+  // engine-overhaul Phase B: the document dies with the rows (the corpse item
+  // remains the resurrection anchor; Phase D embeds the final doc in it).
+  await deleteBodyDoc(db, username);
 }
 
 // Incapacitation zeroes every part so users.health == Σ bodyParts.hp holds at 0.

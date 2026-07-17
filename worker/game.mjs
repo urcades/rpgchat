@@ -70,6 +70,14 @@ export {
 } from './game/world.mjs';
 
 export {
+  buildBodyDocument,
+  deleteBodyDoc,
+  getBodyDoc,
+  reconcileBodyDocs,
+  syncBodyDoc
+} from './game/bodyDoc.mjs';
+
+export {
   createCorpseItem,
   deleteCorpseAnchor,
   findCorpseAnchor,

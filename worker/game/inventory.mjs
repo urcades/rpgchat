@@ -42,6 +42,7 @@ import {
 } from './body.mjs';
 import { insertSystemMessage } from './messages.mjs';
 import { logEvent } from '../observability.mjs';
+import { syncBodyDoc } from './bodyDoc.mjs';
 import { getCurrentTickValue } from './clock.mjs';
 import { getUser } from './users.mjs';
 import { roomHasEffect } from './ecology.mjs';
@@ -461,6 +462,9 @@ export async function giveItem(db, fromUsername, itemName, toUsername, row, col)
     );
   }
 
+  // engine-overhaul Phase B: the RECEIVER's document changed too (the giver's
+  // syncs at the command dispatch).
+  await syncBodyDoc(db, toUsername, 'give-received');
   return { id: item.id, name: item.name };
 }
 

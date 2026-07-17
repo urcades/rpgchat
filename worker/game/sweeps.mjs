@@ -16,6 +16,7 @@ import {
 import { batchRows, changes, dbAll, dbBatch, dbFirst, dbRun } from '../db.mjs';
 import { logEvent } from '../observability.mjs';
 import { applyBodyDamage, applyBodyHeal, processStatusEffects, reconcileBodyHealthInvariant } from './body.mjs';
+import { reconcileBodyDocs } from './bodyDoc.mjs';
 import { getCurrentTickValue } from './clock.mjs';
 import { getActiveEffectsForRoom } from './ecology.mjs';
 import { descendTowardDeath, processIncapacitationBleed } from './death.mjs';
@@ -54,6 +55,7 @@ export async function cleanupOldWorldDayData(db, worldDay = getWorldDay()) {
   await dbRun(db, 'DELETE FROM sessions WHERE expiresAt <= CURRENT_TIMESTAMP');
   await dbRun(db, "DELETE FROM messages WHERE timestamp < datetime('now', '-7 days')");
   await reconcileBodyHealthInvariant(db);
+  await reconcileBodyDocs(db);
 }
 
 

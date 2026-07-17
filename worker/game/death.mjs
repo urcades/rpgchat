@@ -18,6 +18,7 @@ import {
 } from './shared.mjs';
 import { changes, dbAll, dbFirst, dbRun } from '../db.mjs';
 import { deleteBodyRows, getBodyParts, isBodylessUser, zeroBodyParts } from './body.mjs';
+import { syncBodyDoc } from './bodyDoc.mjs';
 import { createCorpseItem, dropItemOnFloor, dropPlayerItemsOnDeath } from './inventory.mjs';
 import { createTrace, emitSystemMessage, insertSystemMessage } from './messages.mjs';
 import { CREATURE_DEATH_RATTLES, NPC_DEATH_BEGS, emitDeathReaction } from './npc.mjs';
@@ -127,6 +128,8 @@ async function incapacitate(db, user, cause, row, col, { currentTick = null, def
     const dropped = await dropPlayerItemsOnDeath(db, user.username, row, col);
     if (dropped > 0) {
       await emitSystemMessage(db, row, col, `${name}'s belongings spill across the floor as they fall.`, deferredSystemMessages, 'death');
+      // engine-overhaul Phase B: the spill emptied their doc's gear/carried vessels.
+      await syncBodyDoc(db, user.username, 'incapacitated-spill');
     }
     await emitSystemMessage(db, row, col, `${name} collapses in a spreading pool of blood, unable to stand.`, deferredSystemMessages, 'death');
   }
