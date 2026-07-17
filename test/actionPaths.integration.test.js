@@ -32,6 +32,21 @@ function findCalmRoom(worldDay) {
   throw new Error('No calm room for ' + worldDay);
 }
 
+// A guild room with no OTHER stamina/health-perturbing passive, so the guild's
+// +1-stamina rest passive is the ONLY offset to the action's −1 cost — net 0, at
+// cap. findRoomWithEffect alone can land on a guild that ALSO rolled e.g. cold_room
+// on some world-days, making the net −1 and flaking the exact stamina assertion.
+function findCleanGuildRoom(worldDay) {
+  const others = HAZARDOUS.filter(t => t !== 'guild');
+  for (let row = 1; row <= 16; row += 1) {
+    for (let col = 1; col <= 16; col += 1) {
+      const types = generateRoomFeatures(row, col, worldDay).map(f => f.effect?.type);
+      if (types.includes('guild') && !types.some(t => others.includes(t))) return { row, col };
+    }
+  }
+  throw new Error('No clean guild room for ' + worldDay);
+}
+
 function findRoomWithEffect(worldDay, effectType) {
   for (let row = 1; row <= 16; row += 1) {
     for (let col = 1; col <= 16; col += 1) {
@@ -69,7 +84,7 @@ test('Plan adv-003: /job in a guild changes vocation, folds the job bonus, and s
   const { handleJobChangeAction, updatePresence, getUserState, runDeferredWorldSweeps } = await import('../worker/game.mjs');
   try {
     const worldDay = getWorldDay();
-    const guild = findRoomWithEffect(worldDay, 'guild');
+    const guild = findCleanGuildRoom(worldDay);
     assert.ok(guild, 'today has a guild room somewhere on the grid');
 
     // Start as a Novice (no bonuses); a Mage adds +3 intelligence on top of base.
