@@ -139,3 +139,25 @@ round-trips; D) profile judgments. `combat-smoke` stays the live gate.
 Phase A is safe to land on `main` immediately (it's hardening, valuable even
 if the overhaul stalls). B onward live on `ed/engine-overhaul` until the
 Phase B reconcile proves the model.
+
+
+## Execution status (2026-07-17, ed/engine-overhaul)
+
+- **Phase A ✅** — all ~14 bypasses sealed behind body.mjs/inventory.mjs
+  chokepoints; suite unmodified (560/560).
+- **Phase B ✅** — migration 0022 (bodies + bodyPatches); bodyDoc.mjs dual-write
+  under CAS at every chokepoint; daily reconcile; 7-test bodyDoc suite proves
+  row⇄doc agreement, sever→absent-vessel + invertible logged patch, CAS
+  contention, death/reconcile. Advisory posture caught+fixed a real mapping bug
+  (materia types vs the id law).
+- **Phase C ◐** — doc carries full item fidelity; deriveProjectionsFromDoc
+  proven deep-equal to the row projections under a real mutation battery.
+  **GATED (deliberate):** flipping reads to the doc + dropping
+  items.equippedPartId/socketedInId waits until the dual-write runs clean in
+  production for a full world-day (watch `bodydoc.sync.*` + `bodydoc.reconcile`
+  log events after this branch deploys).
+- **Phase D ◐** — corpse embeds the final body document; papermold profiles
+  (able-bodied/armed/ambulatory) live as advisory judges. **Remaining:**
+  /regrow + resurrection via invertPatch over bodyPatches (needs the doc
+  authoritative, i.e. the Phase C flip), death as ONE composed patch.
+- Migration **0022 must be applied to remote D1 before this branch deploys.**
