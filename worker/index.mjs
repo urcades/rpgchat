@@ -14,7 +14,6 @@ import {
   SIGNATURE_ITEMS_BY_JOB,
   allocateAttributePoint,
   buildStartingStats,
-  claimActionToken,
   createItemForOwner,
   getCurrentPosition,
   getCurrentTickValue,
@@ -28,10 +27,6 @@ import {
   getRoomState,
   getUserOrNull,
   getUserState,
-  handleAttackAction,
-  handleChatAction,
-  handleJobChangeAction,
-  handleSkillAction,
   normalizeJob,
   respecProgression,
   unlockProgressionNode,
@@ -40,17 +35,16 @@ import {
   ensureSocialPopulation,
   roomHasActiveHostiles,
   roomNeedsLoop,
-  runDeferredWorldSweeps,
   runHostileRoomAction,
   runNpcAmbient,
   runNpcReply,
   runScheduledWorldPulse,
-  toBroadcastMessageRow,
   updatePresence,
   validateMovement,
   validateRoomCoordinates,
   validateStartingAllocation
 } from './game.mjs';
+import { isActionType, performRoomAction, runActionTail } from './actions.mjs';
 import {
   createResurrectionCheckout,
   fulfillResurrectionCheckout
@@ -910,234 +904,72 @@ app.post('/room-access/:row/:col/pay', async c => {
   }
 });
 
-app.post('/chat/:row/:col', async c => {
-  const auth = await currentUserOrResponse(c);
-  if (auth instanceof Response) {
-    return auth;
-  }
-
-  try {
-    const actionStart = nowMs();
-    const { row, col } = parseCoordinates(c);
-    const roomUse = await measureAsync(() => ensureRoomUse(c, auth.user, row, col));
-    const bodyResult = await measureAsync(() => parseForm(c));
-    const body = bodyResult.value;
-    const message = String(body.message || '');
-    if (!message.trim()) {
-      throw new ActionError('Message required.');
+// adv ARCH-01: all four action routes are ONE factory over the shared
+// pipeline in worker/actions.mjs — validate/claim/handle/enrich happen in
+// performRoomAction, and the post-turn tail (sweeps -> loop wake -> NPC reply)
+// runs in runActionTail with HTTP-flavored hooks (DO pings). The WS path in
+// RoomObject.webSocketMessage is the other thin adapter over the same calls.
+function makeActionRoute(type) {
+  return async c => {
+    const auth = await currentUserOrResponse(c);
+    if (auth instanceof Response) {
+      return auth;
     }
-    // adv DUR-01: the WS path may have already applied this action before its
-    // ack was lost; the token claim makes this HTTP replay a visible no-op.
-    if (!(await claimActionToken(c.env.DB, auth.user.username, body.actionToken))) {
-      return actionResponse(c, row, col, { action: 'chat', duplicate: true });
-    }
-    const action = await measureAsync(() => handleChatAction(c.env.DB, auth.user.username, row, col, message));
-    const result = action.value;
-    runAfterResponse(c, { action: 'chat', roomRow: row, roomCol: col }, async () => {
-      // adv-013: the action only advanced the tick synchronously; run the global sweeps
-      // here, off the latency path, deduped by the tick-window claim so a calm-room action
-      // still drives the per-tick effects on its own cadence without K-fold fan-out.
-      await runDeferredWorldSweeps(c.env.DB, result.tick?.tick);
-      // Self-describing frame: a plain chat line's fully-formed row (with the
-      // author's job/displayName from the already-fetched auth row) rides in the
-      // broadcast, so clients append it directly — zero follow-up fetch.
-      const enrichedRows = result.messageRow
-        ? [toBroadcastMessageRow(result.messageRow, auth.user)]
-        : undefined;
-      const broadcast = await measureAsync(() => broadcastRoom(c.env, row, col, {
-        type: 'message',
-        username: auth.user.username,
-        result,
-        ...(enrichedRows ? { messages: enrichedRows } : {})
+    try {
+      const actionStart = nowMs();
+      const { row, col } = parseCoordinates(c);
+      const roomUseResult = await measureAsync(() => ensureRoomUse(c, auth.user, row, col));
+      const bodyResult = await measureAsync(() => parseForm(c));
+      const action = await measureAsync(() => performRoomAction(c.env.DB, {
+        type,
+        user: auth.user,
+        row,
+        col,
+        payload: bodyResult.value,
+        roomUse: roomUseResult.value
       }));
-      const hostileLoop = await measureAsync(() => startHostileLoopIfNeeded(c.env, row, col));
-      // Plan 013a: after the player's line lands, give a present NPC a chance to answer.
-      // Plan 013d: a downed player's garbled plea still reaches the room — a present
-      // cleric may piece it together and raise them (the engine gates the actual revive).
-      await measureAsync(() => npcReactInRoom(c.env, row, col));
+      const performed = action.value;
+      if (performed.duplicate) {
+        // The WS transport already applied this exact action (lost-ack replay).
+        return actionResponse(c, row, col, { action: type, duplicate: true });
+      }
+      runAfterResponse(c, { action: type, roomRow: row, roomCol: col }, async () => {
+        const broadcast = await measureAsync(() => broadcastRoom(c.env, row, col, performed.broadcastPayload));
+        const tail = await measureAsync(() => runActionTail(c.env.DB, performed, {
+          wakeLoop: () => startHostileLoopIfNeeded(c.env, row, col),
+          // The DO owns env.AI — the model is never touched in a route's path.
+          npcReply: () => npcReactInRoom(c.env, row, col)
+        }));
+        logEvent({
+          event: 'action.background',
+          action: type,
+          roomRow: row,
+          roomCol: col,
+          broadcastMs: broadcast.durationMs,
+          tailMs: tail.durationMs
+        });
+      });
       logEvent({
-        event: 'action.background',
-        action: 'chat',
+        event: 'action.complete',
+        action: type,
         roomRow: row,
         roomCol: col,
-        broadcastMs: broadcast.durationMs,
-        hostileLoopMs: hostileLoop.durationMs
+        durationMs: elapsedMs(actionStart),
+        roomUseMs: roomUseResult.durationMs,
+        parseFormMs: bodyResult.durationMs,
+        gameActionMs: action.durationMs
       });
-    });
-    logEvent({
-      event: 'action.complete',
-      action: 'chat',
-      roomRow: row,
-      roomCol: col,
-      durationMs: elapsedMs(actionStart),
-      roomUseMs: roomUse.durationMs,
-      parseFormMs: bodyResult.durationMs,
-      gameActionMs: action.durationMs
-    });
-    return actionResponse(c, row, col, { action: 'chat', result });
-  } catch (err) {
-    return formError(c, err);
-  }
-});
-
-app.post('/attack/:row/:col', async c => {
-  const auth = await currentUserOrResponse(c);
-  if (auth instanceof Response) {
-    return auth;
-  }
-
-  try {
-    const actionStart = nowMs();
-    const { row, col } = parseCoordinates(c);
-    const roomUse = await measureAsync(() => ensureRoomUse(c, auth.user, row, col));
-    const bodyResult = await measureAsync(() => parseForm(c));
-    const body = bodyResult.value;
-    const message = String(body.message || '');
-    // Plan 024: the targeting toolbar aims at a body part out-of-band, so the limb
-    // stays out of the chat prose. Empty => no called shot (weighted-random hit).
-    const targetPart = body.targetPart ? String(body.targetPart) : null;
-    // adv DUR-01: same replay guard as /chat — an attack must never land twice.
-    if (!(await claimActionToken(c.env.DB, auth.user.username, body.actionToken))) {
-      return actionResponse(c, row, col, { action: 'attack', duplicate: true });
+      return actionResponse(c, row, col, { action: type, result: performed.result });
+    } catch (err) {
+      return formError(c, err);
     }
-    const action = await measureAsync(() => handleAttackAction(c.env.DB, auth.user.username, row, col, message, targetPart));
-    const result = action.value;
-    runAfterResponse(c, { action: 'attack', roomRow: row, roomCol: col }, async () => {
-      // adv-013: sweeps run here (off the latency path), deduped by the tick-window claim.
-      await runDeferredWorldSweeps(c.env.DB, result.tick?.tick);
-      const broadcast = await measureAsync(() => broadcastRoom(c.env, row, col, { type: 'attack', username: auth.user.username, result }));
-      const hostileLoop = await measureAsync(() => startHostileLoopIfNeeded(c.env, row, col));
-      logEvent({
-        event: 'action.background',
-        action: 'attack',
-        roomRow: row,
-        roomCol: col,
-        broadcastMs: broadcast.durationMs,
-        hostileLoopMs: hostileLoop.durationMs
-      });
-    });
-    logEvent({
-      event: 'action.complete',
-      action: 'attack',
-      roomRow: row,
-      roomCol: col,
-      durationMs: elapsedMs(actionStart),
-      roomUseMs: roomUse.durationMs,
-      parseFormMs: bodyResult.durationMs,
-      gameActionMs: action.durationMs
-    });
-    return actionResponse(c, row, col, { action: 'attack', result });
-  } catch (err) {
-    return formError(c, err);
-  }
-});
+  };
+}
 
-app.post('/skill/:row/:col', async c => {
-  const auth = await currentUserOrResponse(c);
-  if (auth instanceof Response) {
-    return auth;
-  }
+for (const type of ['chat', 'attack', 'skill', 'job']) {
+  app.post(`/${type}/:row/:col`, makeActionRoute(type));
+}
 
-  try {
-    const actionStart = nowMs();
-    const { row, col } = parseCoordinates(c);
-    const roomUseResult = await measureAsync(() => ensureRoomUse(c, auth.user, row, col));
-    const roomUse = roomUseResult.value;
-    const bodyResult = await measureAsync(() => parseForm(c));
-    const body = bodyResult.value;
-    const skillId = String(body.skillId || '');
-    const targetUsername = String(body.targetUsername || body.message || '');
-    const action = await measureAsync(() => handleSkillAction(
-      c.env.DB,
-      auth.user.username,
-      row,
-      col,
-      skillId,
-      targetUsername,
-      roomUse.tickValue + 1
-    ));
-    const result = action.value;
-    runAfterResponse(c, { action: 'skill', roomRow: row, roomCol: col }, async () => {
-      // adv-013: sweeps run here (off the latency path), deduped by the tick-window claim.
-      await runDeferredWorldSweeps(c.env.DB, result.tick?.tick);
-      const broadcast = await measureAsync(() => broadcastRoom(c.env, row, col, { type: 'skill', username: auth.user.username, result }));
-      const hostileLoop = await measureAsync(() => startHostileLoopIfNeeded(c.env, row, col));
-      logEvent({
-        event: 'action.background',
-        action: 'skill',
-        roomRow: row,
-        roomCol: col,
-        broadcastMs: broadcast.durationMs,
-        hostileLoopMs: hostileLoop.durationMs
-      });
-    });
-    logEvent({
-      event: 'action.complete',
-      action: 'skill',
-      roomRow: row,
-      roomCol: col,
-      durationMs: elapsedMs(actionStart),
-      roomUseMs: roomUseResult.durationMs,
-      parseFormMs: bodyResult.durationMs,
-      gameActionMs: action.durationMs
-    });
-    return actionResponse(c, row, col, { action: 'skill', result });
-  } catch (err) {
-    return formError(c, err);
-  }
-});
-
-app.post('/job/:row/:col', async c => {
-  const auth = await currentUserOrResponse(c);
-  if (auth instanceof Response) {
-    return auth;
-  }
-
-  try {
-    const actionStart = nowMs();
-    const { row, col } = parseCoordinates(c);
-    const roomUseResult = await measureAsync(() => ensureRoomUse(c, auth.user, row, col));
-    const roomUse = roomUseResult.value;
-    const bodyResult = await measureAsync(() => parseForm(c));
-    const body = bodyResult.value;
-    const action = await measureAsync(() => handleJobChangeAction(
-      c.env.DB,
-      auth.user.username,
-      row,
-      col,
-      String(body.job || ''),
-      roomUse
-    ));
-    const result = action.value;
-    runAfterResponse(c, { action: 'job', roomRow: row, roomCol: col }, async () => {
-      // adv-013: sweeps run here (off the latency path), deduped by the tick-window claim.
-      await runDeferredWorldSweeps(c.env.DB, result.tick?.tick);
-      const broadcast = await measureAsync(() => broadcastRoom(c.env, row, col, { type: 'job', username: auth.user.username, result }));
-      const hostileLoop = await measureAsync(() => startHostileLoopIfNeeded(c.env, row, col));
-      logEvent({
-        event: 'action.background',
-        action: 'job',
-        roomRow: row,
-        roomCol: col,
-        broadcastMs: broadcast.durationMs,
-        hostileLoopMs: hostileLoop.durationMs
-      });
-    });
-    logEvent({
-      event: 'action.complete',
-      action: 'job',
-      roomRow: row,
-      roomCol: col,
-      durationMs: elapsedMs(actionStart),
-      roomUseMs: roomUseResult.durationMs,
-      parseFormMs: bodyResult.durationMs,
-      gameActionMs: action.durationMs
-    });
-    return actionResponse(c, row, col, { action: 'job', result });
-  } catch (err) {
-    return formError(c, err);
-  }
-});
 
 app.get('/ws/:row/:col', async c => {
   const coordinates = validateRoomCoordinates(c.req.param('row'), c.req.param('col'));
@@ -1267,7 +1099,9 @@ export class RoomObject extends DurableObject {
     } catch {
       return; // not ours — ignore
     }
-    if (!frame || (frame.type !== 'chat' && frame.type !== 'attack')) {
+    // adv ARCH-01: any action type the shared pipeline knows works over the
+    // socket — chat/attack today from the client, skill/job for free.
+    if (!frame || !isActionType(frame.type)) {
       return;
     }
     const seq = Number(frame.seq) || 0;
@@ -1280,7 +1114,7 @@ export class RoomObject extends DurableObject {
 
     const db = this.env.DB;
     try {
-      // The user row gates liveness AND supplies the enrichment fields below —
+      // The user row gates liveness AND supplies the enrichment fields —
       // one read, mirroring what the HTTP path's auth join provides.
       const user = await getUserOrNull(db, username);
       if (!user || user.isNpc) {
@@ -1291,69 +1125,58 @@ export class RoomObject extends DurableObject {
       if (!roomUse.allowed) {
         throw new ActionError('Inn access required', 403);
       }
-      const message = String(frame.message || '');
-      if (!message.trim()) {
-        throw new ActionError('Message required.');
-      }
-      // adv DUR-01: claim the client token BEFORE applying. If this frame is a
-      // retry of an action another transport already applied, ack it and stop —
-      // the first application's broadcast already reached the room.
-      if (!(await claimActionToken(db, username, frame.token))) {
-        this.sendSafe(ws, { type: 'ack', seq, action: frame.type === 'attack' ? 'attack' : 'message', duplicate: true });
+
+      const performed = await performRoomAction(db, {
+        type: frame.type,
+        user,
+        row,
+        col,
+        payload: frame,
+        roomUse
+      });
+      if (performed.duplicate) {
+        // Another transport already applied this exact action (lost-ack replay);
+        // its broadcast already reached the room — just settle the client.
+        this.sendSafe(ws, { type: 'ack', seq, action: performed.broadcastType, duplicate: true });
         return;
       }
 
-      let broadcastType;
-      let result;
-      if (frame.type === 'attack') {
-        const targetPart = frame.targetPart ? String(frame.targetPart) : null;
-        result = await handleAttackAction(db, username, row, col, message, targetPart);
-        broadcastType = 'attack';
-      } else {
-        result = await handleChatAction(db, username, row, col, message);
-        broadcastType = 'message';
-      }
+      // The ack goes out before the broadcast + tail so the sender's perceived
+      // latency is just the action itself.
+      this.sendSafe(ws, { type: 'ack', seq, action: performed.broadcastType, result: performed.result });
+      await this.broadcast({ room: { row, col }, ...performed.broadcastPayload });
 
-      this.sendSafe(ws, { type: 'ack', seq, action: broadcastType, result });
-
-      const enrichedRows = result.messageRow
-        ? [toBroadcastMessageRow(result.messageRow, user)]
-        : undefined;
-      await this.broadcast({
-        type: broadcastType,
-        room: { row, col },
-        username,
-        result,
-        ...(enrichedRows ? { messages: enrichedRows } : {})
-      });
-
-      // Post-turn tail — the same work the HTTP routes run in runAfterResponse:
-      // deferred world sweeps, the room loop wake, and (for chat) an NPC reply.
+      // Post-turn tail — same ORDER as the HTTP routes (runActionTail owns it),
+      // with DO-flavored hooks: this object IS the room, so it touches its own
+      // storage/sockets instead of pinging a stub.
       await guard('ws-action.tail.error', async () => {
-        await runDeferredWorldSweeps(db, result.tick?.tick);
-        if (await roomNeedsLoop(db, row, col)) {
-          await this.ctx.storage.put('hostileRoom', { row, col });
-          if (await this.ctx.storage.getAlarm() === null) {
-            await this.ctx.storage.setAlarm(Date.now() + 5000);
-          }
-        }
-        if (broadcastType === 'message') {
-          const reply = await runNpcReply(db, this.env.AI, row, col);
-          if (reply.spoke) {
-            await this.broadcast({
-              type: 'message',
-              room: { row, col },
-              username: reply.npc,
-              ...(reply.messageRow ? { messages: [reply.messageRow] } : {})
-            });
-          }
-          if (reply.provoked > 0) {
-            await this.ctx.storage.put('hostileRoom', { row, col });
-            if (await this.ctx.storage.getAlarm() === null) {
-              await this.ctx.storage.setAlarm(Date.now() + 5000);
+        await runActionTail(db, performed, {
+          wakeLoop: async () => {
+            if (await roomNeedsLoop(db, row, col)) {
+              await this.ctx.storage.put('hostileRoom', { row, col });
+              if (await this.ctx.storage.getAlarm() === null) {
+                await this.ctx.storage.setAlarm(Date.now() + 5000);
+              }
+            }
+          },
+          npcReply: async () => {
+            const reply = await runNpcReply(db, this.env.AI, row, col);
+            if (reply.spoke) {
+              await this.broadcast({
+                type: 'message',
+                room: { row, col },
+                username: reply.npc,
+                ...(reply.messageRow ? { messages: [reply.messageRow] } : {})
+              });
+            }
+            if (reply.provoked > 0) {
+              await this.ctx.storage.put('hostileRoom', { row, col });
+              if (await this.ctx.storage.getAlarm() === null) {
+                await this.ctx.storage.setAlarm(Date.now() + 5000);
+              }
             }
           }
-        }
+        });
       }, { fields: { roomRow: row, roomCol: col, username } });
     } catch (err) {
       const status = (err && err.statusCode) || 500;

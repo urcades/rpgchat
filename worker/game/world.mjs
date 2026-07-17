@@ -1483,6 +1483,17 @@ export async function claimActionToken(db, username, token) {
   return changes(result) > 0;
 }
 
+// Release a claim after the claimed action FAILED to apply (a validation or
+// gameplay throw) so a legitimate client retry isn't refused as a duplicate.
+// Never called after a successful apply — that's exactly the replay to refuse.
+export async function releaseActionToken(db, username, token) {
+  const trimmed = typeof token === 'string' ? token.trim().slice(0, 64) : '';
+  if (!trimmed) {
+    return;
+  }
+  await dbRun(db, 'DELETE FROM actionClaims WHERE claimKey = ?', [`${username}:${trimmed}`]);
+}
+
 // Claims only matter for the seconds-wide ack window; prune on the same slow
 // cadence as stamina recovery so the table stays tiny.
 async function pruneActionClaims(db, tickValue) {

@@ -259,3 +259,47 @@ test('DUR-01: concurrent same-token submissions apply exactly once (claim race)'
     await db.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// adv ARCH-01: the unified pipeline means EVERY action type works over the
+// socket — pin the skill path (previously WS handled only chat/attack).
+// ---------------------------------------------------------------------------
+
+test('ARCH-01: a skill frame over the WebSocket runs the same pipeline as HTTP', async () => {
+  const db = await createMigratedDb();
+  const mod = await import('../worker/index.mjs');
+  const { updatePresence } = await import('../worker/game.mjs');
+  try {
+    const calm = findCalmRoom(getWorldDay());
+    await seedLiveUser(db, 'wscaster');
+    await updatePresence(db, 'wscaster', calm.row, calm.col);
+
+    const storage = {
+      async get() { return undefined; },
+      async put() {},
+      async setAlarm() {},
+      async getAlarm() { return null; },
+      async delete() {}
+    };
+    const room = new mod.RoomObject({ storage }, { DB: db, AI: {} });
+    room.broadcast = async () => {};
+    const sent = [];
+    const ws = {
+      send(payload) { sent.push(JSON.parse(payload)); },
+      deserializeAttachment() {
+        return { username: 'wscaster', row: calm.row, col: calm.col };
+      }
+    };
+
+    // scrounge: every class knows it, no target needed.
+    await quiet(() => room.webSocketMessage(ws, JSON.stringify({
+      type: 'skill', skillId: 'scrounge', token: 'sk:1', seq: 3
+    })));
+    const ack = sent.find(f => f.type === 'ack');
+    assert.ok(ack, 'the skill action was acked over the socket');
+    assert.equal(ack.action, 'skill');
+    assert.ok(ack.result, 'the ack carries the action result');
+  } finally {
+    await db.close();
+  }
+});

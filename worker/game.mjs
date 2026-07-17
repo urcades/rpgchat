@@ -49,6 +49,7 @@ export {
   getRoomFeaturesForTick,
   getRoomState,
   claimActionToken,
+  releaseActionToken,
   getRoomLoopState,
   getUser,
   getUserOrNull,
