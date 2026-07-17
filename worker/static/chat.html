@@ -299,6 +299,25 @@
     // With a live socket, chat/attack go as WS frames (no HTTP, no per-action
     // auth); each carries a seq and resolves on the matching ack/action-error
     // frame. A dying socket flushes every unresolved action to the HTTP path.
+    // Non-blocking error toast — replaces window.alert, which froze the page
+    // (and the whole combat rhythm) behind a modal.
+    let toastTimer = null;
+    function showToast(message) {
+      let node = document.getElementById('error-toast');
+      if (!node) {
+        node = document.createElement('div');
+        node.id = 'error-toast';
+        node.style.cssText = 'position:fixed;bottom:4.5em;left:50%;transform:translateX(-50%);'
+          + 'background:#7a1f1f;color:#fff;padding:.5em 1em;border-radius:4px;'
+          + 'font-size:.9em;z-index:1000;box-shadow:0 2px 8px rgba(0,0,0,.35);'
+          + 'transition:opacity .3s;pointer-events:none;max-width:80%;';
+        (document.body || { appendChild() {} }).appendChild(node);
+      }
+      node.textContent = message;
+      node.style.opacity = '1';
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { node.style.opacity = '0'; }, 2600);
+    }
     let wsActionSeq = 0;
     const pendingActions = new Map();
     // Idempotency: each action carries one token shared by its WS frame AND its
@@ -766,7 +785,7 @@
               action.onError();
             }
           }
-          window.alert(payload.message || 'Action failed');
+          showToast(payload.message || 'Action failed');
           return;
         }
         if (payload && payload.type === 'dead') {
@@ -916,7 +935,7 @@
           if (onError) {
             onError();
           }
-          window.alert(error.message);
+          showToast(error.message);
         });
     }
 

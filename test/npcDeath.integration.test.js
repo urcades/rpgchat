@@ -109,13 +109,13 @@ test('Plan 013g: a killing blow DOWNS an NPC (not instant death); a finisher end
     assert.ok(downed, 'still present — downed, not deleted');
     assert.equal(downed.incapacitated, 1);
     assert.equal(downed.health, 0);
-    const lootBefore = await db.prepare("SELECT COUNT(*) AS n FROM items WHERE name = 'Monster Remains'").first();
+    const lootBefore = await db.prepare("SELECT COUNT(*) AS n FROM items WHERE templateId = 'monster_remains'").first();
     assert.equal(lootBefore.n, 0, 'no remains while still clinging on');
 
     // A finishing gib ends them via defeatNpc — loot/remains drop now.
     await game.descendTowardDeath(db, 'soc:thug', { cause: 'attack by slayer', row: room.row, col: room.col, blowDamage: 20, overkill: 20, currentTick: 2 });
     assert.equal(await db.prepare("SELECT username FROM users WHERE username = 'soc:thug'").first(), null, 'truly dead');
-    const remains = await db.prepare("SELECT COUNT(*) AS n FROM items WHERE name = 'Monster Remains'").first();
+    const remains = await db.prepare("SELECT COUNT(*) AS n FROM items WHERE templateId = 'monster_remains'").first();
     assert.ok(remains.n >= 1, 'defeatNpc dropped remains on true death');
   } finally {
     await db.close();

@@ -531,7 +531,7 @@ test('Killing attack messages are shown before defeat and death system messages'
     assert.ok(atkIdx >= 0, 'attack line present');
     assert.ok(defeatIdx >= 0, 'defeat line present');
     assert.ok(atkIdx < defeatIdx, 'attack precedes defeat');
-    assert.ok(lines.some(m => /Ash Scout leaves behind remains\./.test(m)), 'remains dropped');
+    assert.ok(lines.some(m => /Ash Scout's dead body slumps to the floor\./.test(m)), 'remains dropped');
     assert.ok(
       lines.some((m, i) => i < defeatIdx && /Ash Scout (is torn apart|lets out|collapses|shudders|crumples)/.test(m)),
       'a death-throes/gib line precedes the defeat'
@@ -2382,7 +2382,7 @@ test('Plan 005: defeating an NPC drops loot onto the room floor', async () => {
     ).all();
     // Plan 022a: the gear drop (Rusty Knife) PLUS the always-dropped Monster Remains.
     const names = floorItems.results.map(i => i.name).sort();
-    assert.deepEqual(names, ['Monster Remains', 'Rusty Knife']);
+    assert.deepEqual(names, ["Ambient Beast's Dead Body", 'Rusty Knife']);
     for (const item of floorItems.results) {
       assert.equal(item.roomRow, calm.row);
       assert.equal(item.roomCol, calm.col);

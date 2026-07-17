@@ -722,6 +722,13 @@ export async function validateAttackTargets(db, message, row, col, attackerUsern
   });
   const targets = [...new Map(matches.map(target => [target.username, target])).values()];
   if (targets.length === 0) {
+    // The dead can still be struck: a corpse/remains in this room whose name (or
+    // whose owner, via corpseOf) the message names is a valid target — attacks
+    // chip it until it is pulped. Only when NOTHING matches do we refuse.
+    const corpse = await resolveCorpseTarget(db, message, mentioned, row, col);
+    if (corpse) {
+      return [{ corpseItem: corpse }];
+    }
     // A specific @mention that matched no one => that target isn't here; otherwise the
     // player simply named no one.
     if (mentioned.length > 0) {
@@ -730,6 +737,66 @@ export async function validateAttackTargets(db, message, row, col, attackerUsern
     throw new ActionError("Attack needs a target name (the NPC's name, or @self).");
   }
   return targets;
+}
+
+// A corpse/remains item on this room's floor that the attack names — by its
+// item name ("Frost Wyrm's Dead Body", "x's Corpse") or by @mentioning the dead
+// player (matches corpseOf). Bodies remain attackable until pulped.
+const CORPSE_TEMPLATES = ['player_corpse', 'monster_remains', 'rotten_remains', 'bones'];
+// How much abuse each stage of a dead body absorbs before it is pulped.
+const CORPSE_HP_BY_TEMPLATE = { player_corpse: 12, monster_remains: 8, rotten_remains: 5, bones: 3 };
+
+async function resolveCorpseTarget(db, message, mentioned, row, col) {
+  const candidates = await dbAll(
+    db,
+    `SELECT id, templateId, name, modifiers, corpseOf FROM items
+     WHERE roomRow = ? AND roomCol = ?
+       AND templateId IN (${CORPSE_TEMPLATES.map(() => '?').join(',')})
+     ORDER BY id ASC`,
+    [row, col, ...CORPSE_TEMPLATES]
+  );
+  const text = String(message || '').toLowerCase();
+  for (const item of candidates) {
+    if (item.corpseOf && mentioned.includes(String(item.corpseOf).toLowerCase())) {
+      return item;
+    }
+    const name = String(item.name || '').toLowerCase();
+    if (name.length >= 2 && text.includes(name)) {
+      return item;
+    }
+    // The possessive owner alone also matches ("attack Frost Wyrm's dead body"
+    // but also just "attack the frost wyrm" after it died).
+    const owner = /^(.*)'s /.exec(name);
+    if (owner && owner[1].length >= 2 && new RegExp(`(^|[^a-z0-9_-])${escapeRegExp(owner[1])}([^a-z0-9_-]|$)`, 'i').test(text)) {
+      return item;
+    }
+  }
+  return null;
+}
+
+// Mutilation: chip a dead body until it is pulped. Player corpses are the
+// resurrection anchor — pulping one severs that player's tether forever
+// (already canon: "eat or destroy it and the tether snaps").
+async function mutilateCorpse(db, attacker, item, weaponClass, row, col) {
+  const parsed = (() => { try { return JSON.parse(item.modifiers || '{}') || {}; } catch { return {}; } })();
+  const pool = Number.isFinite(parsed.corpseHp) ? parsed.corpseHp : (CORPSE_HP_BY_TEMPLATE[item.templateId] || 6);
+  const damage = 1 + Math.floor((attacker.strength || 1) / 4);
+  const remaining = pool - damage;
+  const edged = weaponClass === 'blade' || weaponClass === 'pierce';
+  const verb = edged ? 'hacks into' : 'batters';
+  const gore = edged ? 'scattering gore' : 'with a wet crunch';
+
+  if (remaining <= 0) {
+    await dbRun(db, 'DELETE FROM items WHERE id = ?', [item.id]);
+    await insertSystemMessage(db, row, col, `${item.name} is pulped beyond recognition.`, 'death');
+    if (item.corpseOf) {
+      await insertSystemMessage(db, row, col, `${item.corpseOf}'s tether to life is destroyed forever.`, 'death');
+    }
+    return `${attacker.username} ${verb} ${item.name}, ${gore} — nothing recognizable remains (${damage})`;
+  }
+  parsed.corpseHp = remaining;
+  await dbRun(db, 'UPDATE items SET modifiers = ? WHERE id = ?', [JSON.stringify(parsed), item.id]);
+  return `${attacker.username} ${verb} ${item.name}, ${gore} (${damage})`;
 }
 
 export async function handleAttack(db, username, message, row, col, options = {}) {
@@ -771,6 +838,12 @@ export async function handleAttack(db, username, message, row, col, options = {}
   const aimedPart = options.targetPart ? parseCalledShot(options.targetPart) : null;
 
   for (const user of targets) {
+    // A dead body on the floor (resolveCorpseTarget): mutilation, not combat —
+    // no contest, no dodge; the corpse just takes it until it is pulped.
+    if (user.corpseItem) {
+      attackMessages.push(await mutilateCorpse(db, attacker, user.corpseItem, attackerWeaponClass, row, col));
+      continue;
+    }
     const target = await getUser(db, user.username, 'Target');
     const targetMods = target.isNpc ? null : await getConditionAndGearModifiers(db, target.username, modifierOptions);
     // Plan 021 (BOLD): called shots now land on a BODIED NPC (creatureBodyPlan set) too —

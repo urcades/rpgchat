@@ -540,8 +540,9 @@ export async function defeatNpc(db, npc, { killer, row, col, currentTick, deferr
   // feeds crafting, far more common than finished gear. Plan 022 (tail): stamp the
   // decay clock so processCorpseDecay can age them fresh → rotten → bones → cull.
   const decayTick = currentTick ?? await getCurrentTickValue(db);
-  await dropItemOnFloor(db, 'monster_remains', row, col, { decayTick });
-  await emitSystemMessage(db, row, col, `${npc.displayName || npc.username} leaves behind remains.`, deferredSystemMessages);
+  const remainsOwner = npc.displayName || npc.username;
+  await dropItemOnFloor(db, 'monster_remains', row, col, { decayTick, name: `${remainsOwner}'s Dead Body` });
+  await emitSystemMessage(db, row, col, `${remainsOwner}'s dead body slumps to the floor.`, deferredSystemMessages);
 
   if (event && ['raid', 'lesser'].includes(event.eventType) && npc.npcKind === 'raid_boss') {
     await awardEventVictory(db, event, row, col, currentTick, { deferredSystemMessages });

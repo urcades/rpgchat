@@ -128,3 +128,46 @@ test('blunt force tears off rather than severing clean', async () => {
     await db.close();
   }
 });
+
+test('the dead can be struck: a corpse is attackable until pulped — and pulping a player corpse snaps the tether', async () => {
+  const db = await createMigratedDb();
+  const game = await import('../worker/game.mjs');
+  try {
+    await seedTough(db, 'desecrator');
+    await game.ensureBody(db, await game.getUser(db, 'desecrator'));
+    await game.updatePresence(db, 'desecrator', 6, 6);
+
+    // A dead player's corpse lies here (the resurrection anchor).
+    await db.prepare(
+      `INSERT INTO items (templateId, name, slotType, rarity, modifiers, roomRow, roomCol, corpseOf)
+       VALUES ('player_corpse', 'fallen_hero''s Corpse', 'corpse', 'common', '{}', 6, 6, 'fallen_hero')`
+    ).run();
+
+    // Attacking the dead by @name resolves the corpse, not a "no such target" error.
+    let lastResult = null;
+    for (let i = 0; i < 20; i += 1) {
+      const corpse = await db.prepare("SELECT id FROM items WHERE corpseOf = 'fallen_hero'").first();
+      if (!corpse) break;
+      lastResult = await game.handleAttack(db, 'desecrator', '@fallen_hero', 6, 6, {});
+    }
+
+    const gone = await db.prepare("SELECT COUNT(*) AS c FROM items WHERE corpseOf = 'fallen_hero'").first();
+    assert.equal(gone.c, 0, 'the corpse was eventually pulped and destroyed');
+    const lines = (await db.prepare(
+      'SELECT message FROM messages WHERE roomRow=6 AND roomCol=6 ORDER BY id ASC'
+    ).all()).results.map(r => r.message);
+    assert.ok(lines.some(l => /pulped beyond recognition/.test(l)), 'pulp call-out');
+    assert.ok(lines.some(l => /fallen_hero's tether to life is destroyed forever/.test(l)), 'tether snap call-out');
+    assert.ok(String(lastResult).length > 0, 'the mutilation swing produced attack prose');
+
+    // Named monster remains resolve by their possessive owner too.
+    await db.prepare(
+      `INSERT INTO items (templateId, name, slotType, rarity, modifiers, roomRow, roomCol)
+       VALUES ('monster_remains', 'Frost Wyrm''s Dead Body', 'part', 'common', '{}', 6, 6)`
+    ).run();
+    const swing = await game.handleAttack(db, 'desecrator', 'attack the frost wyrm', 6, 6, {});
+    assert.match(String(swing), /Frost Wyrm's Dead Body/, 'the dead wyrm takes the blow');
+  } finally {
+    await db.close();
+  }
+});

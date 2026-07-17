@@ -1138,15 +1138,21 @@ export async function processCorpseDecay(db, tickValue = null) {
       writes.push(['DELETE FROM items WHERE id = ?', [item.id]]);
       continue;
     }
+    // Decay keeps the possessive — a named dead body stays identifiable as it
+    // rots ("Frost Wyrm's Dead Body" -> "Frost Wyrm's Rotting Remains" ->
+    // "Frost Wyrm's Bones"); an unnamed one falls back to the generic label.
+    const owner = /^(.*)'s (Dead Body|Rotting Remains|Bones)$/.exec(item.name || '');
     if (age >= CORPSE_FRESH_TICKS + CORPSE_ROTTEN_TICKS) {
       if (item.templateId !== 'bones') {
-        writes.push(["UPDATE items SET templateId = 'bones', name = 'Bones' WHERE id = ?", [item.id]]);
+        const bonesName = owner ? `${owner[1]}'s Bones` : 'Bones';
+        writes.push(["UPDATE items SET templateId = 'bones', name = ? WHERE id = ?", [bonesName, item.id]]);
       }
       continue;
     }
     // FRESH..(FRESH+ROTTEN): rotten.
     if (item.templateId !== 'rotten_remains') {
-      writes.push(["UPDATE items SET templateId = 'rotten_remains', name = 'Rotten Remains' WHERE id = ?", [item.id]]);
+      const rottenName = owner ? `${owner[1]}'s Rotting Remains` : 'Rotten Remains';
+      writes.push(["UPDATE items SET templateId = 'rotten_remains', name = ? WHERE id = ?", [rottenName, item.id]]);
     }
   }
   if (writes.length > 0) {

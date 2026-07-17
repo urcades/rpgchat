@@ -452,7 +452,9 @@ test('an action-error frame restores the input and rolls back the echo', async (
   await flushPromises();
 
   assert.equal(messageInput.value, 'doomed line', 'input restored for retry');
-  assert.ok(page.alerts.includes('Not enough stamina.'), 'error surfaced');
+  // Errors now surface as a non-blocking toast, never a modal alert.
+  assert.equal(page.alerts.length, 0, 'no blocking alert');
+  assert.equal(page.getElement('error-toast').textContent, 'Not enough stamina.', 'error surfaced as a toast');
 });
 
 test('a self-describing message frame appends rows with no fetch at all', async () => {
