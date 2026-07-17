@@ -46,7 +46,33 @@ const SELF_DOWNED = ['stops struggling and lets the last blow fall', 'gives up a
 const SELF_MISS = ['swings at themselves and misses', 'flails and misses their own mark', "can't quite land a blow on themselves", 'pulls the strike at the last instant'];
 function pick(arr, random) { return arr[Math.floor(random() * arr.length)] || arr[0]; }
 function tierOf(damage, isCritical) { if (isCritical || damage >= 6) return 'brutal'; if (damage >= 3) return 'solid'; return 'light'; }
-function describeAttack({ attacker, target, weaponClass = 'fist', weaponId = null, part = null, damage = 0, isCritical = false, targetDowned = false, self = false } = {}, random = Math.random) {
+
+// Tissue-layer wound phrases (engine-overhaul, after paperdoll-viewer's DF-style
+// layers). The layer is DERIVED from the struck part's remaining hp ratio —
+// a fresh part takes skin wounds, a worn-down part exposes muscle, a ruined one
+// bone — so the same blow reads deeper as the fight goes on. Edged weapons cut
+// (and draw blood); blunt force bruises and cracks.
+const LAYER_PHRASES = {
+  edged: {
+    skin: ['opening the skin', 'splitting the skin', 'laying the flesh open'],
+    muscle: ['carving into the muscle', 'cutting deep into the meat', 'opening a red mouth of muscle'],
+    bone: ['grating against bone', 'biting into the bone', 'chipping bone']
+  },
+  blunt: {
+    skin: ['bruising the flesh', 'raising an ugly welt'],
+    muscle: ['pulping the muscle beneath', 'mashing the meat'],
+    bone: ['cracking the bone', 'fracturing bone with a wet snap']
+  }
+};
+function layerFamily(weaponClass) {
+  return weaponClass === 'blade' || weaponClass === 'pierce' ? 'edged' : 'blunt';
+}
+function layerPhrase(weaponClass, layer, random = Math.random) {
+  const pool = LAYER_PHRASES[layerFamily(weaponClass)][layer];
+  return pool ? pick(pool, random) : null;
+}
+
+function describeAttack({ attacker, target, weaponClass = 'fist', weaponId = null, part = null, damage = 0, isCritical = false, targetDowned = false, self = false, layer = null } = {}, random = Math.random) {
   const klass = VERBS[weaponClass] ? weaponClass : 'fist';
   const nouns = part && PART_NOUNS[part];
   const pn = nouns ? pick(nouns, random) : null;
@@ -67,12 +93,17 @@ function describeAttack({ attacker, target, weaponClass = 'fist', weaponId = nul
   const verbPool = (weaponId && SIGNATURE[weaponId]) ? SIGNATURE[weaponId] : VERBS[klass][tierOf(damage, isCritical)];
   const verb = pick(verbPool, random);
   const where = pn ? ` ${target}'s ${pn}` : ` ${target}`;
+  // Layer phrase (only when the caller derived one and a part was struck):
+  // ", carving into the muscle" rides between the location and the damage.
+  const depth = layer && pn ? layerPhrase(klass, layer, random) : null;
+  const wound = depth ? `, ${depth},` : '';
   const bang = (isCritical || damage >= 6) ? '!' : '';
-  return `${attacker} ${verb}${where} ${dmg}${bang}`;
+  return `${attacker} ${verb}${where}${wound} ${dmg}${bang}`;
 }
 // A self-targeted attack that misses — deadpan, reflexive. (The non-self dodge line
 // stays "X dodged Y's attack"; only the self case routes here.)
 function describeSelfMiss(attacker, random = Math.random) {
   return `${attacker} ${pick(SELF_MISS, random)}`;
 }
-module.exports = { describeAttack, describeSelfMiss, PART_NOUNS, VERBS, EXECUTION };
+module.exports = {
+  layerPhrase, describeAttack, describeSelfMiss, PART_NOUNS, VERBS, EXECUTION };

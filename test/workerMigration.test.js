@@ -904,7 +904,12 @@ test('Worker missed attacks do not consume mark or ward until a later hit', asyn
     const afterHit = await db.prepare(
       "SELECT effectType FROM statusEffects WHERE username = 'target' ORDER BY effectType"
     ).all();
-    assert.deepEqual(afterHit.results, []);
+    // mark + ward are consumed by the landed hit. The blow may ALSO have opened
+    // a wound (layered-combat bleed rides the same table) — assert the
+    // consumption, not table emptiness.
+    const kinds = afterHit.results.map(effect => effect.effectType);
+    assert.ok(!kinds.includes('marked'), 'mark consumed by the hit');
+    assert.ok(!kinds.includes('ward'), 'ward consumed by the hit');
   } finally {
     await db.close();
   }

@@ -471,6 +471,8 @@ export async function runHostileRoomAction(db, row, col) {
     target: player.username,
     weaponClass: 'fist',
     part: damageResult.struckLabel,
+      layer: damageResult.struckLayer,
+    layer: damageResult.struckLayer,
     damage,
     isCritical: isCriticalAttack,
     targetDowned: Boolean(player.incapacitated)
@@ -827,6 +829,7 @@ export async function handleAttack(db, username, message, row, col, options = {}
       row,
       col,
       weaponClass: attackerWeaponClass, // edged severs clean at the joint; blunt tears off
+      attackerUsername: username, // bleed attribution ("blood loss from X's blade")
       targetLabel: calledShot,
       // Plan 021: a bodied NPC's wound/sever lines read by its display name
       // ("Frost Wyrm's left wing is destroyed"). Players have no displayName, so this

@@ -214,7 +214,7 @@ export const SPEED_HIT_MAX_CHANCE = 0.95;
 export const REGROW_GOLD_COST = 25;
 export const REGROW_STAMINA_COST = 20;
 export const REGROW_EFFECT_TYPE = 'regrow';
-export const HARMFUL_EFFECTS = new Set(['poison', 'arcane_pin', 'marked']);
+export const HARMFUL_EFFECTS = new Set(['poison', 'arcane_pin', 'marked', 'bleed']);
 export const AMBIENT_HOSTILE_RESPAWN_INTERVAL = 6;
 export const NPC_VOICE_INTERVAL = 1; // Plan 013e: near-immediate replies — NPCs answer almost every line
 // Campaign B (013 tail): proactive ambient murmurs are owner-locked to OBSERVE+THROTTLE

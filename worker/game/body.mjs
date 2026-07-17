@@ -374,6 +374,16 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
   }
   const targetWorking = target ? workingByLabel.get(target.label) : null;
 
+  // Tissue layer (DF-style, after paperdoll-viewer's Combatant): derived from
+  // the struck part's PRE-damage hp ratio — a fresh part takes skin wounds, a
+  // worn one exposes muscle, a ruined one bone. Feeds the attack flavor and
+  // decides whether an edged wound BLEEDS.
+  let struckLayer = null;
+  if (targetWorking && targetWorking.maxHp > 0) {
+    const ratio = Math.max(0, targetWorking.hp) / targetWorking.maxHp;
+    struckLayer = ratio > 0.66 ? 'skin' : ratio > 0.33 ? 'muscle' : 'bone';
+  }
+
   let totalDealt = 0;
   if (targetWorking && remaining > 0) {
     const dealt = Math.min(remaining, targetWorking.hp);
@@ -551,12 +561,41 @@ export async function applyBodyDamage(db, user, amount, options = {}) {
   }
 
   const died = vitalDestroyed || healthAfter <= 0;
+
+  // Native BLEED (tick-oriented, rides the existing statusEffects sweep):
+  //   - a sever pours from the stump: bleed 2 for 10 ticks
+  //   - an edged wound past the skin (muscle/bone layer) weeps: bleed 1 for 6
+  //   - blunt force bruises and cracks but does not open veins
+  // Bleeds STACK (three deep cuts bleed three times as fast — brutal, cleansed
+  // by antidotes/tonics via HARMFUL_EFFECTS or by falling: incap clears them).
+  const edgedBlow = options.weaponClass === 'blade' || options.weaponClass === 'pierce';
+  const primarySever = severedParts.some(part => !part.cascadedFrom);
+  const bleedMagnitude = primarySever ? 2 : (edgedBlow && !died && (struckLayer === 'muscle' || struckLayer === 'bone') ? 1 : 0);
+  if (bleedMagnitude > 0 && !died && row !== undefined && row !== null && col !== undefined && col !== null) {
+    const bleedTick = await getCurrentTickValue(db);
+    await addStatusEffect(db, {
+      username: user.username,
+      source: options.attackerUsername || 'wound',
+      effectType: 'bleed',
+      magnitude: bleedMagnitude,
+      currentTick: bleedTick,
+      duration: primarySever ? 10 : 6,
+      row,
+      col
+    });
+    const bleedLine = primarySever
+      ? `Blood sprays from ${displayLabel}'s stump.`
+      : `Blood wells from the wound in ${displayLabel}'s ${target ? target.label : 'flesh'}.`;
+    await insertSystemMessage(db, row, col, bleedLine, 'combat');
+  }
+
   // Plan 023b: `remaining` is damage that found no HP to land on — the overkill that
   // separates a barely-lethal blow (incapacitate) from an obliterating one (gib).
   // `struckLabel` is the label of the part the blow actually landed on (the honored
   // aimed part, or the weighted-random pickTargetPart choice) — purely informational,
-  // for flavor lines; null when there was no live part to hit.
-  return { died, npc: false, healthAfter, severedLabels, overkill: Math.max(0, remaining), struckLabel: target ? target.label : null };
+  // for flavor lines; null when there was no live part to hit. `struckLayer` is the
+  // tissue depth the blow found (skin/muscle/bone), for layer-aware flavor.
+  return { died, npc: false, healthAfter, severedLabels, overkill: Math.max(0, remaining), struckLabel: target ? target.label : null, struckLayer };
 }
 
 export async function applyBodyHeal(db, user, amount, options = {}) {
@@ -743,7 +782,7 @@ export async function processStatusEffects(db, currentTick) {
      JOIN users u ON u.username = se.username
      WHERE se.expiryTick > ?
        AND se.createdTick < ?
-       AND se.effectType IN ('poison', 'arcane_pin', 'bless', 'burn', 'shock')
+       AND se.effectType IN ('poison', 'arcane_pin', 'bless', 'burn', 'shock', 'bleed')
      ORDER BY se.id ASC`,
     [currentTick, currentTick]
   );
@@ -756,7 +795,13 @@ export async function processStatusEffects(db, currentTick) {
     if (diedThisSweep.has(effect.username)) {
       continue;
     }
-    if (effect.effectType === 'poison') {
+    if (effect.effectType === 'bleed') {
+      const cause = effect.sourceUsername && effect.sourceUsername !== 'wound' ? `blood loss from ${effect.sourceUsername}'s blade` : 'blood loss';
+      const outcome = await damageUser(db, effect.username, effect.magnitude || 1, cause, effect.roomRow, effect.roomCol);
+      if (outcome.killed) {
+        diedThisSweep.add(effect.username);
+      }
+    } else if (effect.effectType === 'poison') {
       const cause = effect.sourceUsername ? `dose by ${effect.sourceUsername}` : 'poison';
       const outcome = await damageUser(db, effect.username, effect.magnitude || 1, cause, effect.roomRow, effect.roomCol);
       if (outcome.killed) {
