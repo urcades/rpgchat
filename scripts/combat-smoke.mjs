@@ -163,8 +163,10 @@ async function main() {
   // 7. Assertions — core combat invariants, tolerant to RNG (dodges, spill).
   note(`landed ${landed}/${attempts} swings`);
   check('attacker dealt at least one hit', landed > 0);
-  check('victim total health dropped', after.effectiveStats.health < before.effectiveStats.health,
-    `${before.effectiveStats.health} → ${after.effectiveStats.health}`);
+  // Death is the ultimate health drop: with layered wounds + bleed the victim
+  // can die before the periodic mid-fight read ever samples a lower value.
+  check('victim total health dropped', victimDead || after.effectiveStats.health < before.effectiveStats.health,
+    victimDead ? 'victim died mid-fight' : `${before.effectiveStats.health} → ${after.effectiveStats.health}`);
   check(`aimed ${AIM} took damage (called shot routed)`,
     severed || (armAfter && armAfter.condition !== 'healthy') || victimDead,
     `${armBefore?.condition} → ${armAfter?.condition}${severed ? ' (severed)' : ''}`);
