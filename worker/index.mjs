@@ -599,7 +599,8 @@ app.get('/cemetery-data', async c => {
              WHERE kh.defeatedUsername = cm.username AND kh.defeatedKind = 'player'
              ORDER BY kh.id DESC LIMIT 1) AS slayer
      FROM cemetery cm
-     ORDER BY cm.diedAt DESC, cm.id DESC`
+     ORDER BY cm.diedAt DESC, cm.id DESC
+     LIMIT 200`
   );
   return c.json(players);
 });
