@@ -1197,7 +1197,14 @@ export class RoomObject extends DurableObject {
       try {
         const result = await runNpcReply(this.env.DB, this.env.AI, row, col);
         if (result.spoke) {
-          await this.broadcast({ type: 'message', room: { row, col }, username: result.npc });
+          // Self-describing (adv DUR-05): the row rides along so clients append
+          // it directly — no follow-up fetch that a lagging read replica could miss.
+          await this.broadcast({
+            type: 'message',
+            room: { row, col },
+            username: result.npc,
+            ...(result.messageRow ? { messages: [result.messageRow] } : {})
+          });
         }
         // Plan 013c: hostile speech can flip the room's NPCs — wake the combat loop so
         // they actually come for the player.
@@ -1332,7 +1339,12 @@ export class RoomObject extends DurableObject {
         if (broadcastType === 'message') {
           const reply = await runNpcReply(db, this.env.AI, row, col);
           if (reply.spoke) {
-            await this.broadcast({ type: 'message', room: { row, col }, username: reply.npc });
+            await this.broadcast({
+              type: 'message',
+              room: { row, col },
+              username: reply.npc,
+              ...(reply.messageRow ? { messages: [reply.messageRow] } : {})
+            });
           }
           if (reply.provoked > 0) {
             await this.ctx.storage.put('hostileRoom', { row, col });
@@ -1406,7 +1418,12 @@ export class RoomObject extends DurableObject {
       await guard('alarm.ambient.error', async () => {
         const ambient = await runNpcAmbient(this.env.DB, this.env.AI, room.row, room.col);
         if (ambient.spoke) {
-          await this.broadcast({ type: 'message', room, username: ambient.npc });
+          await this.broadcast({
+            type: 'message',
+            room,
+            username: ambient.npc,
+            ...(ambient.messageRow ? { messages: [ambient.messageRow] } : {})
+          });
         }
       }, { fields });
     }

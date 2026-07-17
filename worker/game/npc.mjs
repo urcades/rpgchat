@@ -192,7 +192,20 @@ export async function runNpcReply(db, ai, row, col) {
     return { spoke: false, provoked };
   }
 
-  await insertMessage(db, row, col, speaker.username, response.speech, 'npc');
+  // adv DUR-05: keep the inserted row so the broadcast can be self-describing —
+  // clients append it directly instead of a follow-up /messages fetch (which,
+  // once D1 read replication is on, could hit a lagging replica and miss it).
+  const inserted = await insertMessage(db, row, col, speaker.username, response.speech, 'npc');
+  const messageRow = {
+    id: inserted.id,
+    username: speaker.username,
+    message: response.speech,
+    timestamp: inserted.timestamp,
+    kind: 'npc',
+    job: speaker.job || null,
+    displayName: speaker.displayName || null,
+    statusEffects: []
+  };
   await upsertCooldown(db, '__npc_voice', row, col, 'npc_voice', currentTick, worldDay);
 
   // Model-detected hostility (subtler than the keyword floor — aggressive "rizz", veiled
@@ -234,7 +247,7 @@ export async function runNpcReply(db, ai, row, col) {
     }
   }
 
-  return { spoke: true, npc: speaker.username, speech: response.speech, intent: response.intent, request: response.request, source: response.source, provoked, helped };
+  return { spoke: true, npc: speaker.username, speech: response.speech, intent: response.intent, request: response.request, source: response.source, provoked, helped, messageRow };
 }
 
 // Plan 013f: a proactive ambient murmur — NPCs talking among themselves so a room feels
@@ -287,12 +300,27 @@ export async function runNpcAmbient(db, ai, row, col) {
   if (!response.speech) {
     return { spoke: false };
   }
-  await insertMessage(db, row, col, speaker.username, response.speech, 'npc');
+  const inserted = await insertMessage(db, row, col, speaker.username, response.speech, 'npc');
   // Stamp the cooldown only after a murmur actually lands (mirrors the reply path), so a
   // generation that yielded nothing doesn't burn the room's ambient window.
   await upsertCooldown(db, '__npc_ambient', row, col, 'npc_ambient', currentTick, worldDay);
   // `billed`: true only when the line came from a real (billed) inference, false on a
   // fallback — the cost signal the owner watches.
   logEvent({ event: 'npc.ambient', roomRow: row, roomCol: col, npc: speaker.username, source: response.source, billed: response.source === 'model' });
-  return { spoke: true, npc: speaker.username, speech: response.speech };
+  return {
+    spoke: true,
+    npc: speaker.username,
+    speech: response.speech,
+    // adv DUR-05: self-describing broadcast row (see runNpcReply).
+    messageRow: {
+      id: inserted.id,
+      username: speaker.username,
+      message: response.speech,
+      timestamp: inserted.timestamp,
+      kind: 'npc',
+      job: speaker.job || null,
+      displayName: speaker.displayName || null,
+      statusEffects: []
+    }
+  };
 }

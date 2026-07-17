@@ -62,6 +62,12 @@ test('Plan 013a: an NPC answers a human and the line is stored as kind=npc by th
     const result = await runNpcReply(db, STUB_AI, room.row, room.col);
     assert.equal(result.spoke, true);
     assert.equal(result.npc, 'npc_grix_1');
+    // adv DUR-05: the reply carries its own broadcast-ready row (id + kind +
+    // displayName), so the DO can send a self-describing frame — no client fetch.
+    assert.ok(result.messageRow && result.messageRow.id > 0, 'a formed message row rides along');
+    assert.equal(result.messageRow.kind, 'npc');
+    assert.equal(result.messageRow.username, 'npc_grix_1');
+    assert.ok(result.messageRow.displayName, 'displayName present for client rendering');
 
     const messages = await getMessages(db, room.row, room.col);
     const last = messages[messages.length - 1];
